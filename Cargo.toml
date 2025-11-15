@@ -1,0 +1,10 @@
+[package]
+name = "aoc-bench"
+authors = ["Ethan Jones <ictrobot@outlook.com>"]
+edition = "2024"
+license = "MIT"
+publish = false
+repository = "https://github.com/ictrobot/aoc-rs"
+rust-version = "1.91.0"
+
+[dependencies]
