@@ -28,29 +28,29 @@
 - [x] Integrate protocol parser and stats engine
 - [x] Test with a mock benchmark command
 
-## Phase 2: Statistics and Robustness
+## Phase 2: Statistics and Robustness ✅
 
 ### 2.1 Bootstrap Confidence Intervals
-- [ ] Implement bootstrap resampling (with replacement)
-- [ ] Implement percentile CI calculation (2.5th, 97.5th)
-- [ ] Add quick bootstrap (1000 samples) for stopping checks
-- [ ] Add final bootstrap (10000 samples) after stopping
-- [ ] Implement relative half-width calculation
-- [ ] Add stopping condition (target CI width or max samples/timeout)
+- [x] Implement bootstrap resampling (with replacement)
+- [x] Implement percentile CI calculation (2.5th, 97.5th)
+- [x] Add quick bootstrap (1000 samples) for stopping checks
+- [x] Add final bootstrap (10000 samples) after stopping
+- [x] Implement relative half-width calculation
+- [x] Add stopping condition (target CI width or max samples/timeout)
 
 ### 2.2 Outlier Detection
-- [ ] Implement residual calculation (regression mode: T - (α + β·N), per-iter: T/N)
-- [ ] Implement IQR-based outlier detection
-- [ ] Add outlier counting and fraction calculation
-- [ ] Implement run abort on excessive outliers (>5%)
-- [ ] Add tests for outlier detection with synthetic data
+- [x] Implement residual calculation (regression mode: T - (α + β·N), per-iter: T/N)
+- [x] Implement IQR-based outlier detection
+- [x] Add outlier counting and fraction calculation
+- [x] Implement run abort on excessive outliers (>5%)
+- [x] Add tests for outlier detection with synthetic data
 
 ### 2.3 Warmup and Sampling Logic
-- [ ] Implement warmup (skip first 16 samples)
-- [ ] Implement MIN_SAMPLES check (32)
-- [ ] Implement CHECK_EVERY interval (32)
-- [ ] Integrate CI check and outlier check at intervals
-- [ ] Add tests for stopping conditions
+- [x] Implement warmup (skip first 16 samples)
+- [x] Implement MIN_SAMPLES check (32)
+- [x] Implement CHECK_EVERY interval (32)
+- [x] Integrate CI check and outlier check at intervals
+- [x] Add tests for stopping conditions
 
 ## Phase 3: Run Series
 

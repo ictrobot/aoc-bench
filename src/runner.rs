@@ -3,46 +3,16 @@
 use crate::protocol::{
     parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
 };
-use crate::stats::{EstimationMode, StatsAccumulator};
+use crate::stats::{StatsAccumulator, StatsError, StatsResult, StatsState};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const TIMEOUT_SECS: u64 = 120; // 2 minutes
 
-#[derive(Debug)]
-pub enum RunError {
-    SpawnFailed(std::io::Error),
-    ProcessCrashed(Option<i32>),
-    Timeout,
-    ParseError(ParseError),
-    PrematureEof,
-    InvalidChecksum(ParseError),
-}
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::SpawnFailed(e) => write!(f, "Failed to spawn process: {e}"),
-            RunError::ProcessCrashed(code) => {
-                write!(f, "Process crashed with exit code: {code:?}")
-            }
-            RunError::Timeout => write!(f, "Process timed out after {TIMEOUT_SECS} seconds"),
-            RunError::ParseError(e) => write!(f, "Failed to parse protocol line: {e}"),
-            RunError::PrematureEof => write!(f, "Process ended prematurely"),
-            RunError::InvalidChecksum(e) => write!(f, "Checksum validation failed: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for RunError {}
-
-#[derive(Debug, Clone)]
 pub struct RunResult {
-    pub mean_ns_per_iter: f64,
-    pub mode: EstimationMode,
-    pub intercept_ns: Option<f64>,
-    pub sample_count: usize,
+    timestamp: Instant,
+    stats: StatsResult,
 }
 
 pub struct Runner {
@@ -83,20 +53,23 @@ impl Runner {
         let mut child = self.spawn_child()?;
 
         // Collect samples from stdout
-        let mut stats = StatsAccumulator::new();
+        let mut stats = StatsAccumulator::default();
         let start_time = Instant::now();
 
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
 
-        for line in reader.lines() {
+        loop {
             // Check timeout
             if start_time.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
                 let _ = child.kill();
                 return Err(RunError::Timeout);
             }
 
-            let line = line.map_err(|_| RunError::PrematureEof)?;
+            let Some(Ok(line)) = lines.next() else {
+                return Err(RunError::PrematureEof);
+            };
             let line = line.trim();
 
             if line.is_empty() {
@@ -122,7 +95,14 @@ impl Runner {
                     }
 
                     // Add sample to accumulator
-                    stats.add_sample(sample.iters, sample.total_ns);
+                    match stats.add_sample(sample.iters, sample.total_ns) {
+                        StatsState::MoreSamplesNeeded => {}
+                        StatsState::Abort(err) => {
+                            let _ = child.kill();
+                            return Err(RunError::StatsFailed(err));
+                        }
+                        StatsState::Done => break,
+                    }
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to parse line: {line} - {e}");
@@ -131,32 +111,11 @@ impl Runner {
             }
         }
 
-        // Wait for process to finish
-        let status = child.wait().map_err(|_| RunError::PrematureEof)?;
-
-        if !status.success() {
-            return Err(RunError::ProcessCrashed(status.code()));
-        }
-
-        // Check that we got some samples
-        if stats.sample_count() == 0 {
-            return Err(RunError::PrematureEof);
-        }
-
-        // Compute results
-        let mode = stats.detect_mode();
-        let mean_ns_per_iter = stats.point_estimate(mode);
-        let intercept_ns = if mode == EstimationMode::Regression {
-            Some(stats.compute_wls().intercept)
-        } else {
-            None
-        };
+        let _ = child.kill();
 
         Ok(RunResult {
-            mean_ns_per_iter,
-            mode,
-            intercept_ns,
-            sample_count: stats.sample_count(),
+            timestamp: start_time,
+            stats: stats.finish(),
         })
     }
 
@@ -174,15 +133,45 @@ impl Runner {
     }
 }
 
+#[derive(Debug)]
+pub enum RunError {
+    SpawnFailed(std::io::Error),
+    ProcessCrashed(Option<i32>),
+    Timeout,
+    ParseError(ParseError),
+    PrematureEof,
+    InvalidChecksum(ParseError),
+    StatsFailed(StatsError),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::SpawnFailed(e) => write!(f, "Failed to spawn process: {e}"),
+            RunError::ProcessCrashed(code) => {
+                write!(f, "Process crashed with exit code: {code:?}")
+            }
+            RunError::Timeout => write!(f, "Process timed out after {TIMEOUT_SECS} seconds"),
+            RunError::ParseError(e) => write!(f, "Failed to parse protocol line: {e}"),
+            RunError::PrematureEof => write!(f, "Process ended prematurely"),
+            RunError::InvalidChecksum(e) => write!(f, "Checksum validation failed: {e}"),
+            RunError::StatsFailed(err) => write!(f, "Statistics collection failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::Sample;
 
     #[test]
     fn test_runner_with_echo() {
-        // Create a simple test that uses echo to simulate benchmark output
+        // Create a simple test that uses yes to simulate benchmark output
         // This is a basic sanity test; more complex tests would use a mock binary
-        let runner = Runner::new("echo".to_string()).with_args(vec![
+        let runner = Runner::new("yes".to_string()).with_args(vec![
             "SAMPLE".to_string(),
             "1000".to_string(),
             "50000".to_string(),
@@ -192,7 +181,14 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.sample_count, 1);
-        assert!((result.mean_ns_per_iter - 50.0).abs() < 0.1);
+        assert!(!result.stats.samples.is_empty());
+        assert!(result.stats.samples.iter().all(|s| matches!(
+            s,
+            Sample {
+                iters: 1000,
+                total_ns: 50000
+            }
+        )));
+        assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
     }
 }

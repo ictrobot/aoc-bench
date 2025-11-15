@@ -265,7 +265,7 @@ mod tests {
             ProtocolLine::Meta(meta) => {
                 assert_eq!(meta.fields.get("version"), Some(&"1".to_string()));
             }
-            _ => panic!("Expected Meta line"),
+            ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }
     }
 
@@ -280,7 +280,7 @@ mod tests {
                 assert_eq!(meta.fields.get("foo"), Some(&"bar".to_string()));
                 assert_eq!(meta.fields.get("baz"), Some(&"qux".to_string()));
             }
-            _ => panic!("Expected Meta line"),
+            ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }
     }
 
@@ -295,7 +295,7 @@ mod tests {
                 assert_eq!(sample.total_ns, 30_920_000_000);
                 assert_eq!(sample.checksum, None);
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -310,7 +310,7 @@ mod tests {
                 assert_eq!(sample.total_ns, 30_920_000_000);
                 assert_eq!(sample.checksum, Some("8f024a8e".to_string()));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -326,7 +326,7 @@ mod tests {
                 assert_eq!(sample.checksum, Some("8f024a8e".to_string()));
                 assert_eq!(sample.fields.get("foo"), Some(&"bar".to_string()));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -367,7 +367,7 @@ mod tests {
             ProtocolLine::Sample(sample) => {
                 assert!(validate_checksum(&sample, "8f024a8e").is_ok());
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -385,7 +385,7 @@ mod tests {
                     ParseError::ChecksumMismatch { .. }
                 ));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -404,7 +404,7 @@ mod tests {
                     ParseError::ChecksumMismatch { .. }
                 ));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -464,7 +464,7 @@ mod tests {
                 assert_eq!(sample.iters, u64::MAX);
                 assert_eq!(sample.total_ns, u64::MAX);
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -499,7 +499,7 @@ mod tests {
             ProtocolLine::Meta(meta) => {
                 assert!(validate_meta_version(&meta).is_ok());
             }
-            _ => panic!("Expected Meta line"),
+            ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }
     }
 
@@ -513,7 +513,7 @@ mod tests {
                 // No version field is OK
                 assert!(validate_meta_version(&meta).is_ok());
             }
-            _ => panic!("Expected Meta line"),
+            ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }
     }
 
@@ -528,7 +528,7 @@ mod tests {
                 assert!(result.is_err());
                 assert!(matches!(result.unwrap_err(), ParseError::InvalidFormat(_)));
             }
-            _ => panic!("Expected Meta line"),
+            ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }
     }
 
@@ -541,7 +541,7 @@ mod tests {
             ProtocolLine::Meta(meta) => {
                 assert!(validate_meta_version(&meta).is_ok());
             }
-            _ => panic!("Expected Meta line"),
+            ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }
     }
 
@@ -574,7 +574,7 @@ mod tests {
                     Some(&"hello world".to_string())
                 );
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -596,7 +596,7 @@ mod tests {
             ProtocolLine::Sample(sample) => {
                 assert_eq!(sample.checksum, Some("abc-123_def".to_string()));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -610,7 +610,7 @@ mod tests {
             ProtocolLine::Sample(sample) => {
                 assert_eq!(sample.fields.get("msg"), Some(&"<test>&\"".to_string()));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -624,7 +624,7 @@ mod tests {
             ProtocolLine::Sample(sample) => {
                 assert_eq!(sample.fields.get("msg"), Some(&"ABC".to_string()));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
@@ -638,7 +638,7 @@ mod tests {
             ProtocolLine::Sample(sample) => {
                 assert_eq!(sample.fields.get("msg"), Some(&"a=b,c".to_string()));
             }
-            _ => panic!("Expected Sample line"),
+            ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
     }
 
