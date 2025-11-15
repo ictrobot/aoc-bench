@@ -60,7 +60,7 @@ pub struct Runner {
     args: Vec<String>,
     working_dir: Option<String>,
     expected_checksum: Option<String>,
-    stdin_input: Option<String>,
+    stdin_input: Option<Vec<u8>>,
 }
 
 impl Runner {
@@ -89,7 +89,7 @@ impl Runner {
         self
     }
 
-    pub fn with_stdin_input(mut self, input: String) -> Self {
+    pub fn with_stdin_input(mut self, input: Vec<u8>) -> Self {
         self.stdin_input = Some(input);
         self
     }
@@ -265,7 +265,7 @@ impl Runner {
                 RunError::SpawnFailed(io::Error::other("failed to capture stdin pipe"))
             })?;
             std::thread::spawn(move || {
-                let _ = stdin.write_all(input.as_bytes());
+                let _ = stdin.write_all(&input);
                 // stdin is dropped here, closing the pipe
             });
         }
@@ -377,7 +377,7 @@ mod tests {
         assert!(matches!(result, Err(RunError::PrematureEof)));
 
         let result = runner
-            .with_stdin_input("SAMPLE\t1000\t50000\n".to_string().repeat(100))
+            .with_stdin_input("SAMPLE\t1000\t50000\n".to_string().repeat(100).into_bytes())
             .run_single();
         let result = result.unwrap();
         assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);

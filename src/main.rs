@@ -64,9 +64,9 @@ fn main() {
             let mut runner = runner::Runner::new(cmd.clone()).with_args(args);
 
             if let Some(input_path) = input {
-                match std::fs::read_to_string(&input_path) {
-                    Ok(input_str) => {
-                        runner = runner.with_stdin_input(input_str);
+                match std::fs::read(&input_path) {
+                    Ok(input_bytes) => {
+                        runner = runner.with_stdin_input(input_bytes);
                     }
                     Err(e) => {
                         eprintln!("Error reading input file {:?}: {}", input_path, e);
