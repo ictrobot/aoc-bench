@@ -334,11 +334,8 @@ mod tests {
     fn test_runner_with_yes() {
         // Create a simple test that uses yes to simulate benchmark output
         // This is a basic sanity test; more complex tests would use a mock binary
-        let runner = Runner::new("yes".to_string()).with_args(vec![
-            "SAMPLE".to_string(),
-            "1000".to_string(),
-            "50000".to_string(),
-        ]);
+        let runner =
+            Runner::new("yes".to_string()).with_args(vec!["SAMPLE\t1000\t50000".to_string()]);
 
         let result = runner.run_single();
         assert!(result.is_ok());
@@ -380,7 +377,7 @@ mod tests {
         assert!(matches!(result, Err(RunError::PrematureEof)));
 
         let result = runner
-            .with_stdin_input("SAMPLE 1000 50000\n".to_string().repeat(100))
+            .with_stdin_input("SAMPLE\t1000\t50000\n".to_string().repeat(100))
             .run_single();
         let result = result.unwrap();
         assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);

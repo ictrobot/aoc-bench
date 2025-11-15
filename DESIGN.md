@@ -356,9 +356,9 @@ All config keys used in the command template must be present in the config.
 The benchmark process writes lines to stdout:
 
 ```text
-META version=1
-SAMPLE <iters> <total_ns> checksum=<hex>
-SAMPLE <iters> <total_ns> checksum=<hex>
+META	version=1
+SAMPLE	<iters>	<total_ns>	checksum=<hex>
+SAMPLE	<iters>	<total_ns>	checksum=<hex>
 ...
 ```
 
@@ -367,10 +367,11 @@ Where:
 * `iters`: number of iterations in the sample.
 * `total_ns`: integer wall-clock nanoseconds for that sample.
 
-Each line may end in one or more comma-separated percent-encoded key=value pairs. These may contain arbitrary data.
+Fields on each line are **tab-separated**.
 
-`[a-zA-Z0-9_.~-]` are safe characters and do not need to be encoded. All other characters (including spaces, commas,
-equals signs, and non-ASCII characters) must be percent-encoded (e.g. space as %20).
+Each line may end in one or more comma-separated percent-encoded key=value pairs. These may contain arbitrary data.
+`[a-zA-Z0-9_.~-]` are safe characters and do not need to be encoded. All other characters (including spaces, tabs,
+commas, equals signs, and non-ASCII characters) must be percent-encoded (e.g. space as %20) inside KV pairs.
 
 The following keys are defined by the spec:
 
@@ -380,6 +381,18 @@ The following keys are defined by the spec:
     - `checksum`: optional deterministic checksum of output. Must be present if configured in the benchmark's config.
 
 `META` lines are optional
+
+**Example with no key-value pairs:**
+
+```text
+SAMPLE	1	1000
+```
+
+**Example with multiple key-value pairs:**
+
+```text
+SAMPLE	1000	50000	checksum=abc123,foo=bar,msg=hello%20world
+```
 
 ## 5.2 In-process timing
 
@@ -396,7 +409,7 @@ run_benchmark_iteration();
 }
 let end = now();
 let total_ns = end - start;
-println ! ("SAMPLE {iters} {total_ns} checksum={checksum}");
+println ! ("SAMPLE\t{iters}\t{total_ns}\tchecksum={checksum}");
 }
 ```
 

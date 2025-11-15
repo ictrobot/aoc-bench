@@ -54,29 +54,29 @@ impl std::error::Error for ParseError {}
 pub fn parse_line(line: &str) -> Result<ProtocolLine, ParseError> {
     let line = line.trim();
 
-    if line.starts_with("META ") {
+    if line.starts_with("META\t") {
         parse_meta_line(line)
-    } else if line.starts_with("SAMPLE ") {
+    } else if line.starts_with("SAMPLE\t") {
         parse_sample_line(line)
     } else {
         Err(ParseError::InvalidFormat(format!(
-            "Line must start with 'META ' or 'SAMPLE ', got: {line}"
+            "Line must start with 'META\\t' or 'SAMPLE\\t', got: {line}"
         )))
     }
 }
 
-/// Parse a META line: META key=value,key2=value2,...
+/// Parse a META line: META\tkey=value,key2=value2,...
 fn parse_meta_line(line: &str) -> Result<ProtocolLine, ParseError> {
-    let content = &line[5..]; // Skip "META "
+    let content = &line[5..]; // Skip "META\t"
     let fields = parse_comma_separated_kv(content)?;
 
     Ok(ProtocolLine::Meta(MetaLine { fields }))
 }
 
-/// Parse a SAMPLE line: SAMPLE <iters> <`total_ns`> [key=value,key2=value2,...]
+/// Parse a SAMPLE line: SAMPLE\t<iters>\t<total_ns>\t[key=value,key2=value2,...]
 fn parse_sample_line(line: &str) -> Result<ProtocolLine, ParseError> {
-    let content = &line[7..]; // Skip "SAMPLE "
-    let mut parts = content.split_whitespace();
+    let content = &line[7..]; // Skip "SAMPLE\t"
+    let mut parts = content.split('\t');
 
     // Parse iters (required)
     let iters_str = parts
@@ -102,13 +102,11 @@ fn parse_sample_line(line: &str) -> Result<ProtocolLine, ParseError> {
     })?;
 
     // Parse optional comma-separated key=value pairs
-    // Since KV pairs must be URL encoded (no spaces allowed), there should be at most one more part
     let fields = if let Some(kv_part) = parts.next() {
-        // Check for extra whitespace-separated parts (not allowed)
+        // Check for extra parts
         if parts.next().is_some() {
             return Err(ParseError::InvalidFormat(
-                "SAMPLE line has unexpected whitespace in key=value pairs (must be URL encoded)"
-                    .to_string(),
+                "SAMPLE line has unexpected extra data".to_string(),
             ));
         }
         parse_comma_separated_kv(kv_part)?
@@ -258,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_parse_meta_line() {
-        let line = "META version=1";
+        let line = "META\tversion=1";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -271,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_parse_meta_line_multiple_fields() {
-        let line = "META version=1,foo=bar,baz=qux";
+        let line = "META\tversion=1,foo=bar,baz=qux";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -286,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_parse_sample_line_basic() {
-        let line = "SAMPLE 10000 30920000000";
+        let line = "SAMPLE\t10000\t30920000000";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -301,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_parse_sample_line_with_checksum() {
-        let line = "SAMPLE 10000 30920000000 checksum=8f024a8e";
+        let line = "SAMPLE\t10000\t30920000000\tchecksum=8f024a8e";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -316,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_parse_sample_line_with_extra_fields() {
-        let line = "SAMPLE 10000 30920000000 checksum=8f024a8e,foo=bar";
+        let line = "SAMPLE\t10000\t30920000000\tchecksum=8f024a8e,foo=bar";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -339,28 +337,28 @@ mod tests {
 
     #[test]
     fn test_parse_sample_missing_fields() {
-        let line = "SAMPLE 10000";
+        let line = "SAMPLE\t10000";
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_sample_invalid_number() {
-        let line = "SAMPLE abc 30920000000";
+        let line = "SAMPLE\tabc\t30920000000";
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_meta_invalid_format() {
-        let line = "META invalid";
+        let line = "META\tinvalid";
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_checksum_match() {
-        let line = "SAMPLE 10000 30920000000 checksum=8f024a8e";
+        let line = "SAMPLE\t10000\t30920000000\tchecksum=8f024a8e";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -373,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_validate_checksum_mismatch() {
-        let line = "SAMPLE 10000 30920000000 checksum=8f024a8e";
+        let line = "SAMPLE\t10000\t30920000000\tchecksum=8f024a8e";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -391,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_validate_checksum_missing() {
-        let line = "SAMPLE 10000 30920000000";
+        let line = "SAMPLE\t10000\t30920000000";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -425,7 +423,7 @@ mod tests {
     #[test]
     fn test_parse_meta_without_trim() {
         // When there's content after META, it works
-        let line = "META version=1  "; // Has trailing spaces
+        let line = "META\tversion=1  "; // Has trailing spaces
         let result = parse_line(line);
         assert!(result.is_ok());
     }
@@ -433,22 +431,22 @@ mod tests {
     #[test]
     fn test_parse_meta_only() {
         let line = "META";
-        // Should fail - no space after META
+        // Should fail - no tab after META
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_meta_with_space_only() {
-        let line = "META ";
-        // After trim() this becomes "META" which should fail
+    fn test_parse_meta_with_tab_only() {
+        let line = "META\t";
+        // After trim() this becomes "META\t" which should fail (empty KV)
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_sample_zero_iters() {
-        let line = "SAMPLE 0 0";
+        let line = "SAMPLE\t0\t0";
         let result = parse_line(line);
         assert!(result.is_err());
         assert!(matches!(result, Err(ParseError::InvalidNumber(_))));
@@ -456,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_parse_sample_large_numbers() {
-        let line = "SAMPLE 18446744073709551615 18446744073709551615";
+        let line = "SAMPLE\t18446744073709551615\t18446744073709551615";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -471,28 +469,28 @@ mod tests {
     #[test]
     fn test_parse_sample_overflow() {
         // Number larger than u64::MAX
-        let line = "SAMPLE 99999999999999999999999999 100";
+        let line = "SAMPLE\t99999999999999999999999999\t100";
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_sample_negative_number() {
-        let line = "SAMPLE -100 50000";
+        let line = "SAMPLE\t-100\t50000";
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_sample_float_number() {
-        let line = "SAMPLE 100.5 50000";
+        let line = "SAMPLE\t100.5\t50000";
         let result = parse_line(line);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_meta_version_valid() {
-        let line = "META version=1";
+        let line = "META\tversion=1";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -505,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_validate_meta_version_missing() {
-        let line = "META foo=bar";
+        let line = "META\tfoo=bar";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -519,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_validate_meta_version_invalid() {
-        let line = "META version=2";
+        let line = "META\tversion=2";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -534,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_validate_meta_version_multiple_fields() {
-        let line = "META version=1,foo=bar";
+        let line = "META\tversion=1,foo=bar";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -548,15 +546,7 @@ mod tests {
     #[test]
     fn test_parse_meta_trailing_comma_fails() {
         // Trailing commas are not allowed (strict parsing)
-        let line = "META version=1,";
-        let result = parse_line(line);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_sample_with_spaces_fails() {
-        // Spaces are not allowed - must be URL encoded
-        let line = "SAMPLE 100 5000 checksum=abc , foo=bar";
+        let line = "META\tversion=1,";
         let result = parse_line(line);
         assert!(result.is_err());
     }
@@ -564,7 +554,7 @@ mod tests {
     #[test]
     fn test_parse_sample_with_url_encoded_space() {
         // Spaces must be URL encoded as %20
-        let line = "SAMPLE 100 5000 message=hello%20world";
+        let line = "SAMPLE\t100\t5000\tmessage=hello%20world";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -581,7 +571,7 @@ mod tests {
     #[test]
     fn test_parse_meta_double_comma_fails() {
         // Double comma is not allowed (strict parsing)
-        let line = "META version=1,,foo=bar";
+        let line = "META\tversion=1,,foo=bar";
         let result = parse_line(line);
         assert!(result.is_err());
     }
@@ -589,7 +579,7 @@ mod tests {
     #[test]
     fn test_parse_sample_value_with_special_chars() {
         // Values can contain special characters (but not commas or equals)
-        let line = "SAMPLE 100 5000 checksum=abc-123_def";
+        let line = "SAMPLE\t100\t5000\tchecksum=abc-123_def";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -603,7 +593,7 @@ mod tests {
     #[test]
     fn test_url_decode_special_chars() {
         // Test URL encoding of special characters
-        let line = "SAMPLE 100 5000 msg=%3Ctest%3E%26%22";
+        let line = "SAMPLE\t100\t5000\tmsg=%3Ctest%3E%26%22";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -617,7 +607,7 @@ mod tests {
     #[test]
     fn test_url_decode_hex_digits() {
         // Test hex encoding
-        let line = "SAMPLE 100 5000 msg=%41%42%43";
+        let line = "SAMPLE\t100\t5000\tmsg=%41%42%43";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -631,7 +621,7 @@ mod tests {
     #[test]
     fn test_url_decode_comma_and_equals() {
         // Comma and equals must be encoded
-        let line = "SAMPLE 100 5000 msg=a%3Db%2Cc";
+        let line = "SAMPLE\t100\t5000\tmsg=a%3Db%2Cc";
         let result = parse_line(line).unwrap();
 
         match result {
@@ -645,7 +635,7 @@ mod tests {
     #[test]
     fn test_url_decode_incomplete_fails() {
         // Incomplete percent encoding should fail
-        let line = "SAMPLE 100 5000 msg=test%2";
+        let line = "SAMPLE\t100\t5000\tmsg=test%2";
         let result = parse_line(line);
         assert!(result.is_err());
     }
@@ -653,7 +643,7 @@ mod tests {
     #[test]
     fn test_url_decode_invalid_hex_fails() {
         // Invalid hex digits should fail
-        let line = "SAMPLE 100 5000 msg=test%ZZ";
+        let line = "SAMPLE\t100\t5000\tmsg=test%ZZ";
         let result = parse_line(line);
         assert!(result.is_err());
     }
