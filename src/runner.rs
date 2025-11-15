@@ -3,16 +3,55 @@
 use crate::protocol::{
     parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
 };
-use crate::stats::{StatsAccumulator, StatsError, StatsResult, StatsState};
+use crate::stats::{EstimationMode, Sample, StatsAccumulator, StatsError, StatsState};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TIMEOUT_SECS: u64 = 120; // 2 minutes
+const RUN_SERIES_COUNT: usize = 7; // Number of runs in a series
+const MAX_RETRIES: usize = 5; // Maximum retries on failure
 
+/// Result from a single benchmark run
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunResult {
-    timestamp: Instant,
-    stats: StatsResult,
+    /// Unix timestamp (seconds since epoch) when this run started
+    pub timestamp: u64,
+    /// Mean time per iteration in nanoseconds
+    pub mean_ns_per_iter: f64,
+    /// Half-width of 95% confidence interval in nanoseconds
+    pub ci95_half_width_ns: f64,
+    /// Estimation mode used (regression or per_iter)
+    pub mode: EstimationMode,
+    /// Fixed overhead per batch (only for regression mode, null otherwise)
+    pub intercept_ns: Option<f64>,
+    /// Number of samples flagged as outliers
+    pub outlier_count: usize,
+    /// All samples collected for this run
+    pub samples: Vec<Sample>,
+}
+
+/// A complete run series containing multiple individual runs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunSeries {
+    /// Schema version for format compatibility
+    pub schema: u32,
+    /// Benchmark name/identifier
+    pub bench: String,
+    /// Configuration key-value pairs (canonically sorted)
+    pub config: BTreeMap<String, String>,
+    /// Unix timestamp when this run series started
+    pub timestamp: u64,
+    /// Individual run results (sorted by mean_ns_per_iter)
+    pub runs: Vec<RunResult>,
+    /// Mean from the median run (representative value)
+    pub median_mean_ns_per_iter: f64,
+    /// CI half-width from the median run
+    pub median_ci95_half_width_ns: f64,
+    /// Output validation checksum (if provided)
+    pub checksum: Option<String>,
 }
 
 pub struct Runner {
@@ -47,14 +86,74 @@ impl Runner {
         self
     }
 
-    /// Spawn the benchmark command and collect samples
-    pub fn run(&self) -> Result<RunResult, RunError> {
+    /// Execute a complete run series (default: 7 runs) with retry logic
+    ///
+    /// Returns a `RunSeries` containing all runs sorted by mean, with median statistics.
+    /// Retries up to `MAX_RETRIES` times on failure.
+    pub fn run_series(
+        &self,
+        bench: String,
+        config: BTreeMap<String, String>,
+    ) -> Result<RunSeries, RunError> {
+        let series_start = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut runs = Vec::with_capacity(RUN_SERIES_COUNT);
+        let mut retry_count = 0;
+
+        // Execute RUN_SERIES_COUNT successful runs
+        while runs.len() < RUN_SERIES_COUNT {
+            match self.run_single() {
+                Ok(run_result) => {
+                    runs.push(run_result);
+                }
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    eprintln!(
+                        "Run failed (attempt {}/{}): {}. Retrying...",
+                        retry_count, MAX_RETRIES, e
+                    );
+                }
+            }
+        }
+
+        // Sort runs by mean_ns_per_iter
+        runs.sort_by(|a, b| {
+            a.mean_ns_per_iter
+                .partial_cmp(&b.mean_ns_per_iter)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Extract median run statistics (middle run after sorting)
+        let median_idx = runs.len() / 2;
+        let median_mean_ns_per_iter = runs[median_idx].mean_ns_per_iter;
+        let median_ci95_half_width_ns = runs[median_idx].ci95_half_width_ns;
+
+        Ok(RunSeries {
+            schema: 1,
+            bench,
+            config,
+            timestamp: series_start,
+            runs,
+            median_mean_ns_per_iter,
+            median_ci95_half_width_ns,
+            checksum: self.expected_checksum.clone(),
+        })
+    }
+
+    /// Execute a single benchmark run
+    fn run_single(&self) -> Result<RunResult, RunError> {
         // Spawn the child process
         let mut child = self.spawn_child()?;
 
         // Collect samples from stdout
         let mut stats = StatsAccumulator::default();
-        let start_time = Instant::now();
+        let start_time = SystemTime::now();
 
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let reader = BufReader::new(stdout);
@@ -62,12 +161,19 @@ impl Runner {
 
         loop {
             // Check timeout
-            if start_time.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
+            if start_time.elapsed().unwrap() > Duration::from_secs(TIMEOUT_SECS) {
                 let _ = child.kill();
                 return Err(RunError::Timeout);
             }
 
             let Some(Ok(line)) = lines.next() else {
+                if let Ok(Some(code)) = child.try_wait()
+                    && !code.success()
+                {
+                    return Err(RunError::ProcessCrashed(code.code()));
+                }
+
+                let _ = child.kill();
                 return Err(RunError::PrematureEof);
             };
             let line = line.trim();
@@ -113,9 +219,17 @@ impl Runner {
 
         let _ = child.kill();
 
+        let stats_result = stats.finish();
+        let timestamp = start_time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+
         Ok(RunResult {
-            timestamp: start_time,
-            stats: stats.finish(),
+            timestamp,
+            mean_ns_per_iter: stats_result.mean_ns_per_iter,
+            ci95_half_width_ns: stats_result.ci95_half_width_ns,
+            mode: stats_result.mode,
+            intercept_ns: stats_result.intercept_ns,
+            outlier_count: stats_result.outlier_count,
+            samples: stats_result.samples,
         })
     }
 
@@ -162,13 +276,35 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+impl RunSeries {
+    /// Format the run series result for display
+    ///
+    /// Returns a string like "30.92 µs/iter ±0.10% (median of 7 runs)"
+    pub fn display_result(&self) -> String {
+        let mean_us = self.median_mean_ns_per_iter / 1000.0;
+        let ci_percent = (self.median_ci95_half_width_ns / self.median_mean_ns_per_iter) * 100.0;
+
+        format!(
+            "{:.2} µs/iter ±{:.2}% (median of {} runs)",
+            mean_us,
+            ci_percent,
+            self.runs.len()
+        )
+    }
+}
+
+impl std::fmt::Display for RunSeries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_result())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::Sample;
 
     #[test]
-    fn test_runner_with_echo() {
+    fn test_runner_with_yes() {
         // Create a simple test that uses yes to simulate benchmark output
         // This is a basic sanity test; more complex tests would use a mock binary
         let runner = Runner::new("yes".to_string()).with_args(vec![
@@ -177,18 +313,126 @@ mod tests {
             "50000".to_string(),
         ]);
 
-        let result = runner.run();
+        let result = runner.run_single();
         assert!(result.is_ok());
 
+        // Verify all fields are properly populated
         let result = result.unwrap();
-        assert!(!result.stats.samples.is_empty());
-        assert!(result.stats.samples.iter().all(|s| matches!(
+        assert!(result.timestamp > 0);
+        assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert_eq!(result.ci95_half_width_ns, 0.0); // Can be 0 for identical samples
+        assert_eq!(result.mode, EstimationMode::PerIter);
+        assert!(result.intercept_ns.is_none());
+        assert!(result.samples.iter().all(|s| matches!(
             s,
             Sample {
                 iters: 1000,
                 total_ns: 50000
             }
         )));
-        assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);
+
+        // Check series result
+        let series_result = runner
+            .run_series("yes".to_string(), BTreeMap::new())
+            .unwrap();
+        assert_eq!(series_result.schema, 1);
+        assert_eq!(series_result.bench, "yes");
+        assert_eq!(series_result.runs, vec![result; RUN_SERIES_COUNT]);
+        assert_eq!(series_result.median_mean_ns_per_iter, 50.0);
+        assert_eq!(series_result.median_ci95_half_width_ns, 0.0);
+    }
+
+    #[test]
+    fn test_runner_with_false() {
+        let runner = Runner::new("false".to_string());
+
+        assert!(matches!(
+            runner.run_single(),
+            Err(RunError::ProcessCrashed(Some(1)))
+        ));
+
+        assert!(matches!(
+            runner.run_series("false".to_string(), BTreeMap::new()),
+            Err(RunError::ProcessCrashed(Some(1)))
+        ));
+    }
+
+    #[test]
+    fn test_run_series_display() {
+        let mut config = BTreeMap::new();
+        config.insert("test".to_string(), "value".to_string());
+
+        let series = RunSeries {
+            schema: 1,
+            bench: "test-bench".to_string(),
+            config,
+            timestamp: 1000,
+            runs: vec![
+                RunResult {
+                    timestamp: 1000,
+                    mean_ns_per_iter: 30920.0, // 30.92 µs
+                    ci95_half_width_ns: 310.0, // ±1%
+                    mode: EstimationMode::PerIter,
+                    intercept_ns: None,
+                    outlier_count: 0,
+                    samples: vec![],
+                };
+                7
+            ],
+            median_mean_ns_per_iter: 30920.0,
+            median_ci95_half_width_ns: 310.0,
+            checksum: None,
+        };
+
+        let display = series.display_result();
+        assert!(display.contains("30.92 µs/iter"));
+        assert!(display.contains("±1.00%"));
+        assert!(display.contains("median of 7 runs"));
+    }
+
+    #[test]
+    fn test_run_series_json_round_trip() {
+        let mut config = BTreeMap::new();
+        config.insert("commit".to_string(), "abc1234".to_string());
+        config.insert("host".to_string(), "pi5".to_string());
+
+        let series = RunSeries {
+            schema: 1,
+            bench: "2015-04".to_string(),
+            config,
+            timestamp: 1_731_437_601,
+            runs: vec![RunResult {
+                timestamp: 1_731_437_602,
+                mean_ns_per_iter: 30_920_000.0,
+                ci95_half_width_ns: 31_000.0,
+                mode: EstimationMode::PerIter,
+                intercept_ns: None,
+                outlier_count: 0,
+                samples: vec![Sample {
+                    iters: 10_000_000,
+                    total_ns: 30_920_000_000,
+                }],
+            }],
+            median_mean_ns_per_iter: 30_920_000.0,
+            median_ci95_half_width_ns: 31_000.0,
+            checksum: Some("8f024a8e".to_string()),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&series).unwrap();
+        assert!(json.contains("\"schema\": 1"));
+        assert!(json.contains("\"bench\": \"2015-04\""));
+        assert!(json.contains("\"commit\": \"abc1234\""));
+        assert!(json.contains("\"mode\": \"per_iter\"")); // Verify snake_case serialization
+
+        // Deserialize back
+        let deserialized: RunSeries = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.schema, 1);
+        assert_eq!(deserialized.bench, "2015-04");
+        assert_eq!(deserialized.runs.len(), 1);
+        assert_eq!(deserialized.runs[0].mode, EstimationMode::PerIter);
+        assert_eq!(deserialized.median_mean_ns_per_iter, 30920000.0);
+        assert_eq!(deserialized.checksum, Some("8f024a8e".to_string()));
     }
 }

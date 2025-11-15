@@ -6,6 +6,7 @@
 
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use serde::{Deserialize, Serialize};
 
 const WARMUP_SAMPLES: usize = 16;
 const MIN_SAMPLES: usize = 32;
@@ -17,7 +18,8 @@ const MAX_SAMPLES: usize = 2048;
 const OUTLIER_IQR_FACTOR: f64 = 3.0;
 const OUTLIER_MAX_FRACTION: f64 = 0.05; // 5%
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[must_use]
 pub enum EstimationMode {
     Regression,
@@ -32,7 +34,7 @@ pub enum StatsState {
     Done,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     pub iters: u64,
     pub total_ns: u64,
@@ -830,5 +832,22 @@ mod tests {
 
         assert_eq!(outlier_count, 0);
         assert_eq!(acc.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_estimation_mode_json_serialization() {
+        // Test that EstimationMode serializes to snake_case strings
+        let per_iter_json = serde_json::to_string(&EstimationMode::PerIter).unwrap();
+        assert_eq!(per_iter_json, "\"per_iter\"");
+
+        let regression_json = serde_json::to_string(&EstimationMode::Regression).unwrap();
+        assert_eq!(regression_json, "\"regression\"");
+
+        // Test deserialization
+        let parsed_per_iter: EstimationMode = serde_json::from_str("\"per_iter\"").unwrap();
+        assert_eq!(parsed_per_iter, EstimationMode::PerIter);
+
+        let parsed_regression: EstimationMode = serde_json::from_str("\"regression\"").unwrap();
+        assert_eq!(parsed_regression, EstimationMode::Regression);
     }
 }

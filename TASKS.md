@@ -52,20 +52,20 @@
 - [x] Integrate CI check and outlier check at intervals
 - [x] Add tests for stopping conditions
 
-## Phase 3: Run Series
+## Phase 3: Run Series ✅
 
 ### 3.1 Run Series Execution
-- [ ] Implement 7-run loop (RUN_SERIES_COUNT)
-- [ ] Store individual run results (timestamp, mean, CI, mode, intercept, outlier_count, samples)
-- [ ] Sort runs by mean_ns_per_iter
-- [ ] Calculate median run statistics
-- [ ] Add retry logic (up to 5 retries on failure)
+- [x] Implement 7-run loop (RUN_SERIES_COUNT)
+- [x] Store individual run results (timestamp, mean, CI, mode, intercept, outlier_count, samples)
+- [x] Sort runs by mean_ns_per_iter
+- [x] Calculate median run statistics
+- [x] Add retry logic (up to 5 retries on failure)
 
 ### 3.2 Run Series Output Format
-- [ ] Define RunSeries struct with schema version
-- [ ] Implement JSON serialization for run series
-- [ ] Add timestamp handling (unix timestamp in JSON, ISO 8601 in filenames)
-- [ ] Add display formatting (µs/iter ±%, median of 7)
+- [x] Define RunSeries struct with schema version
+- [x] Implement JSON serialization for run series
+- [x] Add timestamp handling (unix timestamp in JSON, ISO 8601 in filenames)
+- [x] Add display formatting (µs/iter ±%, median of 7)
 
 ## Phase 4: Configuration System
 
