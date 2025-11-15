@@ -65,4 +65,19 @@ pub enum Commands {
         #[arg(long)]
         config: String,
     },
+
+    /// Debug the runner independently with a raw command
+    Debug {
+        /// Input file path to provide to the runner
+        #[arg(long, value_parser = clap::value_parser!(std::path::PathBuf))]
+        input: Option<std::path::PathBuf>,
+
+        /// Expected checksum for output validation
+        #[arg(long)]
+        checksum: Option<String>,
+
+        /// Command and arguments to run (after --)
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }

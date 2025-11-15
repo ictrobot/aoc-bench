@@ -67,6 +67,13 @@
 - [x] Add timestamp handling (unix timestamp in JSON, ISO 8601 in filenames)
 - [x] Add display formatting (µs/iter ±%, median of 7)
 
+### 3.3 `debug` Command ✅
+- [x] Add Debug command to CLI with --input, --checksum, and trailing command args
+- [x] Implement stdin input support in Runner (with_stdin_input method)
+- [x] Implement debug command handler in main.rs
+- [x] Output JSON on success, error message on failure
+- [x] Add documentation to DESIGN.md
+
 ## Phase 4: Configuration System
 
 ### 4.1 Config File Parser

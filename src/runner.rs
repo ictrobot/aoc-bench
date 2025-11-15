@@ -6,7 +6,8 @@ use crate::protocol::{
 use crate::stats::{EstimationMode, Sample, StatsAccumulator, StatsError, StatsState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
+use std::io;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -59,6 +60,7 @@ pub struct Runner {
     args: Vec<String>,
     working_dir: Option<String>,
     expected_checksum: Option<String>,
+    stdin_input: Option<String>,
 }
 
 impl Runner {
@@ -68,6 +70,7 @@ impl Runner {
             args: Vec::new(),
             working_dir: None,
             expected_checksum: None,
+            stdin_input: None,
         }
     }
 
@@ -83,6 +86,11 @@ impl Runner {
 
     pub fn with_expected_checksum(mut self, checksum: String) -> Self {
         self.expected_checksum = Some(checksum);
+        self
+    }
+
+    pub fn with_stdin_input(mut self, input: String) -> Self {
+        self.stdin_input = Some(input);
         self
     }
 
@@ -211,7 +219,7 @@ impl Runner {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to parse line: {line} - {e}");
+                    eprintln!("Warning: Failed to parse line: {e}");
                     // Continue on parse errors per design doc
                 }
             }
@@ -239,17 +247,36 @@ impl Runner {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
 
+        if self.stdin_input.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
+
         if let Some(ref dir) = self.working_dir {
             cmd.current_dir(dir);
         }
 
-        cmd.spawn().map_err(RunError::SpawnFailed)
+        let mut child = cmd.spawn().map_err(RunError::SpawnFailed)?;
+
+        // Write input to stdin in a separate thread to avoid deadlock
+        if let Some(input) = self.stdin_input.clone() {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                RunError::SpawnFailed(io::Error::other("failed to capture stdin pipe"))
+            })?;
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(input.as_bytes());
+                // stdin is dropped here, closing the pipe
+            });
+        }
+
+        Ok(child)
     }
 }
 
 #[derive(Debug)]
 pub enum RunError {
-    SpawnFailed(std::io::Error),
+    SpawnFailed(io::Error),
     ProcessCrashed(Option<i32>),
     Timeout,
     ParseError(ParseError),
@@ -317,8 +344,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify all fields are properly populated
-        let result = result.unwrap();
-        assert!(result.timestamp > 0);
+        let mut result = result.unwrap();
         assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);
         assert_eq!(result.ci95_half_width_ns, 0.0); // Can be 0 for identical samples
         assert_eq!(result.mode, EstimationMode::PerIter);
@@ -332,15 +358,32 @@ mod tests {
         )));
         assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);
 
+        result.timestamp = 0;
+
         // Check series result
-        let series_result = runner
+        let mut series_result = runner
             .run_series("yes".to_string(), BTreeMap::new())
             .unwrap();
+        series_result.runs.iter_mut().for_each(|r| r.timestamp = 0);
         assert_eq!(series_result.schema, 1);
         assert_eq!(series_result.bench, "yes");
         assert_eq!(series_result.runs, vec![result; RUN_SERIES_COUNT]);
         assert_eq!(series_result.median_mean_ns_per_iter, 50.0);
         assert_eq!(series_result.median_ci95_half_width_ns, 0.0);
+    }
+
+    #[test]
+    fn test_runner_with_cat() {
+        // Create a simple test that uses cat to test input
+        let runner = Runner::new("cat".to_string());
+        let result = runner.run_single();
+        assert!(matches!(result, Err(RunError::PrematureEof)));
+
+        let result = runner
+            .with_stdin_input("SAMPLE 1000 50000\n".to_string().repeat(100))
+            .run_single();
+        let result = result.unwrap();
+        assert!((result.mean_ns_per_iter - 50.0).abs() < 0.001);
     }
 
     #[test]

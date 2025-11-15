@@ -46,6 +46,13 @@ The `aoc-bench` tool provides the following subcommands:
     * Groups results into regressions, improvements, and unchanged
     * Useful for commit impact analysis or profile comparisons
 
+* **`debug`** - Debug the runner independently with a raw command
+    * Accepts `--input` option to provide stdin input to the command
+    * Accepts `--checksum` option to validate output checksums
+    * Takes exact command and arguments after `--` (no template expansion)
+    * Executes a full run series and outputs JSON result or error
+    * Useful for testing benchmark implementations and troubleshooting runner issues
+
 ## Data Directory Structure
 
 All benchmark data and configuration is stored in a single `data/` directory with the following structure:
