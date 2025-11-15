@@ -1,0 +1,27 @@
+[package]
+name = "aoc-rs-bench"
+authors = ["Ethan Jones <ictrobot@outlook.com>"]
+edition = "2021"
+license = "MIT"
+publish = false
+repository = "https://github.com/ictrobot/aoc-bench"
+rust-version = "1.75.0"
+
+[workspace]
+# Required to stop Cargo trying to parse the manifest at the root of the repo, which will fail for older version
+
+[dependencies]
+aoc = { git = "https://github.com/ictrobot/aoc-rs" }
+# Direct dependencies needed for glue v0-v2 which don't re-export the utils and year crates
+utils = { git = "https://github.com/ictrobot/aoc-rs", optional = true }
+year2015 = { git = "https://github.com/ictrobot/aoc-rs", optional = true }
+# rev required so that Cargo still has a compatible manifest to parse when building glue v0-v2 without a year2016 dep
+year2016 = { git = "https://github.com/ictrobot/aoc-rs", rev = "ab1e77c27919360630046d825583af16a1423d16", optional = true }
+
+[features]
+glue-v0 = ["utils", "year2015"] # Doesn't re-export crates
+glue-v1 = ["utils", "year2015"]
+glue-v2 = ["utils", "year2015"]
+glue-v3 = ["utils", "year2015", "year2016"]
+glue-v4 = []
+glue-v5 = []

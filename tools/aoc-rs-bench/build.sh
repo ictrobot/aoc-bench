@@ -1,0 +1,113 @@
+#!/bin/bash
+set -eou pipefail
+
+cd "$(dirname -- "$0")"
+
+if (( $# < 1 )); then
+    echo "usage: $0 <data_dir>" >&2
+    exit 1
+fi
+
+data_dir="$1"
+if [[ ! -d "$data_dir" ]]; then
+    echo "error: '$data_dir' does not exist" >&2
+    exit 1
+fi
+
+builds_dir="$data_dir/builds"
+builds_commit_list="$builds_dir/commits.txt"
+repo="https://github.com/ictrobot/aoc-rs"
+start_ref="main"
+
+# Oldest first, checked in reverse order
+framework_revisions=(
+    "7189784717f71bba0260b4de3a7cc8d27c116054" # glue-v0 Initial
+    "b9c2f7faf8da1c0b73dc2afb8c1d7466f606cb39" # glue-v1 Rename InvalidInputError to InputError
+    "9676a84981560f110728475366b9170c47972884" # glue-v2 Multiversion support
+    "ab1e77c27919360630046d825583af16a1423d16" # glue-v3 Year 2016 added
+    "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v4 Nested macro repeats for year and day
+    "421df7084cf3de9e7279ca9b841fed222c6b33fa" # glue-v5 One DATE constant instead of YEAR and DAY
+)
+
+build_binary() {
+    git -C "$tmp_clone" checkout "$commit" -q
+
+    rust_version="$(
+        sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([0-9]\+\.[0-9]\+\).*/\1/p' "$tmp_clone/Cargo.toml" \
+          | head -n1
+    )"
+    rust_version="${rust_version:-1.75}"
+
+    framework_version=""
+    for (( i=${#framework_revisions[@]}-1 ; i>=0 ; i-- )); do
+        if git -C "$tmp_clone" merge-base --is-ancestor "${framework_revisions[i]}" "$commit"; then
+            framework_version="$i"
+            break
+        fi
+    done
+    if [[ -z "$framework_version" ]]; then
+        echo "failed to find framework version for commit $commit" 1>&2
+        exit 1
+    fi
+
+    echo "Building $build with rust $rust_version and glue v$framework_version"
+
+    args=(
+        "--features" "glue-v$framework_version"
+    )
+
+    # All the direct dependencies must be patched
+    patch_crates=(
+        "aoc"
+        "utils"
+        "year2015"
+    )
+    if [[ "$framework_version" -gt 2 ]]; then
+        patch_crates+=("year2016")
+    fi
+
+    for crate in "${patch_crates[@]}"; do
+        args+=("--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\"")
+    done
+
+    # rustup run --install "$rust_version" cargo tree "${args[@]}"
+    if [[ "$profile" == "native" ]]; then
+        export RUSTFLAGS='-C target_cpu=native'
+    else
+        export RUSTFLAGS=''
+    fi
+
+    executable="$(
+        rustup run --install "$rust_version" cargo build --release "${args[@]}" --message-format=json-render-diagnostics \
+          | jq -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
+    )"
+    if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
+        echo "No such binary $executable after building $commit" >&2
+        exit 1
+    fi
+
+    mv "$executable" "$build"
+}
+
+mkdir -p "$builds_dir"
+
+tmp_clone="$(mktemp -d)"
+trap 'rm -rf "$tmp_clone"' EXIT
+git -C "$tmp_clone" clone "$repo" . -q
+
+git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
+mv "$builds_commit_list.tmp" "$builds_commit_list"
+
+for profile in generic native; do
+    mkdir -p "$builds_dir/$profile"
+
+    # Inner loop over commit instead of profile to make better use of incremental builds
+    while read -r commit <&3; do
+        build="$builds_dir/$profile/$commit"
+        if [[ ! -f "$build" || ! -x "$build" ]]; then
+            build_binary
+        fi
+    done 3< "$builds_commit_list"
+done
+
+# TODO add lto profile with lto and cgu=1
