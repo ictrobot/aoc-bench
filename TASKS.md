@@ -3,30 +3,30 @@
 ## Phase 1: Minimal Working Runner
 
 ### 1.1 Project Setup
-- [ ] Initialize Cargo project with dependencies (serde, serde_json, rusqlite, clap, rand, chrono)
-- [ ] Create module structure (protocol, stats, storage, config, runner, cli)
-- [ ] Set up basic CLI skeleton with clap
+- [x] Initialize Cargo project with dependencies (serde, serde_json, rusqlite, clap, rand, chrono)
+- [x] Create module structure (protocol, stats, storage, config, runner, cli)
+- [x] Set up basic CLI skeleton with clap
 
 ### 1.2 Protocol Parser
-- [ ] Implement `META` line parsing with key-value pairs
-- [ ] Implement `SAMPLE` line parsing (iters, total_ns, checksum)
-- [ ] Add line parsing tests with valid/invalid inputs
-- [ ] Add checksum validation logic
+- [x] Implement `META` line parsing with key-value pairs
+- [x] Implement `SAMPLE` line parsing (iters, total_ns, checksum)
+- [x] Add line parsing tests with valid/invalid inputs
+- [x] Add checksum validation logic
 
 ### 1.3 Basic Statistics Engine
-- [ ] Implement sample accumulation (Vec of (iters, total_ns))
-- [ ] Implement mode detection heuristic (distinct_N, range_N, cv_N)
-- [ ] Implement weighted least squares for regression mode
-- [ ] Implement weighted mean for per-iter mode
-- [ ] Add unit tests with known datasets
+- [x] Implement sample accumulation (Vec of (iters, total_ns))
+- [x] Implement mode detection heuristic (distinct_N, range_N, cv_N)
+- [x] Implement weighted least squares for regression mode
+- [x] Implement weighted mean for per-iter mode
+- [x] Add unit tests with known datasets
 
 ### 1.4 Simple Runner (Single Run)
-- [ ] Implement command spawning with stdout/stderr capture
-- [ ] Implement SAMPLE line collection from child process
-- [ ] Add timeout handling (kill process after TIMEOUT)
-- [ ] Add working directory (temp dir) setup
-- [ ] Integrate protocol parser and stats engine
-- [ ] Test with a mock benchmark command
+- [x] Implement command spawning with stdout/stderr capture
+- [x] Implement SAMPLE line collection from child process
+- [x] Add timeout handling (kill process after TIMEOUT)
+- [x] Add working directory (temp dir) setup
+- [x] Integrate protocol parser and stats engine
+- [x] Test with a mock benchmark command
 
 ## Phase 2: Statistics and Robustness
 

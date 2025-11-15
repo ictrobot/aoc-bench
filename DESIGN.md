@@ -360,7 +360,10 @@ Where:
 * `iters`: number of iterations in the sample.
 * `total_ns`: integer wall-clock nanoseconds for that sample.
 
-Each line may end in one or more comma seperated HTML encoded key value pairs. These may contain arbitrary data.
+Each line may end in one or more comma-separated percent-encoded key=value pairs. These may contain arbitrary data.
+
+`[a-zA-Z0-9_.~-]` are safe characters and do not need to be encoded. All other characters (including spaces, commas,
+equals signs, and non-ASCII characters) must be percent-encoded (e.g. space as %20).
 
 The following keys are defined by the spec:
 
