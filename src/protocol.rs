@@ -21,34 +21,19 @@ pub struct SampleLine {
     pub fields: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ParseError {
+    #[error("Invalid format: {0}")]
     InvalidFormat(String),
+    #[error("Invalid number: {0}")]
     InvalidNumber(String),
+    #[error("Missing field: {0}")]
     MissingField(String),
-    ChecksumMismatch {
-        expected: String,
-        actual: Option<String>,
-    },
+    #[error("Checksum missing: expected '{expected}'")]
+    ChecksumMissing { expected: String },
+    #[error("Checksum mismatch: expected '{expected}', got '{actual}'")]
+    ChecksumMismatch { expected: String, actual: String },
 }
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseError::InvalidFormat(msg) => write!(f, "Invalid format: {msg}"),
-            ParseError::InvalidNumber(msg) => write!(f, "Invalid number: {msg}"),
-            ParseError::MissingField(msg) => write!(f, "Missing field: {msg}"),
-            ParseError::ChecksumMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "Checksum mismatch: expected '{expected}', got {actual:?}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ParseError {}
 
 /// Parse a line from the benchmark protocol
 pub fn parse_line(line: &str) -> Result<ProtocolLine, ParseError> {
@@ -229,9 +214,12 @@ fn hex_digit_to_value(b: u8) -> Result<u8, ParseError> {
 pub fn validate_checksum(sample: &SampleLine, expected: &str) -> Result<(), ParseError> {
     match &sample.checksum {
         Some(actual) if actual == expected => Ok(()),
-        actual => Err(ParseError::ChecksumMismatch {
+        Some(actual) => Err(ParseError::ChecksumMismatch {
             expected: expected.to_string(),
             actual: actual.clone(),
+        }),
+        None => Err(ParseError::ChecksumMissing {
+            expected: expected.to_string(),
         }),
     }
 }
@@ -399,7 +387,7 @@ mod tests {
                 assert!(result.is_err());
                 assert!(matches!(
                     result.unwrap_err(),
-                    ParseError::ChecksumMismatch { .. }
+                    ParseError::ChecksumMissing { .. }
                 ));
             }
             ProtocolLine::Meta(_) => panic!("Expected Sample line"),

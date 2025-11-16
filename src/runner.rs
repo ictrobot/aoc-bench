@@ -284,13 +284,14 @@ impl Runner {
             });
         }
 
-        let mut child = cmd.spawn().map_err(RunError::SpawnFailed)?;
+        let mut child = cmd.spawn()?;
 
         // Write input to stdin in a separate thread to avoid deadlock
         if let Some(input) = self.stdin_input.clone() {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                RunError::SpawnFailed(io::Error::other("failed to capture stdin pipe"))
-            })?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("failed to capture stdin pipe"))?;
 
             let parent_span = Span::current();
             std::thread::spawn(move || {
@@ -306,9 +307,10 @@ impl Runner {
         }
 
         // Read and log stderr in a separate thread to avoid deadlock
-        let stderr = child.stderr.take().ok_or_else(|| {
-            RunError::SpawnFailed(io::Error::other("failed to capture stderr pipe"))
-        })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("failed to capture stderr pipe"))?;
         let parent_span = Span::current();
         std::thread::spawn(move || {
             let _parent_enter = parent_span.enter();
@@ -328,34 +330,23 @@ impl Runner {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    SpawnFailed(io::Error),
+    #[error("Failed to spawn process: {0}")]
+    SpawnFailed(#[from] io::Error),
+    #[error("Process crashed with exit code: {0:?}")]
     ProcessCrashed(Option<i32>),
+    #[error("Process timed out after {TIMEOUT_SECS} seconds")]
     Timeout,
+    #[error("Failed to parse protocol line: {0}")]
     ParseError(ParseError),
+    #[error("Process ended prematurely")]
     PrematureEof,
+    #[error("Checksum validation failed: {0}")]
     InvalidChecksum(ParseError),
+    #[error("Statistics collection failed: {0}")]
     StatsFailed(StatsError),
 }
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::SpawnFailed(e) => write!(f, "Failed to spawn process: {e}"),
-            RunError::ProcessCrashed(code) => {
-                write!(f, "Process crashed with exit code: {code:?}")
-            }
-            RunError::Timeout => write!(f, "Process timed out after {TIMEOUT_SECS} seconds"),
-            RunError::ParseError(e) => write!(f, "Failed to parse protocol line: {e}"),
-            RunError::PrematureEof => write!(f, "Process ended prematurely"),
-            RunError::InvalidChecksum(e) => write!(f, "Checksum validation failed: {e}"),
-            RunError::StatsFailed(err) => write!(f, "Statistics collection failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for RunError {}
 
 impl RunSeries {
     /// Format the run series result for display
