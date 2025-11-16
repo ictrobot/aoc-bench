@@ -18,6 +18,9 @@ rand_xoshiro = "0.7.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 similar_names = "allow"

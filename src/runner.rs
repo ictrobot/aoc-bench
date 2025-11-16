@@ -12,6 +12,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, info_span, trace, trace_span, warn, Span};
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+
 const TIMEOUT_SECS: u64 = 120; // 2 minutes
 const RUN_SERIES_COUNT: usize = 7; // Number of runs in a series
 const MAX_RETRIES: usize = 5; // Maximum retries on failure
@@ -256,6 +259,28 @@ impl Runner {
 
         if let Some(ref dir) = self.working_dir {
             cmd.current_dir(dir);
+        }
+
+        // Disable ASLR on Linux for consistent measurements
+        //
+        // Particularly on AMD K8, ASLR can cause significant differences in performance run to run.
+        // For example,  ~105us or ~175us for 2015 day 1 depending on memory layout.
+        #[cfg(target_os = "linux")]
+        #[allow(clippy::cast_sign_loss)]
+        unsafe {
+            cmd.pre_exec(|| {
+                let current = libc::personality(0xffffffff);
+                if current == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+
+                let ret = libc::personality((current | libc::ADDR_NO_RANDOMIZE) as libc::c_ulong);
+                if ret == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
         }
 
         let mut child = cmd.spawn().map_err(RunError::SpawnFailed)?;
