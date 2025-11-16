@@ -15,11 +15,13 @@ const CHECK_EVERY: usize = 32;
 const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;
 const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;
 const TARGET_REL_CI: f64 = 0.01; // 1%
-const MAX_SAMPLES: usize = 2048;
-const OUTLIER_MAD_NORMALIZATION: f64 = 1.482602218505602;
+const MAX_SAMPLES: usize = 1024;
+const OUTLIER_MAD_NORMALIZATION: f64 = 1.482_602_218_505_602;
 const OUTLIER_MAD_THRESHOLD: f64 = 3.5;
 const OUTLIER_MAX_FRACTION: f64 = 0.10;
 const OUTLIER_MIN_ITERATIONS: usize = 256;
+const TREND_CORRELATION_THRESHOLD: f64 = 0.5;
+const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,14 +66,22 @@ pub struct RegressionResult {
     pub intercept: f64, // α: fixed overhead per batch
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct StatsResult {
-    pub mode: EstimationMode,
+    /// Mean time per iteration in nanoseconds
     pub mean_ns_per_iter: f64,
+    /// Half-width of 95% confidence interval in nanoseconds
     pub ci95_half_width_ns: f64,
+    /// Estimation mode used
+    pub mode: EstimationMode,
+    /// Fixed overhead per batch (only for regression mode, null otherwise)
     pub intercept_ns: Option<f64>,
+    /// Number of samples flagged as outliers
     pub outlier_count: usize,
+    /// Spearman rank correlation between run index and residuals
+    pub temporal_correlation: f64,
+    /// All samples collected for this run
     pub samples: Vec<Sample>,
 }
 
@@ -134,11 +144,28 @@ impl StatsAccumulator {
             EstimationMode::PerIter => (self.compute_weighted_mean(), None),
         };
 
+        let residuals = self.compute_residuals(regression);
+
+        // Check for trend in residuals
+        let trend_correlation = Self::compute_residual_trend_correlation(&residuals);
+        if trend_correlation.abs() > TREND_CORRELATION_THRESHOLD {
+            return if self.samples.len() < TREND_CORRELATION_MIN_ITERATIONS {
+                debug!(
+                    samples = self.samples.len(),
+                    trend_correlation,
+                    "trend correlation but small sample size, waiting for more samples"
+                );
+                StatsState::MoreSamplesNeeded
+            } else {
+                StatsState::Abort(StatsError::TrendDetected { trend_correlation })
+            };
+        }
+
         // Check for too many outliers
-        let outlier_count = self.detect_outliers(regression);
+        let outlier_count = Self::count_outliers(residuals);
         let outlier_fraction = outlier_count as f64 / self.samples.len() as f64;
         if outlier_fraction > OUTLIER_MAX_FRACTION {
-            if self.samples.len() < OUTLIER_MIN_ITERATIONS
+            return if self.samples.len() < OUTLIER_MIN_ITERATIONS
                 && (outlier_count as f64 / OUTLIER_MIN_ITERATIONS as f64) < OUTLIER_MAX_FRACTION
             {
                 debug!(
@@ -147,13 +174,13 @@ impl StatsAccumulator {
                     outlier_fraction,
                     "too many outliers but small sample size, waiting for more samples"
                 );
-                return StatsState::MoreSamplesNeeded;
+                StatsState::MoreSamplesNeeded
             } else {
-                return StatsState::Abort(StatsError::TooManyOutliers {
+                StatsState::Abort(StatsError::TooManyOutliers {
                     samples: self.samples.len(),
                     outlier_count,
-                });
-            }
+                })
+            };
         }
 
         // Check for CI convergence
@@ -186,7 +213,11 @@ impl StatsAccumulator {
             EstimationMode::PerIter => (self.compute_weighted_mean(), None),
         };
 
-        let outlier_count = self.detect_outliers(regression);
+        // Compute residuals once for both outlier detection and trend analysis
+        let residuals = self.compute_residuals(regression);
+        let time_trend_correlation = Self::compute_residual_trend_correlation(&residuals);
+        let outlier_count = Self::count_outliers(residuals);
+
         let ci = self.bootstrap_ci(mode, true);
 
         StatsResult {
@@ -196,6 +227,7 @@ impl StatsAccumulator {
             intercept_ns: regression.map(|r| r.intercept),
             outlier_count,
             samples: self.samples,
+            temporal_correlation: time_trend_correlation,
         }
     }
 
@@ -393,24 +425,18 @@ impl StatsAccumulator {
         }
     }
 
-    /// Detects outliers using the MAD (Median Absolute Deviation) method on residuals
+    /// Computes residuals based on the estimation mode
     ///
-    /// Computes residuals based on the estimation mode:
     /// - For regression: residual = actual time - predicted time from linear model
     /// - For per-iter: residual = time per iteration
     ///
-    /// Uses modified Z-scores based on MAD for robust outlier detection:
-    /// - MAD is scaled by 1.4826 (consistency constant for normal distribution)
-    /// - Outliers are samples where modified Z-score > 3.5
-    ///
-    /// Returns the count of detected outliers.
-    pub fn detect_outliers(&self, regression: Option<RegressionResult>) -> usize {
+    /// Returns a vector of residuals in original sample order.
+    pub fn compute_residuals(&self, regression: Option<RegressionResult>) -> Vec<f64> {
         if self.samples.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
-        // Compute residuals based on mode
-        let mut residuals: Vec<f64> = match regression {
+        match regression {
             Some(regression) => self
                 .samples
                 .iter()
@@ -432,9 +458,22 @@ impl StatsAccumulator {
                     })
                     .collect()
             }
-        };
+        }
+    }
 
-        // Compute median
+    /// Detects outliers using the MAD (Median Absolute Deviation) method on residuals
+    ///
+    /// Uses modified Z-scores based on MAD for robust outlier detection:
+    /// - MAD is scaled by 1.4826 (consistency constant for normal distribution)
+    /// - Outliers are samples where modified Z-score > 3.5
+    ///
+    /// Returns the count of detected outliers.
+    fn count_outliers(mut residuals: Vec<f64>) -> usize {
+        if residuals.is_empty() {
+            return 0;
+        }
+
+        // Sort residuals to compute median
         residuals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = residuals[Self::percentile_index(residuals.len(), 0.5)];
 
@@ -451,6 +490,100 @@ impl StatsAccumulator {
             .iter()
             .filter(|&&r| ((r - median) / mad_scaled).abs() > OUTLIER_MAD_THRESHOLD)
             .count()
+    }
+
+    /// Computes Spearman rank correlation between run index and residuals
+    ///
+    /// This detects systematic trends in model errors over the sampling period:
+    /// - Positive correlation: residuals increasing (model underestimates over time)
+    /// - Negative correlation: residuals decreasing (model overestimates over time)
+    /// - Near zero: no trend (ideal - errors are random)
+    ///
+    /// Returns correlation coefficient in range [-1, 1], or 0.0 if insufficient data.
+    fn compute_residual_trend_correlation(residuals: &[f64]) -> f64 {
+        if residuals.len() < 2 {
+            return 0.0;
+        }
+
+        Self::spearman_correlation(
+            (0..residuals.len()).map(|i| i as f64),
+            residuals.iter().copied(),
+        )
+    }
+
+    /// Computes Spearman rank correlation coefficient between two sequences
+    ///
+    /// Uses rank-based correlation which is robust to outliers and non-linear monotonic relationships.
+    fn spearman_correlation(
+        x: impl IntoIterator<Item = f64>,
+        y: impl IntoIterator<Item = f64>,
+    ) -> f64 {
+        // Assign ranks to x
+        let rank_x = Self::assign_ranks(x);
+        let rank_y = Self::assign_ranks(y);
+
+        // Compute Pearson correlation on ranks
+        Self::pearson_correlation(&rank_x, &rank_y)
+    }
+
+    /// Assigns ranks to values (average rank for ties)
+    fn assign_ranks(values: impl IntoIterator<Item = f64>) -> Vec<f64> {
+        // Create (value, original_index) pairs and sort by value
+        let mut indexed: Vec<(f64, usize)> = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (v, i))
+            .collect();
+        indexed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Assign ranks (1-based, with average for ties)
+        let n = indexed.len();
+        let mut ranks = vec![0.0; n];
+        let mut i = 0;
+        while i < n {
+            let mut j = i;
+            // Find end of tied group
+            while j < n && (indexed[j].0 - indexed[i].0).abs() < 1e-10 {
+                j += 1;
+            }
+            // Average rank for this group (1-based ranks)
+            let avg_rank = (i + j + 1) as f64 / 2.0;
+            for k in i..j {
+                ranks[indexed[k].1] = avg_rank;
+            }
+            i = j;
+        }
+
+        ranks
+    }
+
+    /// Computes Pearson correlation coefficient
+    fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
+        if x.len() != y.len() || x.is_empty() {
+            return 0.0;
+        }
+
+        let n = x.len() as f64;
+        let mean_x: f64 = x.iter().sum::<f64>() / n;
+        let mean_y: f64 = y.iter().sum::<f64>() / n;
+
+        let mut cov = 0.0;
+        let mut var_x = 0.0;
+        let mut var_y = 0.0;
+
+        for i in 0..x.len() {
+            let dx = x[i] - mean_x;
+            let dy = y[i] - mean_y;
+            cov += dx * dy;
+            var_x += dx * dx;
+            var_y += dy * dy;
+        }
+
+        if var_x == 0.0 || var_y == 0.0 {
+            return 0.0;
+        }
+
+        cov / (var_x.sqrt() * var_y.sqrt())
     }
 
     fn percentile_index(len: usize, p: f64) -> usize {
@@ -475,6 +608,9 @@ pub enum StatsError {
         samples: usize,
         relative_ci_half_width: f64,
     },
+    TrendDetected {
+        trend_correlation: f64,
+    },
 }
 
 impl std::fmt::Display for StatsError {
@@ -485,7 +621,7 @@ impl std::fmt::Display for StatsError {
                 outlier_count,
             } => write!(
                 f,
-                "Too many outliers: {}/{} ({:.1}% > {:.1}%)",
+                "Too many outliers detected: {}/{} ({:.1}% > {:.1}%)",
                 outlier_count,
                 samples,
                 (outlier_count as f64 / samples as f64) * 100.0,
@@ -501,6 +637,18 @@ impl std::fmt::Display for StatsError {
                 relative_ci_half_width * 100.0,
                 TARGET_REL_CI * 100.0
             ),
+            StatsError::TrendDetected { trend_correlation } if trend_correlation > 0.0 => {
+                write!(
+                    f,
+                    "Increasing trend in per-iteration run time detected ({trend_correlation:.2})",
+                )
+            }
+            StatsError::TrendDetected { trend_correlation } => {
+                write!(
+                    f,
+                    "Decreasing trend in per-iteration run time detected ({trend_correlation:.2})",
+                )
+            }
         }
     }
 }
@@ -698,7 +846,16 @@ mod tests {
 
         for i in 0..MAX_SAMPLES - 1 {
             assert_eq!(
-                acc.add_sample(100, if i.is_multiple_of(4) { 0 } else { i as u64 }),
+                acc.add_sample(
+                    100,
+                    if i.is_multiple_of(16) {
+                        0
+                    } else if i.is_multiple_of(2) {
+                        (MAX_SAMPLES + i) as u64
+                    } else {
+                        (MAX_SAMPLES - i) as u64
+                    }
+                ),
                 StatsState::MoreSamplesNeeded
             );
         }
@@ -763,7 +920,8 @@ mod tests {
             let _ = acc.add_sample(100, 5000); // 50 ns/iter
         }
 
-        let outlier_count = acc.detect_outliers(None);
+        let residuals = acc.compute_residuals(None);
+        let outlier_count = StatsAccumulator::count_outliers(residuals);
 
         assert_eq!(outlier_count, 0);
     }
@@ -782,7 +940,8 @@ mod tests {
             let _ = acc.add_sample(100, 50000); // 500 ns/iter (10x slower!)
         }
 
-        let outlier_count = acc.detect_outliers(None);
+        let residuals = acc.compute_residuals(None);
+        let outlier_count = StatsAccumulator::count_outliers(residuals);
 
         assert!(outlier_count > 0);
         let outlier_fraction = outlier_count as f64 / 100.0;
@@ -806,7 +965,8 @@ mod tests {
         }
 
         let regression = acc.compute_wls();
-        let outlier_count = acc.detect_outliers(Some(regression));
+        let residuals = acc.compute_residuals(Some(regression));
+        let outlier_count = StatsAccumulator::count_outliers(residuals);
 
         assert!(outlier_count > 0);
         let outlier_fraction = outlier_count as f64 / acc.sample_count() as f64;
@@ -827,7 +987,8 @@ mod tests {
             let _ = acc.add_sample(100, 50000);
         }
 
-        let outlier_count = acc.detect_outliers(None);
+        let residuals = acc.compute_residuals(None);
+        let outlier_count = StatsAccumulator::count_outliers(residuals);
         assert_eq!(outlier_count, 5);
 
         let outlier_fraction = outlier_count as f64 / acc.sample_count() as f64;
@@ -854,7 +1015,8 @@ mod tests {
             let _ = acc.add_sample(100, 5000);
         }
 
-        let outlier_count = acc.detect_outliers(None);
+        let residuals = acc.compute_residuals(None);
+        let outlier_count = StatsAccumulator::count_outliers(residuals);
 
         assert_eq!(outlier_count, 0);
         assert_eq!(acc.sample_count(), 0);
@@ -875,5 +1037,95 @@ mod tests {
 
         let parsed_regression: EstimationMode = serde_json::from_str("\"regression\"").unwrap();
         assert_eq!(parsed_regression, EstimationMode::Regression);
+    }
+
+    #[test]
+    fn test_residual_trend_no_correlation() {
+        let mut acc = StatsAccumulator::new(false);
+
+        // Add samples with consistent time per iteration - no trend in residuals
+        for _ in 0..100 {
+            let _ = acc.add_sample(100, 5000); // 50 ns/iter
+        }
+
+        let residuals = acc.compute_residuals(None);
+        let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
+        assert!(
+            correlation.abs() < 0.1,
+            "Expected near-zero correlation for constant times, got {}",
+            correlation
+        );
+    }
+
+    #[test]
+    fn test_residual_trend_positive_correlation() {
+        let mut acc = StatsAccumulator::new(false);
+
+        // Add samples with increasing time per iteration (warmup/throttling)
+        // This creates a positive trend in residuals
+        for i in 0..100 {
+            let time = 5000 + i * 10; // 50ns/iter + 10ns per sample
+            let _ = acc.add_sample(100, time);
+        }
+
+        let residuals = acc.compute_residuals(None);
+        let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
+        assert!(
+            correlation > 0.9,
+            "Expected strong positive correlation for increasing times, got {}",
+            correlation
+        );
+    }
+
+    #[test]
+    fn test_residual_trend_negative_correlation() {
+        let mut acc = StatsAccumulator::new(false);
+
+        // Add samples with decreasing time per iteration (caching/optimization)
+        // This creates a negative trend in residuals
+        for i in 0..100 {
+            let time = 10000 - i * 10; // 100ns/iter - 10ns per sample
+            let _ = acc.add_sample(100, time);
+        }
+
+        let residuals = acc.compute_residuals(None);
+        let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
+        assert!(
+            correlation < -0.9,
+            "Expected strong negative correlation for decreasing times, got {}",
+            correlation
+        );
+    }
+
+    #[test]
+    fn test_spearman_correlation_perfect_positive() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        let corr = StatsAccumulator::spearman_correlation(x, y);
+        assert!((corr - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_spearman_correlation_perfect_negative() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![10.0, 8.0, 6.0, 4.0, 2.0];
+        let corr = StatsAccumulator::spearman_correlation(x, y);
+        assert!((corr + 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_spearman_correlation_with_ties() {
+        let x = vec![1.0, 2.0, 2.0, 4.0, 5.0];
+        let y = vec![1.0, 3.0, 3.0, 7.0, 9.0];
+        let corr = StatsAccumulator::spearman_correlation(x, y);
+        assert!(corr > 0.9); // Should still be strongly positive
+    }
+
+    #[test]
+    fn test_spearman_correlation_insufficient_data() {
+        let x = vec![1.0];
+        let y = vec![2.0];
+        let corr = StatsAccumulator::spearman_correlation(x, y);
+        assert_eq!(corr, 0.0);
     }
 }

@@ -626,7 +626,7 @@ Algorithm (depends on mode):
 
    ```text
    stop if relative_half_width <= TARGET_REL_CI (default: 0.01 = 1%)
-   or n_samples >= MAX_SAMPLES (default: 2048)
+   or n_samples >= MAX_SAMPLES (default: 1024)
    or run_time >= TIMEOUT (default: 120s)
    ```
 
@@ -663,10 +663,11 @@ Algorithm:
 4. Compute outlier fraction: `outlier_count / total_samples`
 
 5. Check abort conditions during stopping checks:
-   * If `outlier_fraction > OUTLIER_MAX_FRACTION`:
-     * If `samples < OUTLIER_MIN_ITERATIONS` and projected outlier count `< OUTLIER_MIN_ITERATIONS × OUTLIER_MAX_FRACTION`:
-       Wait for more samples (may stabilize)
-     * Otherwise: abort the benchmark run and do not store results (system is too noisy)
+    * If `outlier_fraction > OUTLIER_MAX_FRACTION`:
+        * If `samples < OUTLIER_MIN_ITERATIONS` and projected outlier count
+          `< OUTLIER_MIN_ITERATIONS × OUTLIER_MAX_FRACTION`:
+          Wait for more samples (may stabilize)
+        * Otherwise: abort the benchmark run and do not store results (system is too noisy)
 
 **Rationale**: MAD is more robust to outliers than IQR, making it better suited for detecting measurement instability.
 The higher threshold (3.5 vs 3.0) and tolerance (10% vs 5%) account for the stricter detection method. The delayed
@@ -675,7 +676,55 @@ abort logic prevents premature failure when outliers are present early but may d
 The outlier detection runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`), alongside the CI
 width check, allowing early termination (as noisy systems take far longer to converge).
 
-## 7.6 Output fields (per individual run)
+## 7.6 Temporal correlation detection (drift analysis)
+
+To detect systematic performance drift over the course of sampling (warmup effects, thermal throttling, resource
+exhaustion, caching), we compute the **temporal correlation** between run order and residuals.
+
+Constants:
+
+```rust
+const TREND_CORRELATION_THRESHOLD: f64 = 0.5;            // Abort if |correlation| > 0.5
+const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;     // Wait for this many samples before aborting
+```
+
+Algorithm:
+
+1. Compute residuals (same as outlier detection)
+
+2. Compute Spearman rank correlation between sample index and residuals:
+   ```text
+   indices = [0, 1, 2, ..., n-1]  (sample order)
+   residuals = [r_0, r_1, r_2, ..., r_{n-1}]
+   temporal_correlation = spearman_correlation(indices, residuals)
+   ```
+
+3. Check abort condition during stopping checks:
+    * If `|temporal_correlation| > TREND_CORRELATION_THRESHOLD`:
+        * If `samples < TREND_CORRELATION_MIN_ITERATIONS`:
+          Wait for more samples (trend may stabilize)
+        * Otherwise: abort the benchmark run (systematic drift detected)
+
+4. Store the correlation value in results for diagnostic purposes (even if below abort threshold)
+
+**Interpretation:**
+
+* **Positive correlation (> 0.5)**: Residuals increasing over time → performance degrading (thermal throttling, memory
+  leaks, cache pollution)
+* **Negative correlation (< -0.5)**: Residuals decreasing over time → performance improving (warmup, JIT optimization,
+  cache warming)
+* **Near zero (-0.2 to 0.2)**: No systematic trend → stable measurements (ideal)
+
+**Rationale:**
+
+Spearman rank correlation is used as it's robust to outliers and detects monotonic (not just linear) trends.
+
+A strong temporal correlation indicates the benchmark environment is non-stationary, making results unreliable.
+
+The temporal correlation check runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`),
+alongside outlier and CI checks, allowing early termination when drift is detected.
+
+## 7.7 Output fields (per individual run)
 
 Per run within a series, stats engine produces:
 
@@ -685,9 +734,10 @@ Per run within a series, stats engine produces:
 * `ci95_half_width_ns`: half-width of 95% CI (display as mean ± half_width)
 * `intercept_ns`: fixed overhead per batch (only for regression mode, null otherwise)
 * `outlier_count`: number of samples flagged as outliers
+* `temporal_correlation`: Spearman correlation between sample order and residuals (range [-1, 1])
 * `samples`: array of `{"iters": N_i, "total_ns": T_i}` for each sample
 
-## 7.7 Output fields (per run series)
+## 7.8 Output fields (per run series)
 
 Per run series (collection of runs), the system produces:
 
@@ -707,8 +757,9 @@ The median run's estimates become the **representative values** for:
 
 Raw run and samples are stored to allow later re-analysis if required.
 
-**Note**: The outlier statistics are computed after collection completes and stored for diagnostic purposes. During
-collection, if the outlier fraction exceeds `OUTLIER_MAX_FRACTION`, the benchmark is aborted and no results are stored.
+**Note**: The outlier and temporal correlation statistics are computed after collection completes and stored for
+diagnostic purposes. During collection, if the outlier fraction exceeds `OUTLIER_MAX_FRACTION` or if
+`|temporal_correlation| > TREND_CORRELATION_THRESHOLD`, the benchmark is aborted and no results are stored.
 
 ---
 
@@ -742,6 +793,7 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
       "mode": "per_iter",
       "intercept_ns": null,
       "outlier_count": 0,
+      "temporal_correlation": 0.03,
       "samples": [
         {
           "iters": 10000000,
@@ -766,7 +818,8 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
 * `config`: JSON object with configuration dimensions (commit, host, profile, threads, etc.) - how to run it
 * `timestamp`: when this run series was performed (unix timestamp, seconds since epoch, start time)
 * `runs`: array of individual run results, **sorted by mean_ns_per_iter**
-    * Each run contains: `timestamp`, `mean_ns_per_iter`, `ci95_half_width_ns`, `mode`, `intercept_ns`
+    * Each run contains: `timestamp`, `mean_ns_per_iter`, `ci95_half_width_ns`, `mode`, `intercept_ns`, `outlier_count`,
+      `temporal_correlation`, `samples`
 * `median_mean_ns_per_iter`: mean from the median run (representative value, integer nanoseconds)
 * `median_ci95_half_width_ns`: CI from the median run (integer nanoseconds)
 * `checksum`: output correctness validation
