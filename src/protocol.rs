@@ -65,7 +65,7 @@ pub fn parse_line(line: &str) -> Result<ProtocolLine, ParseError> {
     }
 }
 
-/// Parse a META line: META\tkey=value,key2=value2,...
+/// Parse a META line: `META\tkey=value,key2=value2,...`
 fn parse_meta_line(line: &str) -> Result<ProtocolLine, ParseError> {
     let content = &line[5..]; // Skip "META\t"
     let fields = parse_comma_separated_kv(content)?;
@@ -73,7 +73,7 @@ fn parse_meta_line(line: &str) -> Result<ProtocolLine, ParseError> {
     Ok(ProtocolLine::Meta(MetaLine { fields }))
 }
 
-/// Parse a SAMPLE line: SAMPLE\t<iters>\t<total_ns>\t[key=value,key2=value2,...]
+/// Parse a SAMPLE line: `SAMPLE\t<iters>\t<total_ns>\t[key=value,key2=value2,...]`
 fn parse_sample_line(line: &str) -> Result<ProtocolLine, ParseError> {
     let content = &line[7..]; // Skip "SAMPLE\t"
     let mut parts = content.split('\t');

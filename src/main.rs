@@ -8,8 +8,23 @@ mod storage;
 use clap::Parser;
 use cli::{Cli, Commands};
 use std::collections::BTreeMap;
+use tracing::{error, info};
 
 fn main() {
+    // Initialize tracing subscriber
+    let format = std::env::var("RUST_LOG_FORMAT").unwrap_or_default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        );
+    if format == "json" {
+        subscriber.json().init();
+    } else {
+        subscriber.init();
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -18,14 +33,16 @@ fn main() {
             config,
             config_json,
         } => {
-            println!("Running benchmarks...");
-            println!("  benchmark: {benchmark:?}");
-            println!("  config: {config:?}");
-            println!("  config_json: {config_json:?}");
+            info!(
+                benchmark = ?benchmark,
+                config = ?config,
+                config_json = ?config_json,
+                "running benchmarks"
+            );
             // TODO: Implement run command
         }
         Commands::Sample { limit } => {
-            println!("Sampling {limit} benchmark(s)...");
+            info!(limit = limit, "sampling benchmarks");
             // TODO: Implement sample command
         }
         Commands::Export {
@@ -33,19 +50,24 @@ fn main() {
             config,
             format,
         } => {
-            println!("Exporting results...");
-            println!("  host: {host:?}");
-            println!("  config: {config:?}");
-            println!("  format: {format}");
+            info!(
+                host = ?host,
+                config = ?config,
+                format = %format,
+                "exporting results"
+            );
             // TODO: Implement export command
         }
         Commands::Timeline { benchmark, config } => {
-            println!("Timeline for benchmark: {benchmark}");
-            println!("  config: {config:?}");
+            info!(
+                benchmark = %benchmark,
+                config = ?config,
+                "showing timeline"
+            );
             // TODO: Implement timeline command
         }
         Commands::Impact { config } => {
-            println!("Impact analysis for config: {config}");
+            info!(config = %config, "analyzing impact");
             // TODO: Implement impact command
         }
         Commands::Debug {
@@ -54,7 +76,7 @@ fn main() {
             command,
         } => {
             if command.is_empty() {
-                eprintln!("Error: No command specified");
+                error!("no command specified");
                 std::process::exit(1);
             }
 
@@ -69,7 +91,11 @@ fn main() {
                         runner = runner.with_stdin_input(input_bytes);
                     }
                     Err(e) => {
-                        eprintln!("Error reading input file {:?}: {}", input_path, e);
+                        error!(
+                            path = ?input_path,
+                            error = %e,
+                            "failed to read input file"
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -84,7 +110,7 @@ fn main() {
                     println!("{}", serde_json::to_string_pretty(&series).unwrap());
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    error!(error = %e, "benchmark run failed");
                     std::process::exit(1);
                 }
             }

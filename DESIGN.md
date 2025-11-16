@@ -1051,7 +1051,7 @@ The `aoc-bench run` command:
     - Reads SAMPLE lines from the child process's stdout
     - Applies the statistics engine to produce run statistics
     - Repeats multiple times to produce a run series, and stores results
-    - If the command/run errors, it is automatically retried (up to 5 retries across the run series)
+    - If the command/run errors, it is automatically retried up to 5 times
 
 ## 11.2 Periodic runs (to detect env drift per config)
 

@@ -10,6 +10,7 @@ use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{error, info, info_span, trace, trace_span, warn, Span};
 
 const TIMEOUT_SECS: u64 = 120; // 2 minutes
 const RUN_SERIES_COUNT: usize = 7; // Number of runs in a series
@@ -24,7 +25,7 @@ pub struct RunResult {
     pub mean_ns_per_iter: f64,
     /// Half-width of 95% confidence interval in nanoseconds
     pub ci95_half_width_ns: f64,
-    /// Estimation mode used (regression or per_iter)
+    /// Estimation mode used
     pub mode: EstimationMode,
     /// Fixed overhead per batch (only for regression mode, null otherwise)
     pub intercept_ns: Option<f64>,
@@ -45,7 +46,7 @@ pub struct RunSeries {
     pub config: BTreeMap<String, String>,
     /// Unix timestamp when this run series started
     pub timestamp: u64,
-    /// Individual run results (sorted by mean_ns_per_iter)
+    /// Individual run results (sorted by `mean_ns_per_iter`)
     pub runs: Vec<RunResult>,
     /// Mean from the median run (representative value)
     pub median_mean_ns_per_iter: f64,
@@ -97,7 +98,7 @@ impl Runner {
     /// Execute a complete run series (default: 7 runs) with retry logic
     ///
     /// Returns a `RunSeries` containing all runs sorted by mean, with median statistics.
-    /// Retries up to `MAX_RETRIES` times on failure.
+    #[tracing::instrument(skip(self))]
     pub fn run_series(
         &self,
         bench: String,
@@ -111,21 +112,34 @@ impl Runner {
         let mut runs = Vec::with_capacity(RUN_SERIES_COUNT);
         let mut retry_count = 0;
 
-        // Execute RUN_SERIES_COUNT successful runs
-        while runs.len() < RUN_SERIES_COUNT {
-            match self.run_single() {
-                Ok(run_result) => {
-                    runs.push(run_result);
-                }
-                Err(e) => {
-                    retry_count += 1;
-                    if retry_count >= MAX_RETRIES {
-                        return Err(e);
+        for run in 0..RUN_SERIES_COUNT {
+            let span = info_span!("run", run);
+            let _enter = span.enter();
+
+            for retry in 0..MAX_RETRIES {
+                let span = info_span!("retry", retry);
+                let _enter = span.enter();
+
+                match self.run_single() {
+                    Ok(run_result) => {
+                        info!(
+                            samples = run_result.samples.len(),
+                            mean_ns = run_result.mean_ns_per_iter,
+                            "run successful"
+                        );
+                        runs.push(run_result);
+                        break;
                     }
-                    eprintln!(
-                        "Run failed (attempt {}/{}): {}. Retrying...",
-                        retry_count, MAX_RETRIES, e
-                    );
+                    Err(e) => {
+                        retry_count += 1;
+                        if retry_count >= MAX_RETRIES {
+                            return Err(e);
+                        }
+                        warn!(
+                            error = %e,
+                            "run failed, retrying"
+                        );
+                    }
                 }
             }
         }
@@ -142,6 +156,13 @@ impl Runner {
         let median_mean_ns_per_iter = runs[median_idx].mean_ns_per_iter;
         let median_ci95_half_width_ns = runs[median_idx].ci95_half_width_ns;
 
+        info!(
+            median_mean_ns = median_mean_ns_per_iter,
+            median_ci95_ns = median_ci95_half_width_ns,
+            total_retries = retry_count,
+            "completed run series"
+        );
+
         Ok(RunSeries {
             schema: 1,
             bench,
@@ -155,6 +176,7 @@ impl Runner {
     }
 
     /// Execute a single benchmark run
+    #[tracing::instrument(skip(self), level = "trace")]
     fn run_single(&self) -> Result<RunResult, RunError> {
         // Spawn the child process
         let mut child = self.spawn_child()?;
@@ -191,7 +213,9 @@ impl Runner {
             }
 
             // Parse protocol line
-            match parse_line(line) {
+            let line = parse_line(line);
+            trace!(?line, "protocol line");
+            match line {
                 Ok(ProtocolLine::Meta(meta)) => {
                     // Validate version if present
                     if let Err(e) = validate_meta_version(&meta) {
@@ -219,7 +243,7 @@ impl Runner {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to parse line: {e}");
+                    warn!(error = %e, "failed to parse protocol line");
                     // Continue on parse errors per design doc
                 }
             }
@@ -245,7 +269,7 @@ impl Runner {
         let mut cmd = Command::new(&self.command);
         cmd.args(&self.args);
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::inherit());
+        cmd.stderr(Stdio::piped());
 
         if self.stdin_input.is_some() {
             cmd.stdin(Stdio::piped());
@@ -264,11 +288,38 @@ impl Runner {
             let mut stdin = child.stdin.take().ok_or_else(|| {
                 RunError::SpawnFailed(io::Error::other("failed to capture stdin pipe"))
             })?;
+
+            let parent_span = Span::current();
             std::thread::spawn(move || {
+                let _parent_enter = parent_span.enter();
+                let span = trace_span!("stdin_write");
+                let _enter = span.enter();
+
                 let _ = stdin.write_all(&input);
-                // stdin is dropped here, closing the pipe
+                drop(stdin);
+
+                trace!("child stdin closed");
             });
         }
+
+        // Read and log stderr in a separate thread to avoid deadlock
+        let stderr = child.stderr.take().ok_or_else(|| {
+            RunError::SpawnFailed(io::Error::other("failed to capture stderr pipe"))
+        })?;
+        let parent_span = Span::current();
+        std::thread::spawn(move || {
+            let _parent_enter = parent_span.enter();
+            let span = trace_span!("stdin_write");
+            let _enter = span.enter();
+
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let line = line.unwrap();
+                warn!(%line, "stderr output from child process");
+            }
+
+            trace!("child stderr closed");
+        });
 
         Ok(child)
     }

@@ -7,6 +7,7 @@
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 const WARMUP_SAMPLES: usize = 16;
 const MIN_SAMPLES: usize = 32;
@@ -114,7 +115,7 @@ impl StatsAccumulator {
         }
 
         // Check every CHECK_EVERY samples after MIN_SAMPLES
-        if (self.samples.len() - MIN_SAMPLES) % CHECK_EVERY != 0 {
+        if !(self.samples.len() - MIN_SAMPLES).is_multiple_of(CHECK_EVERY) {
             return StatsState::MoreSamplesNeeded;
         }
 
@@ -143,6 +144,10 @@ impl StatsAccumulator {
         if relative_ci_half_width <= TARGET_REL_CI {
             StatsState::Done
         } else if self.samples.len() < MAX_SAMPLES {
+            debug!(
+                samples = self.samples.len(),
+                relative_ci_half_width, "ci too wide, waiting for more samples"
+            );
             StatsState::MoreSamplesNeeded
         } else {
             StatsState::Abort(StatsError::FailedToConverge {
