@@ -389,7 +389,12 @@ impl StatsAccumulator {
             };
         }
 
+        // Use consistent resampling in tests to ensure deterministic results
+        #[cfg(test)]
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        #[cfg(not(test))]
         let mut rng = Xoshiro256PlusPlus::from_os_rng();
+
         let mut bootstrap_estimates = Vec::with_capacity(n_bootstrap);
 
         // Perform bootstrap resampling
