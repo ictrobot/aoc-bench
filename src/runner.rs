@@ -130,16 +130,13 @@ impl Runner {
                         runs.push(run_result);
                         break;
                     }
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count >= MAX_RETRIES {
-                            return Err(e);
-                        }
+                    Err(e) if retry < MAX_RETRIES - 1 => {
                         warn!(
                             error = %e,
                             "run failed, retrying"
                         );
                     }
+                    Err(e) => return Err(e),
                 }
             }
         }

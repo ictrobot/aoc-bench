@@ -632,14 +632,16 @@ Algorithm (depends on mode):
 
 ## 7.5 Outlier detection and noisy system warnings
 
-To detect unstable measurement environments (thermal throttling, background load, etc.), we use **IQR-based outlier
-detection** on the residuals.
+To detect unstable measurement environments (thermal throttling, background load, etc.), we use **MAD-based outlier
+detection** (Median Absolute Deviation) on the residuals.
 
 Constants:
 
 ```rust
-const OUTLIER_IQR_FACTOR: f64 = 3.0;         // IQR multiplier for outlier bounds
-const OUTLIER_MAX_FRACTION: f64 = 0.05;      // abort if >5% of samples are outliers
+const OUTLIER_MAD_NORMALIZATION: f64 = 1.482602218505602;  // Consistency constant for normal distribution
+const OUTLIER_MAD_THRESHOLD: f64 = 3.5;                     // Modified Z-score threshold
+const OUTLIER_MAX_FRACTION: f64 = 0.10;                     // abort if >10% of samples are outliers
+const OUTLIER_MIN_ITERATIONS: usize = 128;                  // wait for this many samples before aborting on outliers
 ```
 
 Algorithm:
@@ -648,25 +650,27 @@ Algorithm:
     * **Regression mode**: `residual_i = T_i - (α + β·N_i)` (deviation from fitted line)
     * **Per-iter mode**: `residual_i = T_i / N_i` (per-iteration time)
 
-2. Compute IQR bounds:
+2. Compute MAD-based modified Z-scores:
    ```text
-   Q1 = 25th percentile of residuals
-   Q3 = 75th percentile of residuals
-   IQR = Q3 - Q1
-   lower_bound = Q1 - k·IQR  (where k = OUTLIER_IQR_FACTOR)
-   upper_bound = Q3 + k·IQR
+   median = median(residuals)
+   MAD = median(|residual_i - median|)
+   mad_scaled = MAD × 1.4826  (normalization for normal distribution)
+   modified_z_i = |residual_i - median| / mad_scaled
    ```
 
-3. Count outliers: samples where `residual_i < lower_bound` or `residual_i > upper_bound`
+3. Count outliers: samples where `modified_z_i > OUTLIER_MAD_THRESHOLD`
 
 4. Compute outlier fraction: `outlier_count / total_samples`
 
-5. If `outlier_fraction > OUTLIER_MAX_FRACTION` during stopping checks, abort the benchmark run and do not store results
-   (system is too noisy for reliable measurements)
+5. Check abort conditions during stopping checks:
+   * If `outlier_fraction > OUTLIER_MAX_FRACTION`:
+     * If `samples < OUTLIER_MIN_ITERATIONS` and projected outlier count `< OUTLIER_MIN_ITERATIONS × OUTLIER_MAX_FRACTION`:
+       Wait for more samples (may stabilize)
+     * Otherwise: abort the benchmark run and do not store results (system is too noisy)
 
-**Rationale**: A high outlier fraction indicates systematic measurement instability (not just statistical noise).
-The benchmark should be re-run in a quieter environment rather than producing unreliable results with wide confidence
-intervals.
+**Rationale**: MAD is more robust to outliers than IQR, making it better suited for detecting measurement instability.
+The higher threshold (3.5 vs 3.0) and tolerance (10% vs 5%) account for the stricter detection method. The delayed
+abort logic prevents premature failure when outliers are present early but may dilute with more samples.
 
 The outlier detection runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`), alongside the CI
 width check, allowing early termination (as noisy systems take far longer to converge).

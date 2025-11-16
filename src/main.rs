@@ -105,7 +105,7 @@ fn main() {
                 runner = runner.with_expected_checksum(checksum_str);
             }
 
-            match runner.run_series("test".to_string(), BTreeMap::new()) {
+            match runner.run_series("debug".to_string(), BTreeMap::new()) {
                 Ok(series) => {
                     println!("{}", serde_json::to_string_pretty(&series).unwrap());
                 }

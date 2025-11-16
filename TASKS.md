@@ -40,9 +40,9 @@
 
 ### 2.2 Outlier Detection
 - [x] Implement residual calculation (regression mode: T - (α + β·N), per-iter: T/N)
-- [x] Implement IQR-based outlier detection
+- [x] Implement MAD-based outlier detection (switched from IQR)
 - [x] Add outlier counting and fraction calculation
-- [x] Implement run abort on excessive outliers (>5%)
+- [x] Implement run abort on excessive outliers (>10%, with delayed abort logic)
 - [x] Add tests for outlier detection with synthetic data
 
 ### 2.3 Warmup and Sampling Logic

@@ -7,17 +7,19 @@
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, trace};
 
-const WARMUP_SAMPLES: usize = 16;
+const WARMUP_SAMPLES: usize = 32;
 const MIN_SAMPLES: usize = 32;
 const CHECK_EVERY: usize = 32;
 const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;
 const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;
 const TARGET_REL_CI: f64 = 0.01; // 1%
 const MAX_SAMPLES: usize = 2048;
-const OUTLIER_IQR_FACTOR: f64 = 3.0;
-const OUTLIER_MAX_FRACTION: f64 = 0.05; // 5%
+const OUTLIER_MAD_NORMALIZATION: f64 = 1.482602218505602;
+const OUTLIER_MAD_THRESHOLD: f64 = 3.5;
+const OUTLIER_MAX_FRACTION: f64 = 0.10;
+const OUTLIER_MIN_ITERATIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,8 +87,12 @@ impl StatsAccumulator {
     ///
     /// Returns the current state, see [`StatsAccumulator::state`].
     pub fn add_sample(&mut self, iters: u64, total_ns: u64) -> StatsState {
+        trace!(iters, total_ns, "new sample");
         if self.warmup_remaining > 0 {
             self.warmup_remaining -= 1;
+            if self.warmup_remaining == 0 {
+                trace!("warmup complete");
+            }
         } else {
             self.samples.push(Sample { iters, total_ns });
         }
@@ -132,10 +138,22 @@ impl StatsAccumulator {
         let outlier_count = self.detect_outliers(regression);
         let outlier_fraction = outlier_count as f64 / self.samples.len() as f64;
         if outlier_fraction > OUTLIER_MAX_FRACTION {
-            return StatsState::Abort(StatsError::TooManyOutliers {
-                samples: self.samples.len(),
-                outlier_count,
-            });
+            if self.samples.len() < OUTLIER_MIN_ITERATIONS
+                && (outlier_count as f64 / OUTLIER_MIN_ITERATIONS as f64) < OUTLIER_MAX_FRACTION
+            {
+                debug!(
+                    samples = self.samples.len(),
+                    outlier_count,
+                    outlier_fraction,
+                    "too many outliers but small sample size, waiting for more samples"
+                );
+                return StatsState::MoreSamplesNeeded;
+            } else {
+                return StatsState::Abort(StatsError::TooManyOutliers {
+                    samples: self.samples.len(),
+                    outlier_count,
+                });
+            }
         }
 
         // Check for CI convergence
@@ -346,7 +364,7 @@ impl StatsAccumulator {
         for _ in 0..n_bootstrap {
             // Resample with replacement
             let resampled: Vec<Sample> = (0..self.samples.len())
-                .map(|_| self.samples.choose(&mut rng).unwrap().clone())
+                .map(|_| *self.samples.choose(&mut rng).unwrap())
                 .collect();
 
             // Compute estimate for this resample
@@ -375,13 +393,16 @@ impl StatsAccumulator {
         }
     }
 
-    /// Detects outliers using the IQR (interquartile range) method on residuals
+    /// Detects outliers using the MAD (Median Absolute Deviation) method on residuals
     ///
     /// Computes residuals based on the estimation mode:
     /// - For regression: residual = actual time - predicted time from linear model
     /// - For per-iter: residual = time per iteration
     ///
-    /// Outliers are defined as values beyond Q1 - 3×IQR or Q3 + 3×IQR.
+    /// Uses modified Z-scores based on MAD for robust outlier detection:
+    /// - MAD is scaled by 1.4826 (consistency constant for normal distribution)
+    /// - Outliers are samples where modified Z-score > 3.5
+    ///
     /// Returns the count of detected outliers.
     pub fn detect_outliers(&self, regression: Option<RegressionResult>) -> usize {
         if self.samples.is_empty() {
@@ -413,22 +434,22 @@ impl StatsAccumulator {
             }
         };
 
-        // Sort residuals for percentile calculation
+        // Compute median
         residuals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = residuals[Self::percentile_index(residuals.len(), 0.5)];
 
-        // Compute Q1, Q3, IQR
-        let q1 = residuals[Self::percentile_index(residuals.len(), 0.25)];
-        let q3 = residuals[Self::percentile_index(residuals.len(), 0.75)];
-        let iqr = q3 - q1;
+        // Compute MAD (Median Absolute Deviation)
+        let mut abs_devs: Vec<f64> = residuals.iter().map(|&r| (r - median).abs()).collect();
+        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mad = abs_devs[Self::percentile_index(abs_devs.len(), 0.5)];
 
-        // Compute outlier bounds
-        let lower_bound = q1 - OUTLIER_IQR_FACTOR * iqr;
-        let upper_bound = q3 + OUTLIER_IQR_FACTOR * iqr;
+        // Modified Z-scores, using consistency constant for normal distribution
+        let mad_scaled = mad * OUTLIER_MAD_NORMALIZATION;
 
         // Count outliers
         residuals
             .iter()
-            .filter(|&&r| r < lower_bound || r > upper_bound)
+            .filter(|&&r| ((r - median) / mad_scaled).abs() > OUTLIER_MAD_THRESHOLD)
             .count()
     }
 
@@ -677,7 +698,7 @@ mod tests {
 
         for i in 0..MAX_SAMPLES - 1 {
             assert_eq!(
-                acc.add_sample(100, if i.is_multiple_of(2) { 0 } else { i as u64 }),
+                acc.add_sample(100, if i.is_multiple_of(4) { 0 } else { i as u64 }),
                 StatsState::MoreSamplesNeeded
             );
         }
