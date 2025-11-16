@@ -4,12 +4,13 @@ use crate::protocol::{
     parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
 };
 use crate::stats::{StatsAccumulator, StatsError, StatsResult, StatsState};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tracing::{info, info_span, trace, trace_span, warn, Span};
 
 #[cfg(target_os = "linux")]
@@ -23,7 +24,8 @@ const MAX_RETRIES: usize = 5; // Maximum retries on failure
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunResult {
     /// Unix timestamp (seconds since epoch) when this run started
-    pub timestamp: u64,
+    #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
+    pub timestamp: Timestamp,
     #[serde(flatten)]
     pub stats: StatsResult,
 }
@@ -38,7 +40,8 @@ pub struct RunSeries {
     /// Configuration key-value pairs (canonically sorted)
     pub config: BTreeMap<String, String>,
     /// Unix timestamp when this run series started
-    pub timestamp: u64,
+    #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
+    pub timestamp: Timestamp,
     /// Individual run results (sorted by `mean_ns_per_iter`)
     pub runs: Vec<RunResult>,
     /// Mean from the median run (representative value)
@@ -97,10 +100,7 @@ impl Runner {
         bench: String,
         config: BTreeMap<String, String>,
     ) -> Result<RunSeries, RunError> {
-        let series_start = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let series_start = Timestamp::now();
 
         let mut runs = Vec::with_capacity(RUN_SERIES_COUNT);
         for run in 0..RUN_SERIES_COUNT {
@@ -171,7 +171,8 @@ impl Runner {
 
         // Collect samples from stdout
         let mut stats = StatsAccumulator::default();
-        let start_time = SystemTime::now();
+        let start_time = Timestamp::now();
+        let start_instant = Instant::now();
 
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let reader = BufReader::new(stdout);
@@ -179,7 +180,7 @@ impl Runner {
 
         loop {
             // Check timeout
-            if start_time.elapsed().unwrap() > Duration::from_secs(TIMEOUT_SECS) {
+            if start_instant.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
                 let _ = child.kill();
                 return Err(RunError::Timeout);
             }
@@ -240,7 +241,7 @@ impl Runner {
         let _ = child.kill();
 
         Ok(RunResult {
-            timestamp: start_time.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            timestamp: start_time,
             stats: stats.finish(),
         })
     }
@@ -409,18 +410,22 @@ mod tests {
         )));
         assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
 
-        result.timestamp = 0;
-
         // Check series result
         let mut series_result = runner
             .run_series("yes".to_string(), BTreeMap::new())
             .unwrap();
-        series_result.runs.iter_mut().for_each(|r| r.timestamp = 0);
         assert_eq!(series_result.schema, 1);
         assert_eq!(series_result.bench, "yes");
-        assert_eq!(series_result.runs, vec![result; RUN_SERIES_COUNT]);
         assert_eq!(series_result.median_mean_ns_per_iter, 50.0);
         assert_eq!(series_result.median_ci95_half_width_ns, 0.0);
+
+        // Check runs match, ignoring timestamp
+        result.timestamp = Timestamp::now();
+        series_result
+            .runs
+            .iter_mut()
+            .for_each(|r| r.timestamp = result.timestamp);
+        assert_eq!(series_result.runs, vec![result; RUN_SERIES_COUNT]);
     }
 
     #[test]
@@ -461,10 +466,10 @@ mod tests {
             schema: 1,
             bench: "test-bench".to_string(),
             config,
-            timestamp: 1000,
+            timestamp: Timestamp::from_second(1000).unwrap(),
             runs: vec![
                 RunResult {
-                    timestamp: 1000,
+                    timestamp: Timestamp::from_second(1000).unwrap(),
                     stats: StatsResult {
                         mean_ns_per_iter: 30920.0, // 30.92 µs
                         ci95_half_width_ns: 310.0, // ±1%
@@ -498,9 +503,9 @@ mod tests {
             schema: 1,
             bench: "2015-04".to_string(),
             config,
-            timestamp: 1_731_437_601,
+            timestamp: Timestamp::from_second(1_763_287_200).unwrap(),
             runs: vec![RunResult {
-                timestamp: 1_731_437_602,
+                timestamp: Timestamp::from_second(1_763_287_201).unwrap(),
                 stats: StatsResult {
                     mean_ns_per_iter: 30_920_000.0,
                     ci95_half_width_ns: 31_000.0,
@@ -519,13 +524,14 @@ mod tests {
             checksum: Some("8f024a8e".to_string()),
         };
 
-        // Serialize to JSON
+        // Serialize RunSeries to JSON
         let json = serde_json::to_string_pretty(&series).unwrap();
         assert!(json.contains("\"schema\": 1"));
         assert!(json.contains("\"bench\": \"2015-04\""));
         assert!(json.contains("\"commit\": \"abc1234\""));
         assert!(json.contains("\"mode\": \"per_iter\"")); // Verify snake_case serialization
         assert!(!json.contains("\"stats\":")); // Verify stats is flattened
+        assert!(json.contains("\"timestamp\": 1763287200")); // Verify timestamp encoded in seconds
 
         // Deserialize back
         let deserialized: RunSeries = serde_json::from_str(&json).unwrap();
@@ -535,5 +541,9 @@ mod tests {
         assert_eq!(deserialized.runs[0].stats.mode, EstimationMode::PerIter);
         assert_eq!(deserialized.median_mean_ns_per_iter, 30920000.0);
         assert_eq!(deserialized.checksum, Some("8f024a8e".to_string()));
+
+        // Serialize RunResult to JSON
+        let json = serde_json::to_string_pretty(&deserialized.runs[0]).unwrap();
+        assert!(json.contains("\"timestamp\": 1763287201")); // Verify timestamp encoded in seconds
     }
 }
