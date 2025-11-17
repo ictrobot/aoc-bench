@@ -270,7 +270,7 @@ impl Runner {
         #[allow(clippy::cast_sign_loss)]
         unsafe {
             cmd.pre_exec(|| {
-                let current = libc::personality(0xffffffff);
+                let current = libc::personality(0xffff_ffff);
                 if current == -1 {
                     return Err(io::Error::last_os_error());
                 }
@@ -389,7 +389,7 @@ mod tests {
         // Verify all fields are properly populated
         let mut result = result.unwrap();
         assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
-        assert_eq!(result.stats.ci95_half_width_ns, 0.0); // Can be 0 for identical samples
+        assert!((result.stats.ci95_half_width_ns - 0.0).abs() < 0.001); // Can be 0 for identical samples
         assert_eq!(result.stats.mode, EstimationMode::PerIter);
         assert!(result.stats.intercept_ns.is_none());
         assert!(result.stats.samples.iter().all(|s| matches!(
@@ -407,8 +407,8 @@ mod tests {
             .unwrap();
         assert_eq!(series_result.schema, 1);
         assert_eq!(series_result.bench, "yes");
-        assert_eq!(series_result.median_mean_ns_per_iter, 50.0);
-        assert_eq!(series_result.median_ci95_half_width_ns, 0.0);
+        assert!((series_result.median_mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert!((series_result.median_ci95_half_width_ns - 0.0).abs() < 0.001);
 
         // Check runs match, ignoring timestamp
         result.timestamp = Timestamp::now();
@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(deserialized.bench, "2015-04");
         assert_eq!(deserialized.runs.len(), 1);
         assert_eq!(deserialized.runs[0].stats.mode, EstimationMode::PerIter);
-        assert_eq!(deserialized.median_mean_ns_per_iter, 30920000.0);
+        assert!((deserialized.median_mean_ns_per_iter - 30_920_000.0).abs() < 0.001);
         assert_eq!(deserialized.checksum, Some("8f024a8e".to_string()));
 
         // Serialize RunResult to JSON

@@ -88,26 +88,26 @@
 
 ### 4.1 Config File Parser
 
-- [ ] Define config.json schema structs
-- [ ] Implement config file loading and validation
-- [ ] Add regex validation for keys ([a-z][a-z0-9_]*) and values ([a-zA-Z0-9_-]+)
-- [ ] Implement preset expansion
-- [ ] Implement Cartesian product expansion
-- [ ] Add canonical config sorting (BTreeMap)
+- [x] Define config.json schema structs
+- [x] Implement config file loading and validation
+- [x] Add regex validation for keys ([a-z][a-z0-9_]*) and values ([a-zA-Z0-9_-]+)
+- [x] Implement preset expansion
+- [x] Implement Cartesian product expansion
+- [x] Add canonical config sorting (BTreeMap)
 
 ### 4.2 Command Templating
 
-- [ ] Implement {key} placeholder substitution
-- [ ] Add validation that all placeholders have config values
-- [ ] Add path resolution relative to data/ directory
-- [ ] Add tests for template expansion
+- [x] Implement {key} placeholder substitution
+- [x] Add validation that all placeholders have config values
+- [x] Add path resolution relative to data/ directory
+- [x] Add tests for template expansion
 
 ### 4.3 Config String Encoding
 
-- [ ] Implement config to canonical string (key=value,key=value)
-- [ ] Implement string to config parsing
-- [ ] Add tests for round-trip encoding
-- [ ] Implement partial config matching logic
+- [x] Implement config to canonical string (key=value,key=value)
+- [x] Implement string to config parsing
+- [x] Add tests for round-trip encoding
+- [x] Implement partial config matching logic
 
 ## Phase 5: Storage Layer
 

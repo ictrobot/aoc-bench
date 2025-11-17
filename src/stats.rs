@@ -1020,8 +1020,7 @@ mod tests {
         let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
         assert!(
             correlation.abs() < 0.1,
-            "Expected near-zero correlation for constant times, got {}",
-            correlation
+            "Expected near-zero correlation for constant times, got {correlation}"
         );
     }
 
@@ -1040,8 +1039,7 @@ mod tests {
         let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
         assert!(
             correlation > 0.9,
-            "Expected strong positive correlation for increasing times, got {}",
-            correlation
+            "Expected strong positive correlation for increasing times, got {correlation}"
         );
     }
 
@@ -1060,8 +1058,7 @@ mod tests {
         let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
         assert!(
             correlation < -0.9,
-            "Expected strong negative correlation for decreasing times, got {}",
-            correlation
+            "Expected strong negative correlation for decreasing times, got {correlation}"
         );
     }
 
@@ -1094,6 +1091,6 @@ mod tests {
         let x = vec![1.0];
         let y = vec![2.0];
         let corr = StatsAccumulator::spearman_correlation(x, y);
-        assert_eq!(corr, 0.0);
+        assert!((corr - 0.0).abs() < 0.001);
     }
 }

@@ -1,3 +1,1368 @@
 // Config management: parse config.json, expand Cartesian products, validate constraints
 
-// TODO: Implement config management
+use serde::Deserialize;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
+use std::path::Path;
+use std::sync::Arc;
+
+/// Parsed and validated configuration file
+#[derive(Debug)]
+pub struct ConfigFile {
+    /// Config key definitions (sorted)
+    config_keys: Vec<Key>,
+    /// Benchmark definitions
+    benchmarks: Vec<Benchmark>,
+}
+
+impl ConfigFile {
+    /// Load and parse config.json from the given path
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        Self::from_str(&std::fs::read_to_string(path)?)
+    }
+
+    /// Create a [`ConfigFile`] from a JSON string
+    pub fn from_str(json_str: &str) -> Result<Self, ConfigError> {
+        #[derive(Deserialize)]
+        struct ConfigFileJson {
+            config_keys: HashMap<String, ConfigKeyDef>,
+            benchmarks: Vec<BenchmarkDef>,
+        }
+
+        #[derive(Deserialize)]
+        struct ConfigKeyDef {
+            values: Vec<String>,
+            #[serde(default)]
+            presets: HashMap<String, Vec<String>>,
+        }
+
+        #[derive(Deserialize)]
+        struct BenchmarkDef {
+            benchmark: String,
+            command: String,
+            #[serde(default)]
+            input: Option<String>,
+            #[serde(default)]
+            checksum: Option<String>,
+            config: HashMap<String, ConfigSpec>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ConfigSpec {
+            Preset(String),
+            Literal(Vec<String>),
+        }
+
+        let json: ConfigFileJson = serde_json::from_str(json_str)?;
+
+        let mut config_keys = Vec::new();
+        let mut key_map = HashMap::new();
+
+        // Parse and validate config keys
+        for (key_name, key_def) in json.config_keys {
+            let key = Key::new(key_name.clone(), key_def.values)?;
+
+            // Parse presets
+            let mut presets = HashMap::new();
+            for (preset_name, preset_values) in key_def.presets {
+                presets.insert(
+                    preset_name,
+                    key.subset_from_names(preset_values.iter().map(String::as_str))?,
+                );
+            }
+
+            config_keys.push(key.clone());
+            key_map.insert(key_name, (key, presets));
+        }
+
+        config_keys.sort_unstable();
+
+        // Parse benchmarks
+        let mut benchmarks = Vec::new();
+        for bench_def in json.benchmarks {
+            // Parse config expansion
+            let mut subsets = Vec::new();
+            for (key_name, spec) in bench_def.config {
+                let (key, presets) = key_map
+                    .get(&key_name)
+                    .ok_or_else(|| ConfigError::UnknownKey(key_name.clone()))?;
+
+                subsets.push(match spec {
+                    ConfigSpec::Preset(preset_name) => presets
+                        .get(&preset_name)
+                        .ok_or_else(|| ConfigError::UnknownPreset {
+                            key: key_name.clone(),
+                            preset: preset_name,
+                        })?
+                        .clone(),
+                    ConfigSpec::Literal(values) => {
+                        key.subset_from_names(values.iter().map(String::as_str))?
+                    }
+                });
+            }
+
+            benchmarks.push(Benchmark::new(
+                bench_def.benchmark,
+                ConfigProduct::new(subsets),
+                bench_def.command,
+                bench_def.input,
+                bench_def.checksum,
+            )?);
+        }
+
+        Ok(ConfigFile {
+            config_keys,
+            benchmarks,
+        })
+    }
+
+    /// Get all config keys
+    pub fn config_keys(&self) -> &[Key] {
+        &self.config_keys
+    }
+
+    /// Get all benchmarks
+    pub fn benchmarks(&self) -> &[Benchmark] {
+        &self.benchmarks
+    }
+
+    /// Look up a [`Key`] by its string name, returning None if not found
+    #[must_use]
+    pub fn key_from_name(&self, name: &str) -> Option<&Key> {
+        let index = self
+            .config_keys
+            .binary_search_by_key(&name, |k| k.name())
+            .ok()?;
+        Some(&self.config_keys[index])
+    }
+
+    /// Parse a config string like "key1=val1,key2=val2" into a Config.
+    ///
+    /// Returns an error if the format is invalid, or the keys or values keys are unknown.
+    pub fn parse_config_string(&self, s: &str) -> Result<Config, ConfigError> {
+        if s.is_empty() {
+            return Ok(Config::new());
+        }
+
+        let mut config = Config::new();
+        for pair in s.split(',') {
+            let (key, value) = pair
+                .split_once('=')
+                .ok_or_else(|| ConfigError::InvalidConfigString(s.to_string()))?;
+
+            let key = self
+                .key_from_name(key)
+                .ok_or_else(|| ConfigError::UnknownKeyInPlaceholder(key.to_string()))?;
+
+            config.kv.push(key.value_from_name(value).ok_or_else(|| {
+                ConfigError::UnknownValueForKey {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                }
+            })?);
+        }
+
+        Ok(config)
+    }
+}
+
+/// A configuration key with its set of valid values.
+///
+/// Cheap to clone (uses Arc internally).
+#[derive(Clone)]
+pub struct Key(Arc<KeyInner>);
+struct KeyInner {
+    name: Arc<str>,
+    values: Vec<Arc<str>>,
+    name_to_idx: HashMap<Arc<str>, usize>,
+}
+
+impl Key {
+    /// Create a new configuration key with the given name and valid values.
+    ///
+    /// Validates that the key name matches `[a-z][a-z0-9_]*` and values match `[a-zA-Z0-9_-]+`.
+    /// Returns an error if values are empty, contain duplicates, or fail validation.
+    pub fn new(name: String, values: Vec<String>) -> Result<Self, ConfigError> {
+        Self::validate_key_name(&name)?;
+
+        let values = values
+            .into_iter()
+            .map(|s| {
+                Self::validate_value(&s)?;
+                Ok(Arc::from(s))
+            })
+            .collect::<Result<Vec<Arc<str>>, ConfigError>>()?;
+
+        let mut name_to_idx = HashMap::with_capacity(values.len());
+        for (idx, value) in values.iter().enumerate() {
+            if name_to_idx.insert(value.clone(), idx).is_some() {
+                return Err(ConfigError::DuplicateValue {
+                    key: name,
+                    value: value.to_string(),
+                });
+            }
+        }
+
+        Ok(Self(Arc::new(KeyInner {
+            name: Arc::from(name),
+            values,
+            name_to_idx,
+        })))
+    }
+
+    /// Get the key's name
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.0.name
+    }
+
+    /// Get the number of valid values for this key
+    #[must_use]
+    pub fn values_len(&self) -> usize {
+        self.0.values.len()
+    }
+
+    /// Iterate over all valid values for this key as [`KeyValue`] instances
+    pub fn values(&self) -> impl Iterator<Item = KeyValue> + use<> {
+        let key = self.clone();
+        (0..self.0.values.len()).map(move |index| KeyValue {
+            index,
+            key: key.clone(),
+        })
+    }
+
+    /// Look up a [`KeyValue`] by its string name, returning None if not found
+    #[must_use]
+    pub fn value_from_name(&self, name: &str) -> Option<KeyValue> {
+        Some(KeyValue {
+            key: self.clone(),
+            index: *self.0.name_to_idx.get(name)?,
+        })
+    }
+
+    /// Create a subset containing only the specified values by name.
+    ///
+    /// Returns an error if any name is not a valid value for this key, if the list is empty, or
+    /// contains duplicates.
+    pub fn subset_from_names<'a>(
+        &self,
+        names: impl Iterator<Item = &'a str>,
+    ) -> Result<KeyValuesSubset, ConfigError> {
+        let indexes = names
+            .map(|s| {
+                self.0
+                    .name_to_idx
+                    .get(s)
+                    .ok_or_else(|| ConfigError::UnknownValueForKey {
+                        key: self.0.name.to_string(),
+                        value: s.to_string(),
+                    })
+                    .copied()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        KeyValuesSubset::new(self.clone(), indexes)
+    }
+
+    /// Validates a config key name
+    fn validate_key_name(key: &str) -> Result<(), ConfigError> {
+        if key.is_empty() {
+            return Err(ConfigError::InvalidKeyName(key.to_string()));
+        }
+
+        let mut chars = key.chars();
+        let first = chars.next().unwrap();
+
+        if !first.is_ascii_lowercase() {
+            return Err(ConfigError::InvalidKeyName(key.to_string()));
+        }
+
+        for c in chars {
+            if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_' {
+                return Err(ConfigError::InvalidKeyName(key.to_string()));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates a config value
+    fn validate_value(value: &str) -> Result<(), ConfigError> {
+        if value.is_empty() {
+            return Err(ConfigError::InvalidValue(value.to_string()));
+        }
+
+        for c in value.chars() {
+            if !c.is_ascii_alphanumeric() && c != '_' && c != '-' {
+                return Err(ConfigError::InvalidValue(value.to_string()));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Key {}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Order by name first, then by Arc pointer. Ordering::Equal will only be returned if both
+        // match, which is consistent with the eq implementation as if the pointers are equal, the
+        // names must be equal within
+        self.name()
+            .cmp(other.name())
+            .then_with(|| Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0)))
+    }
+}
+
+impl Hash for Key {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+impl Debug for Key {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // New type wrapper to show indexes of values
+        struct Values<'a>(&'a [Arc<str>]);
+        impl Debug for Values<'_> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                f.debug_map().entries(self.0.iter().enumerate()).finish()
+            }
+        }
+
+        f.debug_struct("ConfigKey")
+            .field("name", &self.0.name)
+            .field("values", &Values(&self.0.values))
+            .finish()
+    }
+}
+
+impl Display for Key {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0.name, f)
+    }
+}
+
+/// A specific value for a configuration key.
+///
+/// Cheap to clone (Key uses Arc internally).
+/// Ordered first by key, then by value index.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct KeyValue {
+    key: Key, // `key` must be first for sort order
+    index: usize,
+}
+
+impl KeyValue {
+    /// Get the configuration key
+    #[must_use]
+    pub fn key(&self) -> &Key {
+        &self.key
+    }
+
+    /// Get the index of this value within its key's value list
+    #[must_use]
+    pub fn value_index(&self) -> usize {
+        self.index
+    }
+
+    /// Get the string name of this value
+    #[must_use]
+    pub fn value_name(&self) -> &str {
+        &self.key.0.values[self.index]
+    }
+}
+
+impl Debug for KeyValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigValue")
+            .field("key", &self.key.name())
+            .field("value", &self.value_name())
+            .field("index", &self.index)
+            .finish()
+    }
+}
+
+impl Display for KeyValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}={}", self.key.name(), self.value_name())
+    }
+}
+
+/// A subset of valid values for a key, used in [`ConfigProduct`] for Cartesian product iteration.
+///
+/// Cheap to clone (uses Arc internally).
+#[derive(Clone, Debug)]
+pub struct KeyValuesSubset {
+    key: Key,
+    indexes: Arc<[usize]>,
+}
+
+impl KeyValuesSubset {
+    /// Create a new subset with the given value indexes.
+    ///
+    /// Indexes are sorted and validated for uniqueness and bounds.
+    /// Returns an error if the list is empty or contains duplicates.
+    fn new(key: Key, mut indexes: Vec<usize>) -> Result<Self, ConfigError> {
+        if indexes.is_empty() {
+            return Err(ConfigError::EmptyValues(key.name().to_string()));
+        }
+
+        indexes.sort_unstable();
+
+        // Check that indexes are in bounds. This is an assert, not a ConfigError, as this method is
+        // private and should only be called with valid indexes.
+        assert!(indexes[indexes.len() - 1] < key.0.values.len());
+
+        if let Some(pair) = indexes.windows(2).find(|w| w[0] == w[1]) {
+            return Err(ConfigError::DuplicateValue {
+                key: key.name().to_string(),
+                value: key.0.values[pair[0]].to_string(),
+            });
+        }
+
+        Ok(Self {
+            key,
+            indexes: indexes.into(),
+        })
+    }
+}
+
+/// A configuration key-value map with canonical ordering.
+///
+/// Keys are stored sorted by [`Key`] for efficient binary search.
+///
+/// Use [`ConfigFile::parse_config_string`] to parse a Config from a string like `"key1=a,key2=b"`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Config {
+    kv: Vec<KeyValue>,
+}
+
+impl Config {
+    /// Create a new empty config
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get a value by key
+    #[must_use]
+    pub fn get(&self, key: &Key) -> Option<&KeyValue> {
+        match self.kv.binary_search_by_key(&key, |kv| &kv.key) {
+            Ok(idx) => Some(&self.kv[idx]),
+            Err(_) => None,
+        }
+    }
+
+    /// Get number of entries
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.kv.len()
+    }
+
+    /// Check if config is empty
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.kv.is_empty()
+    }
+
+    /// Iterate over key-value pairs
+    pub fn iter(&self) -> impl Iterator<Item = &KeyValue> {
+        self.kv.iter()
+    }
+
+    /// Expand command template by replacing `{key}` placeholders with config values.
+    ///
+    /// Returns an error if a placeholder references an unknown key.
+    pub fn expand_command(&self, template: &str) -> Result<String, ConfigError> {
+        let mut result = String::with_capacity(template.len());
+        let mut last_end = 0;
+
+        // Find all {key} placeholders
+        for (start, _) in template.match_indices('{') {
+            if let Some(end_offset) = template[start..].find('}') {
+                let end = start + end_offset;
+                let key = &template[start + 1..end];
+
+                let Ok(index) = self.kv.binary_search_by_key(&key, |kv| kv.key.name()) else {
+                    return Err(ConfigError::UnknownKeyInPlaceholder(key.to_string()));
+                };
+                let value = self.kv[index].value_name();
+
+                // Append text before placeholder
+                result.push_str(&template[last_end..start]);
+                // Append value
+                result.push_str(value);
+                last_end = end + 1;
+            }
+        }
+
+        // Append remaining text
+        result.push_str(&template[last_end..]);
+
+        Ok(result)
+    }
+}
+
+impl Debug for Config {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&self.kv, f)
+    }
+}
+
+impl Display for Config {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        for (i, kv) in self.iter().enumerate() {
+            if i > 0 {
+                write!(f, ",")?;
+            }
+            Display::fmt(kv, f)?;
+        }
+        Ok(())
+    }
+}
+
+/// Specification for a Cartesian product of key-value subsets.
+///
+/// Subsets are stored sorted by [`Key`] for efficient binary search.
+#[derive(Clone, Debug)]
+pub struct ConfigProduct {
+    subsets: Vec<KeyValuesSubset>,
+}
+
+impl ConfigProduct {
+    /// Create a new config product from key-value subsets.
+    pub fn new(mut subsets: Vec<KeyValuesSubset>) -> Self {
+        subsets.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        Self { subsets }
+    }
+
+    /// Filter this product to only include combinations matching the given config.
+    ///
+    /// Returns None if any key-value in config is not present in this product.
+    pub fn filter(&self, config: &Config) -> Option<ConfigProduct> {
+        let mut subsets = self.subsets.clone();
+        for kv in config.iter() {
+            // Check if key exists in subsets
+            let index = subsets
+                .binary_search_by_key(&&kv.key, |subset| &subset.key)
+                .ok()?;
+            // Check if value is in subset
+            subsets[index]
+                .indexes
+                .binary_search(&kv.value_index())
+                .ok()?;
+            // Set that subset to only contain that value
+            subsets[index].indexes = Arc::new([kv.value_index()]);
+        }
+        // Subset keys haven't changed, vec must still be sorted
+        Some(Self { subsets })
+    }
+
+    /// Get the total number of configs in the Cartesian product
+    #[must_use]
+    pub fn len(&self) -> usize {
+        // Always check for overflow as the number of combinations can grow arbitrarily large
+        self.subsets
+            .iter()
+            .fold(1usize, |len, subset| len.strict_mul(subset.indexes.len()))
+    }
+
+    /// Iterate over all configs in the Cartesian product lazily
+    pub fn iter(&self) -> ConfigProductIter<'_> {
+        ConfigProductIter {
+            subsets: &self.subsets,
+            indexes: vec![0; self.subsets.len()],
+            len: self.len(),
+        }
+    }
+}
+
+/// Iterator over the Cartesian product of configuration values
+pub struct ConfigProductIter<'a> {
+    subsets: &'a [KeyValuesSubset],
+    indexes: Vec<usize>,
+    len: usize,
+}
+
+impl Iterator for ConfigProductIter<'_> {
+    type Item = Config;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let mut config = Config::new();
+        config.kv.reserve(self.subsets.len());
+        let mut carry = true;
+        for (subset, i) in self.subsets.iter().zip(self.indexes.iter_mut()) {
+            config.kv.push(KeyValue {
+                key: subset.key.clone(),
+                index: subset.indexes[*i],
+            });
+
+            if carry {
+                *i += 1;
+                if *i >= subset.indexes.len() {
+                    *i = 0;
+                } else {
+                    carry = false;
+                }
+            }
+        }
+
+        self.len -= 1;
+
+        // If carry is still true, we've exhausted all combinations
+        if carry {
+            assert_eq!(self.len, 0);
+        }
+
+        Some(config)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
+}
+
+impl ExactSizeIterator for ConfigProductIter<'_> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// A benchmark with its command template and config expansion
+#[derive(Debug)]
+pub struct Benchmark {
+    name: String,
+    config: ConfigProduct,
+    command_template: String,
+    input: Option<String>,
+    checksum: Option<String>,
+}
+
+impl Benchmark {
+    /// Create a new benchmark.
+    ///
+    /// Validates that the command template can be expanded with the first config
+    /// in the product (all placeholders must have corresponding keys).
+    pub fn new(
+        name: String,
+        config: ConfigProduct,
+        command_template: String,
+        input: Option<String>,
+        checksum: Option<String>,
+    ) -> Result<Self, ConfigError> {
+        // Check that the command template can be expanded
+        let first_config = config.iter().next().unwrap();
+        first_config.expand_command(&command_template)?;
+
+        Ok(Self {
+            name,
+            config,
+            command_template,
+            input,
+            checksum,
+        })
+    }
+
+    /// Get benchmark identifier
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the config product specification for this benchmark
+    pub fn config(&self) -> &ConfigProduct {
+        &self.config
+    }
+
+    /// Get command template with {key} placeholders
+    pub fn command_template(&self) -> &str {
+        &self.command_template
+    }
+
+    /// Get input file name (in data/inputs/) if any
+    pub fn input(&self) -> Option<&str> {
+        self.input.as_deref()
+    }
+
+    /// Get expected checksum if any
+    pub fn checksum(&self) -> Option<&str> {
+        self.checksum.as_deref()
+    }
+}
+
+/// Error type for configuration operations
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Invalid key name '{0}': must match [a-z][a-z0-9_]*")]
+    InvalidKeyName(String),
+    #[error("Invalid value '{0}': must match [a-zA-Z0-9_-]+")]
+    InvalidValue(String),
+    #[error("Duplicate value '{value}' in values array for '{key}': values must be unique")]
+    DuplicateValue { key: String, value: String },
+    #[error("Repeated value '{value}' in subset for '{key}'")]
+    RepeatedValue { key: String, value: String },
+    #[error("Empty values for key '{0}': present keys must have at least one value")]
+    EmptyValues(String),
+    #[error("Unknown preset '{preset}' for key '{key}'")]
+    UnknownPreset { key: String, preset: String },
+    #[error("Unknown config key '{0}'")]
+    UnknownKey(String),
+    #[error("Unknown config key '{0}' in command placeholder")]
+    UnknownKeyInPlaceholder(String),
+    #[error("Value '{value}' not in valid values for key '{key}'")]
+    UnknownValueForKey { key: String, value: String },
+    #[error("Invalid config string: {0}")]
+    InvalidConfigString(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_validation() {
+        // Valid key names
+        assert!(Key::new("commit".to_string(), vec!["a".to_string()]).is_ok());
+        assert!(Key::new("build_type".to_string(), vec!["a".to_string()]).is_ok());
+        assert!(Key::new("t123".to_string(), vec!["a".to_string()]).is_ok());
+
+        // Invalid key names
+        assert!(Key::new(String::new(), vec!["a".to_string()]).is_err());
+        assert!(Key::new("Commit".to_string(), vec!["a".to_string()]).is_err());
+        assert!(Key::new("123".to_string(), vec!["a".to_string()]).is_err());
+        assert!(Key::new("build-type".to_string(), vec!["a".to_string()]).is_err());
+        assert!(Key::new("build type".to_string(), vec!["a".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_value_validation() {
+        // Valid values
+        assert!(Key::new("test".to_string(), vec!["abc123".to_string()]).is_ok());
+        assert!(Key::new("test".to_string(), vec!["build_type".to_string()]).is_ok());
+        assert!(Key::new("test".to_string(), vec!["build-type".to_string()]).is_ok());
+        assert!(Key::new("test".to_string(), vec!["ABC123".to_string()]).is_ok());
+
+        // Invalid values
+        assert!(Key::new("test".to_string(), vec![String::new()]).is_err());
+        assert!(Key::new("test".to_string(), vec!["build type".to_string()]).is_err());
+        assert!(Key::new("test".to_string(), vec!["build/type".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_key_duplicate_values() {
+        let err = Key::new(
+            "test".to_string(),
+            vec!["val1".to_string(), "val2".to_string(), "val1".to_string()],
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateValue { .. }));
+    }
+
+    #[test]
+    fn test_key_interning() {
+        let key1 = Key::new("test".to_string(), vec!["a".to_string()]).unwrap();
+        let key2 = key1.clone();
+
+        // Keys should share the same Arc
+        assert!(Arc::ptr_eq(&key1.0, &key2.0));
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_config_file_loading() {
+        let json = r#"{
+            "config_keys": {
+                "build": {
+                    "values": ["debug", "release"],
+                    "presets": {
+                        "all": ["debug", "release"]
+                    }
+                },
+                "threads": {
+                    "values": ["1", "2", "4"]
+                }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test-bench",
+                    "command": "bin/{build} run {threads}",
+                    "input": "test.txt",
+                    "checksum": "abc123",
+                    "config": {
+                        "build": "all",
+                        "threads": ["1", "4"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        assert_eq!(config_file.benchmarks().len(), 1);
+
+        let bench = &config_file.benchmarks()[0];
+        assert_eq!(bench.name(), "test-bench");
+        assert_eq!(bench.command_template(), "bin/{build} run {threads}");
+        assert_eq!(bench.input(), Some("test.txt"));
+        assert_eq!(bench.checksum(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_config_expansion() {
+        let json = r#"{
+            "config_keys": {
+                "build": {
+                    "values": ["debug", "release"]
+                },
+                "threads": {
+                    "values": ["1", "2"]
+                }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "build": ["debug", "release"],
+                        "threads": ["1", "2"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        // Should expand to 2 x 2 = 4 configs
+        assert_eq!(bench.config().len(), 4);
+
+        let configs: Vec<_> = bench.config().iter().collect();
+        assert_eq!(configs.len(), 4);
+
+        // Verify all combinations exist (sorted by key)
+        let config_strings: Vec<String> = configs.iter().map(Config::to_string).collect();
+
+        assert!(config_strings.contains(&"build=debug,threads=1".to_string()));
+        assert!(config_strings.contains(&"build=debug,threads=2".to_string()));
+        assert!(config_strings.contains(&"build=release,threads=1".to_string()));
+        assert!(config_strings.contains(&"build=release,threads=2".to_string()));
+    }
+
+    #[test]
+    fn test_preset_expansion() {
+        let json = r#"{
+            "config_keys": {
+                "build": {
+                    "values": ["debug", "release", "profile"],
+                    "presets": {
+                        "optimized": ["release", "profile"]
+                    }
+                }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "build": "optimized"
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        assert_eq!(bench.config().len(), 2);
+
+        let configs: Vec<_> = bench.config().iter().collect();
+        assert_eq!(configs.len(), 2);
+
+        let config_strings: Vec<String> = configs.iter().map(Config::to_string).collect();
+
+        assert!(config_strings.contains(&"build=release".to_string()));
+        assert!(config_strings.contains(&"build=profile".to_string()));
+    }
+
+    #[test]
+    fn test_command_templating() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug"] },
+                "threads": { "values": ["4"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "bin/{build}/bench {threads}",
+                    "config": {
+                        "build": ["debug"],
+                        "threads": ["4"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        let mut configs = bench.config().iter();
+        let config = configs.next().unwrap();
+
+        let expanded = config.expand_command(bench.command_template()).unwrap();
+        assert_eq!(expanded, "bin/debug/bench 4");
+    }
+
+    #[test]
+    fn test_config_string_parsing() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] },
+                "threads": { "values": ["1", "n"] },
+                "other": { "values": ["a", "b"] }
+            },
+            "benchmarks": []
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+
+        // Test parsing valid config string
+        let config = config_file
+            .parse_config_string("build=debug,threads=n")
+            .unwrap();
+        assert_eq!(config.len(), 2);
+
+        // Find the build key and check value
+        let build_key = config_file.key_from_name("build").unwrap();
+        assert_eq!(config.get(build_key).unwrap().value_name(), "debug");
+
+        // Find the threads key and check value
+        let threads_key = config_file.key_from_name("threads").unwrap();
+        assert_eq!(config.get(threads_key).unwrap().value_name(), "n");
+
+        // Find the other key and check value
+        let other_key = config_file.key_from_name("other").unwrap();
+        assert!(config.get(other_key).is_none());
+
+        // Test round-trip
+        let config_str = config.to_string();
+        assert_eq!(config_str, "build=debug,threads=n");
+
+        // Test empty string
+        let empty = config_file.parse_config_string("").unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.to_string(), "");
+    }
+
+    #[test]
+    fn test_invalid_configs() {
+        // Invalid key name
+        let json = r#"{
+            "config_keys": {
+                "Build": { "values": ["debug"] }
+            },
+            "benchmarks": []
+        }"#;
+        let err = ConfigFile::from_str(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidKeyName(_)));
+        assert_eq!(
+            err.to_string(),
+            "Invalid key name 'Build': must match [a-z][a-z0-9_]*"
+        );
+
+        // Invalid value
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug release"] }
+            },
+            "benchmarks": []
+        }"#;
+        let err = ConfigFile::from_str(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue(_)));
+        assert_eq!(
+            err.to_string(),
+            "Invalid value 'debug release': must match [a-zA-Z0-9_-]+"
+        );
+
+        // Unknown preset
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "build": "nonexistent"
+                    }
+                }
+            ]
+        }"#;
+        let err = ConfigFile::from_str(json).unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownPreset { .. }));
+        assert_eq!(
+            err.to_string(),
+            "Unknown preset 'nonexistent' for key 'build'"
+        );
+    }
+
+    #[test]
+    fn test_canonical_ordering() {
+        let json = r#"{
+            "config_keys": {
+                "zkey": { "values": ["z1"] },
+                "akey": { "values": ["a1"] },
+                "mkey": { "values": ["m1"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "zkey": ["z1"],
+                        "akey": ["a1"],
+                        "mkey": ["m1"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        let mut configs = bench.config().iter();
+        let config = configs.next().unwrap();
+
+        // Keys are sorted alphabetically
+        let config_str = config.to_string();
+        assert_eq!(config_str, "akey=a1,mkey=m1,zkey=z1");
+    }
+
+    #[test]
+    fn test_lazy_iteration() {
+        let json = r#"{
+            "config_keys": {
+                "a": { "values": ["1", "2", "3"] },
+                "b": { "values": ["x", "y", "z"] },
+                "c": { "values": ["p", "q"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "a": ["1", "2", "3"],
+                        "b": ["x", "y", "z"],
+                        "c": ["p", "q"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        // 3 x 3 x 2 = 18 configs
+        assert_eq!(bench.config().len(), 18);
+
+        let mut iter = bench.config().iter();
+        assert_eq!(iter.len(), 18);
+
+        // Take only first 5 (demonstrating lazy evaluation)
+        let first_five: Vec<_> = iter.by_ref().take(5).collect();
+        assert_eq!(first_five.len(), 5);
+
+        // Iterator should have 13 remaining
+        assert_eq!(iter.len(), 13);
+    }
+
+    #[test]
+    fn test_expand_command_edge_cases() {
+        let key1 = Key::new("key".to_string(), vec!["value".to_string()]).unwrap();
+        let key2 = Key::new("another".to_string(), vec!["test".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("value").unwrap();
+        let kv2 = key2.value_from_name("test").unwrap();
+
+        let mut config = Config::new();
+        config.kv.push(kv2); // another comes first alphabetically
+        config.kv.push(kv1);
+
+        // Test multiple placeholders
+        assert_eq!(
+            config.expand_command("{key} and {another}").unwrap(),
+            "value and test"
+        );
+
+        // Test adjacent placeholders
+        assert_eq!(
+            config.expand_command("{key}{another}").unwrap(),
+            "valuetest"
+        );
+
+        // Test placeholder at start
+        assert_eq!(config.expand_command("{key} start").unwrap(), "value start");
+
+        // Test placeholder at end
+        assert_eq!(config.expand_command("end {key}").unwrap(), "end value");
+
+        // Test no placeholders
+        assert_eq!(
+            config.expand_command("no placeholders").unwrap(),
+            "no placeholders"
+        );
+
+        // Test empty template
+        assert_eq!(config.expand_command("").unwrap(), "");
+
+        // Test missing placeholder
+        let result = config.expand_command("{missing}");
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnknownKeyInPlaceholder(_))
+        ));
+
+        // Test malformed placeholder (no closing brace)
+        assert_eq!(
+            config.expand_command("start {key end").unwrap(),
+            "start {key end"
+        );
+
+        // Test nested braces - the first } closes the placeholder
+        let err = config.expand_command("{{key}}").unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKeyInPlaceholder(v) if v == "{key"));
+    }
+
+    #[test]
+    fn test_empty_config_expansion() {
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {}
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        // Empty config should produce exactly one empty config
+        assert_eq!(bench.config().len(), 1);
+
+        let configs: Vec<_> = bench.config().iter().collect();
+        assert_eq!(configs.len(), 1);
+        assert!(configs[0].is_empty());
+    }
+
+    #[test]
+    fn test_preset_with_single_value() {
+        let json = r#"{
+            "config_keys": {
+                "build": {
+                    "values": ["debug", "release"],
+                    "presets": {
+                        "debug_only": ["debug"]
+                    }
+                }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "build": "debug_only"
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        assert_eq!(bench.config().len(), 1);
+
+        let configs: Vec<_> = bench.config().iter().collect();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].to_string(), "build=debug");
+    }
+
+    #[test]
+    fn test_missing_placeholder_detected_at_parse_time() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "bin/{build}/bench {threads}",
+                    "config": {
+                        "build": ["debug"]
+                    }
+                }
+            ]
+        }"#;
+
+        let err = ConfigFile::from_str(json).unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKeyInPlaceholder(_)));
+    }
+
+    #[test]
+    fn test_config_product_filter() {
+        let key1 = Key::new(
+            "a".to_string(),
+            vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        )
+        .unwrap();
+        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+
+        let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
+        let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
+
+        let product = ConfigProduct::new(vec![subset1, subset2]);
+        assert_eq!(product.len(), 4); // 2 x 2
+
+        // Filter to only configs with a=1
+        let mut filter_config = Config::new();
+        filter_config.kv.push(key1.value_from_name("1").unwrap());
+
+        let filtered = product.filter(&filter_config).unwrap();
+        assert_eq!(filtered.len(), 2); // 1 x 2
+
+        let configs: Vec<_> = filtered.iter().collect();
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().all(|c| c.to_string().starts_with("a=1")));
+    }
+
+    #[test]
+    fn test_key_value_ordering() {
+        let key1 = Key::new("aaa".to_string(), vec!["1".to_string()]).unwrap();
+        let key2 = Key::new("zzz".to_string(), vec!["2".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("1").unwrap();
+        let kv2 = key2.value_from_name("2").unwrap();
+
+        // KeyValue should order by key name first
+        assert!(kv1 < kv2);
+    }
+
+    #[test]
+    fn test_cartesian_product_iteration_order() {
+        let json = r#"{
+            "config_keys": {
+                "a": { "values": ["1", "2"] },
+                "b": { "values": ["x", "y"] },
+                "c": { "values": ["p", "q"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": "test",
+                    "config": {
+                        "a": ["1", "2"],
+                        "b": ["x", "y"],
+                        "c": ["p", "q"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        // Collect all configs in iteration order
+        let configs: Vec<_> = bench.config().iter().map(|c| c.to_string()).collect();
+
+        // The first dimension should vary fastest (like odometer)
+        // Keys are sorted alphabetically: a, b, c
+        assert_eq!(
+            configs,
+            vec![
+                "a=1,b=x,c=p", // a varies first
+                "a=2,b=x,c=p",
+                "a=1,b=y,c=p", // then b
+                "a=2,b=y,c=p",
+                "a=1,b=x,c=q", // then c
+                "a=2,b=x,c=q",
+                "a=1,b=y,c=q",
+                "a=2,b=y,c=q",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_filter_with_missing_key() {
+        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
+        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+        let key3 = Key::new("c".to_string(), vec!["p".to_string()]).unwrap();
+
+        let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
+        let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
+
+        let product = ConfigProduct::new(vec![subset1, subset2]);
+
+        // Try to filter by a key not in the product
+        let mut filter_config = Config::new();
+        filter_config.kv.push(key3.value_from_name("p").unwrap());
+
+        assert!(product.filter(&filter_config).is_none());
+    }
+
+    #[test]
+    fn test_config_filter_with_missing_value() {
+        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
+        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+
+        // Product only contains a=1 (not a=2)
+        let subset1 = key1.subset_from_names(["1"].iter().copied()).unwrap();
+        let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
+
+        let product = ConfigProduct::new(vec![subset1, subset2]);
+
+        // Try to filter by a=2 which is not in the product
+        let mut filter_config = Config::new();
+        filter_config.kv.push(key1.value_from_name("2").unwrap());
+
+        assert!(product.filter(&filter_config).is_none());
+    }
+
+    #[test]
+    fn test_config_filter_empty() {
+        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
+        let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
+        let product = ConfigProduct::new(vec![subset1]);
+
+        // Filter with empty config should return the original product
+        let filter_config = Config::new();
+        let filtered = product.filter(&filter_config).unwrap();
+
+        assert_eq!(filtered.len(), 2);
+    }
+}
