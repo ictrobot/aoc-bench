@@ -507,7 +507,7 @@ T = [T_1, T_2, ..., T_n]
 Constants:
 
 ```rust
-const WARMUP_SAMPLES: usize = 16;
+const WARMUP_SAMPLES: usize = 32;
 const MIN_SAMPLES: usize = 32;
 const CHECK_EVERY: usize = 32;
 const RUN_SERIES_COUNT: usize = 7;  // Number of runs in a series
