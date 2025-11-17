@@ -377,7 +377,12 @@ impl Drop for RunnerChild {
         let pid = self.child.id();
         trace!(pid, "killing child process");
         if let Err(error) = self.child.kill() {
-            warn!(%error, pid, "failed to kill child process");
+            warn!(pid, %error, "failed to kill child process");
+        }
+        trace!(pid, "waiting for child process to exit");
+        match self.child.wait() {
+            Ok(status) => trace!(pid, exit_code = status.code(), "child process exited"),
+            Err(err) => warn!(pid, %err, "failed to wait for child process"),
         }
 
         if let Some(temp_dir) = self.temp_dir.take()
