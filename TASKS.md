@@ -113,34 +113,34 @@
 
 ### 5.1 Directory Structure
 
-- [ ] Implement data/ directory layout creation
-- [ ] Implement results/{host}/ directory creation
-- [ ] Implement runs/{bench}/{config_string}/ path generation
-- [ ] Add file lock implementation (std::fs::File with try_lock_exclusive)
-- [ ] Add tests for path generation and encoding
+- [x] Implement data/ directory layout creation
+- [x] Implement results/{host}/ directory creation
+- [x] Implement runs/{bench}/{config_string}/ path generation
+- [x] Add file lock implementation (std::fs::File with try_lock_exclusive)
+- [x] Add tests for path generation and encoding
 
 ### 5.2 JSON Storage
 
-- [ ] Implement run series JSON file writing
-- [ ] Implement timestamped filename generation (ISO 8601)
-- [ ] Add atomic write (write to temp, then rename)
-- [ ] Add JSON file reading and parsing
+- [x] Implement run series JSON file writing
+- [x] Implement timestamped filename generation (ISO 8601)
+- [x] Add atomic write (write to temp, then rename)
+- [x] Add JSON file reading and parsing
 
 ### 5.3 SQLite Schema
 
-- [ ] Create schema.sql with tables (run_series, results)
-- [ ] Implement database initialization from schema
-- [ ] Add generated columns for config extraction (commit, host)
-- [ ] Add indexes and WITHOUT ROWID optimization
-- [ ] Set up WAL mode and pragmas
+- [x] Create schema.sql with tables (run_series, results)
+- [x] Implement database initialization from schema
+- [x] Add generated columns for config extraction (commit, host)
+- [x] Add indexes and WITHOUT ROWID optimization
+- [x] Set up WAL mode and pragmas
 
 ### 5.4 Database Operations
 
-- [ ] Implement run_series table insert
-- [ ] Implement results table upsert
-- [ ] Implement stable result query by (bench, config)
-- [ ] Add transaction handling (BEGIN IMMEDIATE)
-- [ ] Ensure JSON-first write ordering
+- [x] Implement run_series table insert
+- [x] Implement results table upsert
+- [x] Implement stable result query by (bench, config)
+- [x] Add transaction handling (BEGIN IMMEDIATE)
+- [x] Ensure JSON-first write ordering
 
 ## Phase 6: Stable Result Management
 
