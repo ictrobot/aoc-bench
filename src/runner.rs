@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 use tracing::{info, info_span, trace, trace_span, warn, Span};
 
 #[cfg(target_os = "linux")]
@@ -53,19 +54,17 @@ pub struct RunSeries {
 }
 
 pub struct Runner {
-    command: String,
+    command: which::CanonicalPath,
     args: Vec<String>,
-    working_dir: Option<String>,
     expected_checksum: Option<String>,
     stdin_input: Option<Vec<u8>>,
 }
 
 impl Runner {
-    pub fn new(command: String) -> Self {
+    pub fn new(command: which::CanonicalPath) -> Self {
         Runner {
             command,
             args: Vec::new(),
-            working_dir: None,
             expected_checksum: None,
             stdin_input: None,
         }
@@ -73,11 +72,6 @@ impl Runner {
 
     pub fn with_args(mut self, args: Vec<String>) -> Self {
         self.args = args;
-        self
-    }
-
-    pub fn with_working_dir(mut self, dir: String) -> Self {
-        self.working_dir = Some(dir);
         self
     }
 
@@ -166,34 +160,30 @@ impl Runner {
     /// Execute a single benchmark run
     #[tracing::instrument(skip(self), level = "trace")]
     fn run_single(&self) -> Result<RunResult, RunError> {
-        // Spawn the child process
-        let mut child = self.spawn_child()?;
-
-        // Collect samples from stdout
-        let mut stats = StatsAccumulator::default();
         let start_time = Timestamp::now();
         let start_instant = Instant::now();
 
-        let stdout = child.stdout.take().expect("Failed to capture stdout");
+        // Spawn the child process
+        let (mut child, stdout) = self.spawn_child()?;
+
+        // Collect samples from stdout
+        let mut stats = StatsAccumulator::default();
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
-
         loop {
             // Check timeout
             if start_instant.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
-                let _ = child.kill();
                 return Err(RunError::Timeout);
             }
 
             let Some(Ok(line)) = lines.next() else {
-                if let Ok(Some(code)) = child.try_wait()
+                return if let Ok(Some(code)) = child.child.try_wait()
                     && !code.success()
                 {
-                    return Err(RunError::ProcessCrashed(code.code()));
-                }
-
-                let _ = child.kill();
-                return Err(RunError::PrematureEof);
+                    Err(RunError::ProcessCrashed(code.code()))
+                } else {
+                    Err(RunError::PrematureEof)
+                };
             };
             let line = line.trim();
 
@@ -208,7 +198,6 @@ impl Runner {
                 Ok(ProtocolLine::Meta(meta)) => {
                     // Validate version if present
                     if let Err(e) = validate_meta_version(&meta) {
-                        let _ = child.kill();
                         return Err(RunError::ParseError(e));
                     }
                 }
@@ -217,7 +206,6 @@ impl Runner {
                     if let Some(ref expected) = self.expected_checksum
                         && let Err(e) = validate_checksum(&sample, expected)
                     {
-                        let _ = child.kill();
                         return Err(RunError::InvalidChecksum(e));
                     }
 
@@ -225,7 +213,6 @@ impl Runner {
                     match stats.add_sample(sample.iters, sample.total_ns) {
                         StatsState::MoreSamplesNeeded => {}
                         StatsState::Abort(err) => {
-                            let _ = child.kill();
                             return Err(RunError::StatsFailed(err));
                         }
                         StatsState::Done => break,
@@ -238,15 +225,13 @@ impl Runner {
             }
         }
 
-        let _ = child.kill();
-
         Ok(RunResult {
             timestamp: start_time,
             stats: stats.finish(),
         })
     }
 
-    fn spawn_child(&self) -> Result<Child, RunError> {
+    fn spawn_child(&self) -> Result<(RunnerChild, ChildStdout), RunError> {
         let mut cmd = Command::new(&self.command);
         cmd.args(&self.args);
         cmd.stdout(Stdio::piped());
@@ -258,9 +243,9 @@ impl Runner {
             cmd.stdin(Stdio::null());
         }
 
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
+        // Create a new temp directory for this spawn
+        let temp_dir = TempDir::with_prefix(env!("CARGO_PKG_NAME"))?;
+        cmd.current_dir(temp_dir.path());
 
         // Disable ASLR on Linux for consistent measurements
         //
@@ -326,7 +311,18 @@ impl Runner {
             trace!("child stderr closed");
         });
 
-        Ok(child)
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("failed to capture stdout pipe"))?;
+
+        Ok((
+            RunnerChild {
+                child,
+                temp_dir: Some(temp_dir),
+            },
+            stdout,
+        ))
     }
 }
 
@@ -371,6 +367,27 @@ impl std::fmt::Display for RunSeries {
     }
 }
 
+struct RunnerChild {
+    child: Child,
+    temp_dir: Option<TempDir>,
+}
+
+impl Drop for RunnerChild {
+    fn drop(&mut self) {
+        let pid = self.child.id();
+        trace!(pid, "killing child process");
+        if let Err(error) = self.child.kill() {
+            warn!(%error, pid, "failed to kill child process");
+        }
+
+        if let Some(temp_dir) = self.temp_dir.take()
+            && let Err(error) = temp_dir.close()
+        {
+            warn!(%error, "failed to close child temp directory");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,8 +397,8 @@ mod tests {
     fn test_runner_with_yes() {
         // Create a simple test that uses yes to simulate benchmark output
         // This is a basic sanity test; more complex tests would use a mock binary
-        let runner =
-            Runner::new("yes".to_string()).with_args(vec!["SAMPLE\t1000\t50000".to_string()]);
+        let executable = which::CanonicalPath::new("yes").unwrap();
+        let runner = Runner::new(executable).with_args(vec!["SAMPLE\t1000\t50000".to_string()]);
 
         let result = runner.run_single();
         assert!(result.is_ok());
@@ -422,7 +439,8 @@ mod tests {
     #[test]
     fn test_runner_with_cat() {
         // Create a simple test that uses cat to test input
-        let runner = Runner::new("cat".to_string());
+        let executable = which::CanonicalPath::new("cat").unwrap();
+        let runner = Runner::new(executable);
         let result = runner.run_single();
         assert!(matches!(result, Err(RunError::PrematureEof)));
 
@@ -435,7 +453,8 @@ mod tests {
 
     #[test]
     fn test_runner_with_false() {
-        let runner = Runner::new("false".to_string());
+        let executable = which::CanonicalPath::new("false").unwrap();
+        let runner = Runner::new(executable);
 
         assert!(matches!(
             runner.run_single(),

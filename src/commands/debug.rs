@@ -1,5 +1,6 @@
 use aoc_bench::runner;
 use clap::Args;
+use runner::Runner;
 use std::collections::BTreeMap;
 use tracing::error;
 
@@ -27,7 +28,15 @@ pub fn execute(args: DebugArgs) {
     let cmd = &args.command[0];
     let cmd_args = args.command[1..].to_vec();
 
-    let mut runner = runner::Runner::new(cmd.clone()).with_args(cmd_args);
+    let executable = match which::CanonicalPath::new(cmd) {
+        Ok(path) => path,
+        Err(error) => {
+            error!(%error, "failed to find executable");
+            std::process::exit(1);
+        }
+    };
+
+    let mut runner = Runner::new(executable).with_args(cmd_args);
 
     if let Some(input_path) = args.input {
         match std::fs::read(&input_path) {

@@ -18,6 +18,8 @@ rand_xoshiro = "0.7.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2.0"
+tempfile = "3.23.0"
+which = "8.0.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
