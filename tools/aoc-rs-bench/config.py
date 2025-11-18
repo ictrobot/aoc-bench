@@ -135,11 +135,11 @@ class MatrixBuilder:
                     if v not in results["config_keys"]["multiversion"]["values"]:
                         results["config_keys"]["multiversion"]["values"].append(v)
 
-                results["benchmarks"][f"{puzzle[0]} {puzzle[1]}"][commit] = details
+                results["benchmarks"][f"{puzzle[0]}-{puzzle[1]}"][commit] = details
 
     def post_process_benchmark(self, name: str, benchmark: dict, config_keys: dict) -> list[dict]:
         benchmarks = []
-        year, day = name.split(" ")
+        year, day = name.split("-")
 
         all_commits = config_keys["commit"]["values"]
         commits_reversed = [c for c in reversed(all_commits) if c in benchmark]
@@ -166,7 +166,14 @@ class MatrixBuilder:
 
             benchmarks.append({
                 "benchmark": name,
-                "command": "builds/{build}/{commit} bench " + year + " " + day + " {threads} {multiversion}",
+                "command": [
+                    "builds/{build}/{commit}",
+                    "bench",
+                    year,
+                    day,
+                    "{threads}",
+                    "{multiversion}",
+                ],
                 "input": self.get_input_hash(year, day),
                 "checksum": chunk_metadata["checksum"],
                 "config": {

@@ -1,4 +1,5 @@
 use clap::Args;
+use std::process::ExitCode;
 use tracing::info;
 
 #[derive(Args, Debug)]
@@ -8,7 +9,9 @@ pub struct ImpactArgs {
     pub config: String,
 }
 
-pub fn execute(args: ImpactArgs) {
+#[expect(clippy::needless_pass_by_value, reason = "not yet implemented")]
+pub fn execute(args: ImpactArgs) -> ExitCode {
     info!(config = %args.config, "analyzing impact");
     // TODO: Implement impact command
+    ExitCode::FAILURE
 }

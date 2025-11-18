@@ -1,7 +1,9 @@
+use aoc_bench::config::{Benchmark, Config, ConfigProduct};
 use aoc_bench::runner;
 use clap::Args;
 use runner::Runner;
-use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::ExitCode;
 use tracing::error;
 
 #[derive(Args, Debug)]
@@ -19,52 +21,42 @@ pub struct DebugArgs {
     pub command: Vec<String>,
 }
 
-pub fn execute(args: DebugArgs) {
+pub fn execute(args: DebugArgs) -> ExitCode {
     if args.command.is_empty() {
         error!("no command specified");
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
 
-    let cmd = &args.command[0];
-    let cmd_args = args.command[1..].to_vec();
-
-    let executable = match which::CanonicalPath::new(cmd) {
-        Ok(path) => path,
+    let benchmark = match Benchmark::new(
+        "debug".try_into().unwrap(),
+        ConfigProduct::default(),
+        args.command,
+        args.input,
+        args.checksum,
+    ) {
+        Ok(benchmark) => benchmark,
         Err(error) => {
-            error!(%error, "failed to find executable");
-            std::process::exit(1);
+            error!(%error, "failed to construct benchmark instance");
+            return ExitCode::FAILURE;
         }
     };
 
-    let mut runner = Runner::new(executable).with_args(cmd_args);
-
-    if let Some(input_path) = args.input {
-        match std::fs::read(&input_path) {
-            Ok(input_bytes) => {
-                runner = runner.with_stdin_input(input_bytes);
-            }
-            Err(e) => {
-                error!(
-                    path = ?input_path,
-                    error = %e,
-                    "failed to read input file"
-                );
-                std::process::exit(1);
-            }
+    let runner = match Runner::new(Path::new("."), &benchmark, Config::new()) {
+        Ok(runner) => runner,
+        Err(error) => {
+            error!(%error, "failed to construct runner instance");
+            return ExitCode::FAILURE;
         }
-    }
+    };
 
-    if let Some(checksum_str) = args.checksum {
-        runner = runner.with_expected_checksum(checksum_str);
-    }
-
-    match runner.run_series("debug".to_string(), BTreeMap::new()) {
+    match runner.run_series() {
         Ok(series) => {
             println!("{}", serde_json::to_string_pretty(&series).unwrap());
+            ExitCode::SUCCESS
         }
         Err(e) => {
             error!(error = %e, "benchmark run failed");
-            std::process::exit(1);
+            ExitCode::FAILURE
         }
     }
 }

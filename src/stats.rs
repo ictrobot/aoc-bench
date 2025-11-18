@@ -86,6 +86,7 @@ pub struct StatsResult {
 }
 
 impl StatsAccumulator {
+    #[must_use]
     pub fn new(with_warmup: bool) -> Self {
         StatsAccumulator {
             samples: Vec::new(),
@@ -110,11 +111,13 @@ impl StatsAccumulator {
     }
 
     /// Returns the number of samples collected (excluding warmup samples)
+    #[must_use]
     pub fn sample_count(&self) -> usize {
         self.samples.len()
     }
 
     /// Returns a reference to all collected samples (excluding warmup samples)
+    #[must_use]
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }
@@ -347,6 +350,7 @@ impl StatsAccumulator {
     }
 
     /// Compute weighted mean: μ = `Σ(T_i)` / `Σ(N_i)`
+    #[must_use]
     pub fn compute_weighted_mean(&self) -> f64 {
         Self::compute_weighted_mean_from_samples(&self.samples)
     }
@@ -436,6 +440,7 @@ impl StatsAccumulator {
     /// - For per-iter: residual = time per iteration
     ///
     /// Returns a vector of residuals in original sample order.
+    #[must_use]
     pub fn compute_residuals(&self, regression: Option<RegressionResult>) -> Vec<f64> {
         if self.samples.is_empty() {
             return Vec::new();

@@ -1,4 +1,5 @@
 use clap::Args;
+use std::process::ExitCode;
 use tracing::info;
 
 #[derive(Args, Debug)]
@@ -16,7 +17,8 @@ pub struct ExportArgs {
     pub format: String,
 }
 
-pub fn execute(args: ExportArgs) {
+#[expect(clippy::needless_pass_by_value, reason = "not yet implemented")]
+pub fn execute(args: ExportArgs) -> ExitCode {
     info!(
         host = ?args.host,
         config = ?args.config,
@@ -24,4 +26,5 @@ pub fn execute(args: ExportArgs) {
         "exporting results"
     );
     // TODO: Implement export command
+    ExitCode::FAILURE
 }

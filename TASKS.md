@@ -90,7 +90,7 @@
 
 - [x] Define config.json schema structs
 - [x] Implement config file loading and validation
-- [x] Add regex validation for keys ([a-z][a-z0-9_]*) and values ([a-zA-Z0-9_-]+)
+- [x] Add regex validation for keys ([a-z][a-z0-9_]+) and values ([a-zA-Z0-9_-]+)
 - [x] Implement preset expansion
 - [x] Implement Cartesian product expansion
 - [x] Add canonical config sorting (BTreeMap)

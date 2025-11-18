@@ -1,16 +1,17 @@
 // Runner: process spawning, SAMPLE collection, run series execution
 
+use crate::config::{Benchmark, BenchmarkId, Config};
 use crate::protocol::{
     parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
 };
-use crate::stats::{StatsAccumulator, StatsError, StatsResult, StatsState};
+use crate::run::{Run, RunSeries};
+use crate::stats::{StatsAccumulator, StatsError, StatsState};
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::io;
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
+use std::{fs, io};
 use tempfile::TempDir;
 use tracing::{info, info_span, trace, trace_span, warn, Span};
 
@@ -21,79 +22,51 @@ const TIMEOUT_SECS: u64 = 120; // 2 minutes
 const RUN_SERIES_COUNT: usize = 7; // Number of runs in a series
 const MAX_RETRIES: usize = 5; // Maximum retries on failure
 
-/// Result from a single benchmark run
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RunResult {
-    /// Unix timestamp (seconds since epoch) when this run started
-    #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
-    pub timestamp: Timestamp,
-    #[serde(flatten)]
-    pub stats: StatsResult,
-}
-
-/// A complete run series containing multiple individual runs
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RunSeries {
-    /// Schema version for format compatibility
-    pub schema: u32,
-    /// Benchmark name/identifier
-    pub bench: String,
-    /// Configuration key-value pairs (canonically sorted)
-    pub config: BTreeMap<String, String>,
-    /// Unix timestamp when this run series started
-    #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
-    pub timestamp: Timestamp,
-    /// Individual run results (sorted by `mean_ns_per_iter`)
-    pub runs: Vec<RunResult>,
-    /// Mean from the median run (representative value)
-    pub median_mean_ns_per_iter: f64,
-    /// CI half-width from the median run
-    pub median_ci95_half_width_ns: f64,
-    /// Output validation checksum (if provided)
-    pub checksum: Option<String>,
-}
-
+#[derive(Debug, Clone)]
 pub struct Runner {
-    command: which::CanonicalPath,
+    executable: which::CanonicalPath,
     args: Vec<String>,
     expected_checksum: Option<String>,
     stdin_input: Option<Vec<u8>>,
+    benchmark_id: BenchmarkId,
+    benchmark_config: Config,
 }
 
 impl Runner {
-    pub fn new(command: which::CanonicalPath) -> Self {
-        Runner {
-            command,
-            args: Vec::new(),
-            expected_checksum: None,
-            stdin_input: None,
-        }
-    }
+    pub fn new(data_dir: &Path, benchmark: &Benchmark, config: Config) -> Result<Self, RunError> {
+        let mut args = config.expand_templates(benchmark.command_template())?;
 
-    pub fn with_args(mut self, args: Vec<String>) -> Self {
-        self.args = args;
-        self
-    }
+        let executable = args.remove(0);
+        let executable =
+            which::CanonicalPath::new_in(&executable, std::env::var_os("PATH"), data_dir)
+                .map_err(|error| RunError::ExecutableNotFound { executable, error })?;
 
-    pub fn with_expected_checksum(mut self, checksum: String) -> Self {
-        self.expected_checksum = Some(checksum);
-        self
-    }
+        let stdin_input = if let Some(path) = benchmark.input() {
+            Some(
+                fs::read(path).map_err(|error| RunError::ReadingInputFailed {
+                    path: path.into(),
+                    error,
+                })?,
+            )
+        } else {
+            None
+        };
 
-    pub fn with_stdin_input(mut self, input: Vec<u8>) -> Self {
-        self.stdin_input = Some(input);
-        self
+        Ok(Runner {
+            executable,
+            args,
+            expected_checksum: benchmark.checksum().map(str::to_string),
+            stdin_input,
+            benchmark_id: benchmark.id().clone(),
+            benchmark_config: config,
+        })
     }
 
     /// Execute a complete run series (default: 7 runs) with retry logic
     ///
     /// Returns a `RunSeries` containing all runs sorted by mean, with median statistics.
     #[tracing::instrument(skip(self))]
-    pub fn run_series(
-        &self,
-        bench: String,
-        config: BTreeMap<String, String>,
-    ) -> Result<RunSeries, RunError> {
+    pub fn run_series(&self) -> Result<RunSeries, RunError> {
         let series_start = Timestamp::now();
 
         let mut runs = Vec::with_capacity(RUN_SERIES_COUNT);
@@ -147,8 +120,8 @@ impl Runner {
 
         Ok(RunSeries {
             schema: 1,
-            bench,
-            config,
+            bench: self.benchmark_id.clone(),
+            config: self.benchmark_config.clone(),
             timestamp: series_start,
             runs,
             median_mean_ns_per_iter,
@@ -159,7 +132,7 @@ impl Runner {
 
     /// Execute a single benchmark run
     #[tracing::instrument(skip(self), level = "trace")]
-    fn run_single(&self) -> Result<RunResult, RunError> {
+    fn run_single(&self) -> Result<Run, RunError> {
         let start_time = Timestamp::now();
         let start_instant = Instant::now();
 
@@ -225,14 +198,14 @@ impl Runner {
             }
         }
 
-        Ok(RunResult {
+        Ok(Run {
             timestamp: start_time,
             stats: stats.finish(),
         })
     }
 
     fn spawn_child(&self) -> Result<(RunnerChild, ChildStdout), RunError> {
-        let mut cmd = Command::new(&self.command);
+        let mut cmd = Command::new(&self.executable);
         cmd.args(&self.args);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -328,6 +301,20 @@ impl Runner {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    #[error("Failed to build command from config: {0}")]
+    ConfigError(#[from] crate::config::ConfigError),
+    #[error("Failed to find executable '{executable}': {error}")]
+    ExecutableNotFound {
+        executable: String,
+        #[source]
+        error: which::Error,
+    },
+    #[error("Failed to read input file '{path:?}': {error}")]
+    ReadingInputFailed {
+        path: PathBuf,
+        #[source]
+        error: io::Error,
+    },
     #[error("Failed to spawn process: {0}")]
     SpawnFailed(#[from] io::Error),
     #[error("Process crashed with exit code: {0:?}")]
@@ -342,23 +329,6 @@ pub enum RunError {
     InvalidChecksum(ParseError),
     #[error("Statistics collection failed: {0}")]
     StatsFailed(StatsError),
-}
-
-impl RunSeries {
-    /// Format the run series result for display
-    ///
-    /// Returns a string like "30.92 µs/iter ±0.10% (median of 7 runs)"
-    pub fn display_result(&self) -> String {
-        let mean_us = self.median_mean_ns_per_iter / 1000.0;
-        let ci_percent = (self.median_ci95_half_width_ns / self.median_mean_ns_per_iter) * 100.0;
-
-        format!(
-            "{:.2} µs/iter ±{:.2}% (median of {} runs)",
-            mean_us,
-            ci_percent,
-            self.runs.len()
-        )
-    }
 }
 
 impl std::fmt::Display for RunSeries {
@@ -396,14 +366,24 @@ impl Drop for RunnerChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigProduct;
     use crate::stats::{EstimationMode, Sample};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_runner_with_yes() {
         // Create a simple test that uses yes to simulate benchmark output
         // This is a basic sanity test; more complex tests would use a mock binary
-        let executable = which::CanonicalPath::new("yes").unwrap();
-        let runner = Runner::new(executable).with_args(vec!["SAMPLE\t1000\t50000".to_string()]);
+        let tmp_dir = TempDir::new().unwrap();
+        let benchmark = Benchmark::new(
+            "yes".try_into().unwrap(),
+            ConfigProduct::default(),
+            vec!["yes".into(), "SAMPLE\t1000\t50000".into()],
+            None,
+            None,
+        )
+        .unwrap();
+        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
 
         let result = runner.run_single();
         assert!(result.is_ok());
@@ -424,11 +404,9 @@ mod tests {
         assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
 
         // Check series result
-        let mut series_result = runner
-            .run_series("yes".to_string(), BTreeMap::new())
-            .unwrap();
+        let mut series_result = runner.run_series().unwrap();
         assert_eq!(series_result.schema, 1);
-        assert_eq!(series_result.bench, "yes");
+        assert_eq!(series_result.bench, "yes".try_into().unwrap());
         assert!((series_result.median_mean_ns_per_iter - 50.0).abs() < 0.001);
         assert!((series_result.median_ci95_half_width_ns - 0.0).abs() < 0.001);
 
@@ -444,22 +422,46 @@ mod tests {
     #[test]
     fn test_runner_with_cat() {
         // Create a simple test that uses cat to test input
-        let executable = which::CanonicalPath::new("cat").unwrap();
-        let runner = Runner::new(executable);
+        let tmp_dir = TempDir::new().unwrap();
+        let create_benchmark = |input| {
+            Benchmark::new(
+                "cat".try_into().unwrap(),
+                ConfigProduct::default(),
+                vec!["cat".into()],
+                input,
+                None,
+            )
+            .unwrap()
+        };
+
+        let benchmark = create_benchmark(None);
+        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
         let result = runner.run_single();
         assert!(matches!(result, Err(RunError::PrematureEof)));
 
-        let result = runner
-            .with_stdin_input("SAMPLE\t1000\t50000\n".to_string().repeat(100).into_bytes())
-            .run_single();
-        let result = result.unwrap();
+        let mut tmp_file = NamedTempFile::new().unwrap();
+        tmp_file
+            .write_all("SAMPLE\t1000\t50000\n".to_string().repeat(100).as_bytes())
+            .unwrap();
+
+        let benchmark = create_benchmark(Some(tmp_file.path().to_owned()));
+        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
+        let result = runner.run_single().unwrap();
         assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
     }
 
     #[test]
     fn test_runner_with_false() {
-        let executable = which::CanonicalPath::new("false").unwrap();
-        let runner = Runner::new(executable);
+        let tmp_dir = TempDir::new().unwrap();
+        let benchmark = Benchmark::new(
+            "false".try_into().unwrap(),
+            ConfigProduct::default(),
+            vec!["false".into()],
+            None,
+            None,
+        )
+        .unwrap();
+        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
 
         assert!(matches!(
             runner.run_single(),
@@ -467,98 +469,8 @@ mod tests {
         ));
 
         assert!(matches!(
-            runner.run_series("false".to_string(), BTreeMap::new()),
+            runner.run_series(),
             Err(RunError::ProcessCrashed(Some(1)))
         ));
-    }
-
-    #[test]
-    fn test_run_series_display() {
-        let mut config = BTreeMap::new();
-        config.insert("test".to_string(), "value".to_string());
-
-        let series = RunSeries {
-            schema: 1,
-            bench: "test-bench".to_string(),
-            config,
-            timestamp: Timestamp::from_second(1000).unwrap(),
-            runs: vec![
-                RunResult {
-                    timestamp: Timestamp::from_second(1000).unwrap(),
-                    stats: StatsResult {
-                        mean_ns_per_iter: 30920.0, // 30.92 µs
-                        ci95_half_width_ns: 310.0, // ±1%
-                        mode: EstimationMode::PerIter,
-                        intercept_ns: None,
-                        outlier_count: 0,
-                        samples: vec![],
-                        temporal_correlation: 0.0,
-                    }
-                };
-                7
-            ],
-            median_mean_ns_per_iter: 30920.0,
-            median_ci95_half_width_ns: 310.0,
-            checksum: None,
-        };
-
-        let display = series.display_result();
-        assert!(display.contains("30.92 µs/iter"));
-        assert!(display.contains("±1.00%"));
-        assert!(display.contains("median of 7 runs"));
-    }
-
-    #[test]
-    fn test_run_series_json_round_trip() {
-        let mut config = BTreeMap::new();
-        config.insert("commit".to_string(), "abc1234".to_string());
-        config.insert("host".to_string(), "pi5".to_string());
-
-        let series = RunSeries {
-            schema: 1,
-            bench: "2015-04".to_string(),
-            config,
-            timestamp: Timestamp::from_second(1_763_287_200).unwrap(),
-            runs: vec![RunResult {
-                timestamp: Timestamp::from_second(1_763_287_201).unwrap(),
-                stats: StatsResult {
-                    mean_ns_per_iter: 30_920_000.0,
-                    ci95_half_width_ns: 31_000.0,
-                    mode: EstimationMode::PerIter,
-                    intercept_ns: None,
-                    outlier_count: 0,
-                    samples: vec![Sample {
-                        iters: 10_000_000,
-                        total_ns: 30_920_000_000,
-                    }],
-                    temporal_correlation: 0.0,
-                },
-            }],
-            median_mean_ns_per_iter: 30_920_000.0,
-            median_ci95_half_width_ns: 31_000.0,
-            checksum: Some("8f024a8e".to_string()),
-        };
-
-        // Serialize RunSeries to JSON
-        let json = serde_json::to_string_pretty(&series).unwrap();
-        assert!(json.contains("\"schema\": 1"));
-        assert!(json.contains("\"bench\": \"2015-04\""));
-        assert!(json.contains("\"commit\": \"abc1234\""));
-        assert!(json.contains("\"mode\": \"per_iter\"")); // Verify snake_case serialization
-        assert!(!json.contains("\"stats\":")); // Verify stats is flattened
-        assert!(json.contains("\"timestamp\": 1763287200")); // Verify timestamp encoded in seconds
-
-        // Deserialize back
-        let deserialized: RunSeries = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.schema, 1);
-        assert_eq!(deserialized.bench, "2015-04");
-        assert_eq!(deserialized.runs.len(), 1);
-        assert_eq!(deserialized.runs[0].stats.mode, EstimationMode::PerIter);
-        assert!((deserialized.median_mean_ns_per_iter - 30_920_000.0).abs() < 0.001);
-        assert_eq!(deserialized.checksum, Some("8f024a8e".to_string()));
-
-        // Serialize RunResult to JSON
-        let json = serde_json::to_string_pretty(&deserialized.runs[0]).unwrap();
-        assert!(json.contains("\"timestamp\": 1763287201")); // Verify timestamp encoded in seconds
     }
 }

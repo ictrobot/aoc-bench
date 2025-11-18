@@ -1,4 +1,5 @@
 use clap::Args;
+use std::process::ExitCode;
 use tracing::info;
 
 #[derive(Args, Debug)]
@@ -16,7 +17,8 @@ pub struct RunArgs {
     pub config_json: Option<String>,
 }
 
-pub fn execute(args: RunArgs) {
+#[expect(clippy::needless_pass_by_value, reason = "not yet implemented")]
+pub fn execute(args: RunArgs) -> ExitCode {
     info!(
         benchmark = ?args.benchmark,
         config = ?args.config,
@@ -24,4 +26,5 @@ pub fn execute(args: RunArgs) {
         "running benchmarks"
     );
     // TODO: Implement run command
+    ExitCode::FAILURE
 }

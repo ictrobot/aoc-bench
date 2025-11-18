@@ -86,8 +86,8 @@ All benchmark data and configuration is stored in a single `data/` directory wit
   Together, `(benchmark, config)` uniquely identifies a benchmark execution variant.
 
   **Character constraints**: To ensure filesystem safety and portability:
-    - Keys: Must match regex `[a-z][a-z0-9_]*` (lowercase alphanumeric + underscores, must start with letter)
-    - Values: Must match regex `[a-zA-Z0-9_-]+` (alphanumeric + underscores + hyphens, no spaces or special chars)
+    - Keys: Must match regex `[a-z][a-z0-9_]+` (lowercase alphanumeric + underscores, must start with letter)
+    - Values and benchmark names: Must match regex `[a-zA-Z0-9_-]+` (alphanumeric + underscores + hyphens)
     - These constraints ensure config strings can be used directly in file paths on all platforms
 
   **Well-known keys** (by convention, not required):
@@ -272,9 +272,11 @@ For each key (e.g., `commit`, `build`, `threads`):
 **Canonical ordering**: The `values` array defines the canonical order for this key. When configs are serialized to
 strings or stored, values are sorted according to this order.
 
-**Key names**: Must match regex `[a-z][a-z0-9_]*` (lowercase, start with letter).
+**Key names**: Must match regex `[a-z][a-z0-9_]+` (lowercase, start with letter).
 
 **All keys are optional**: A benchmark config can omit any key. Only specified keys are included in the final config.
+
+**Disallowed keys**: The following keys are reserved to avoid confusion: `bench`, `benchmark`, `host`, `timestamp`
 
 ## 4.3 Benchmarks Section
 
@@ -888,7 +890,6 @@ data/
 * Config subdirectory: Canonical config string in `key=value,key=value` format (without the `bench` key and `host` key)
     - Keys are sorted alphabetically (same as canonical JSON ordering)
     - Format: `key1=value1,key2=value2,...` where keys and values follow the character constraints
-    - The `bench` key is excluded from this string since it's already represented by the parent directory
     - The `host` key is excluded from this string since it's represented by the top-level host directory
     - Example: `{"bench":"2015-04","commit":"abc1234","host":"silicon","profile":"release","threads":"1"}` →
       `runs/2015-04/commit=abc1234,profile=release,threads=1/`

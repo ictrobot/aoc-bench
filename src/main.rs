@@ -2,6 +2,7 @@ mod commands;
 
 use clap::Parser;
 use commands::Commands;
+use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(name = "aoc-bench")]
@@ -11,7 +12,7 @@ struct Cli {
     command: Commands,
 }
 
-fn main() {
+fn main() -> ExitCode {
     // Initialize tracing subscriber
     let format = std::env::var("RUST_LOG_FORMAT").unwrap_or_default();
     let subscriber = tracing_subscriber::fmt()
@@ -27,5 +28,5 @@ fn main() {
     }
 
     let cli = Cli::parse();
-    cli.command.execute();
+    cli.command.execute()
 }

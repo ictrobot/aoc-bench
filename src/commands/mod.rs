@@ -6,6 +6,7 @@ mod sample;
 mod timeline;
 
 use clap::Subcommand;
+use std::process::ExitCode;
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -29,7 +30,7 @@ pub enum Commands {
 }
 
 impl Commands {
-    pub fn execute(self) {
+    pub fn execute(self) -> ExitCode {
         match self {
             Commands::Run(args) => run::execute(args),
             Commands::Sample(args) => sample::execute(args),
