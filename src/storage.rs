@@ -427,7 +427,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "2015-04",
-                    "command": ["run"],
+                    "command": ["run", "{build}", "{commit}"],
                     "config": {
                         "build": ["generic", "native"],
                         "commit": ["abc1234", "def4567"]

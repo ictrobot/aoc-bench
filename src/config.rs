@@ -5,7 +5,7 @@ mod parse;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -600,6 +600,14 @@ impl Config {
     ///
     /// Returns an error if a placeholder references an unknown key.
     pub fn expand_template(&self, template: &str) -> Result<String, ConfigError> {
+        self.expand_template_impl(template, |_| {})
+    }
+
+    fn expand_template_impl(
+        &self,
+        template: &str,
+        mut key_callback: impl FnMut(&Key),
+    ) -> Result<String, ConfigError> {
         let mut result = String::with_capacity(template.len());
         let mut last_end = 0;
 
@@ -612,12 +620,14 @@ impl Config {
                 let Ok(index) = self.kv.binary_search_by_key(&key, |kv| kv.key.name()) else {
                     return Err(ConfigError::UnknownKeyInPlaceholder(key.to_string()));
                 };
-                let value = self.kv[index].value_name();
+
+                let kv = &self.kv[index];
+                key_callback(&kv.key);
 
                 // Append text before placeholder
                 result.push_str(&template[last_end..start]);
                 // Append value
-                result.push_str(value);
+                result.push_str(kv.value_name());
                 last_end = end + 1;
             }
         }
@@ -930,10 +940,23 @@ impl BenchmarkVariant {
             ));
         }
 
-        // Check that the command template can be expanded
+        // Check that the command template can be expanded and contains all config keys
         let first_config = config.iter().next().unwrap();
+        let mut hashset = config
+            .subsets
+            .iter()
+            .map(|subset| &subset.key)
+            .collect::<HashSet<_>>();
         for placeholder in &command_template {
-            first_config.expand_template(placeholder)?;
+            first_config.expand_template_impl(placeholder, |key| {
+                hashset.remove(key);
+            })?;
+        }
+        if let Some(key) = hashset.iter().next() {
+            return Err(ConfigError::UnusedConfigKeyInTemplate {
+                benchmark: benchmark_id.to_string(),
+                key: key.name().to_string(),
+            });
         }
 
         Ok(Self {
@@ -1111,6 +1134,8 @@ pub enum ConfigError {
     InvalidConfigString(String),
     #[error("Missing benchmark command for '{0}'")]
     MissingBenchmarkCommand(String),
+    #[error("Benchmark '{benchmark}' config key '{key}' is unused by the command template")]
+    UnusedConfigKeyInTemplate { benchmark: String, key: String },
     #[error("Benchmark '{0}' must define at least one variant")]
     EmptyBenchmarkVariants(String),
     #[error("Benchmark '{0}' defines overlapping variants")]
@@ -1314,12 +1339,12 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "dup",
-                    "command": ["cmd"],
+                    "command": ["cmd", "{build}"],
                     "config": { "build": ["debug"] }
                 },
                 {
                     "benchmark": "dup",
-                    "command": ["cmd"],
+                    "command": ["cmd", "{build}"],
                     "config": { "build": ["release"] }
                 }
             ]
@@ -1482,7 +1507,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{build}", "{threads}"],
                     "config": {
                         "build": ["debug", "release"],
                         "threads": ["1", "2"]
@@ -1525,7 +1550,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{build}"],
                     "config": {
                         "build": "optimized"
                     }
@@ -1662,7 +1687,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{build}"],
                     "config": {
                         "build": "nonexistent"
                     }
@@ -1688,7 +1713,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{zkey}", "{akey}", "{mkey}"],
                     "config": {
                         "zkey": ["z1"],
                         "akey": ["a1"],
@@ -1722,7 +1747,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{a}", "{b}", "{c}"],
                     "config": {
                         "a": ["1", "2", "3"],
                         "b": ["x", "y", "z"],
@@ -1851,7 +1876,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{build}"],
                     "config": {
                         "build": "debug_only"
                     }
@@ -1939,7 +1964,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "test",
-                    "command": ["test"],
+                    "command": ["test", "{a}", "{b}", "{c}"],
                     "config": {
                         "a": ["1", "2"],
                         "b": ["x", "y"],
@@ -2212,7 +2237,7 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "dup",
-                    "command": ["cmd"],
+                    "command": ["cmd", "{k}"],
                     "variants": [
                         { "config": { "k": ["x"] } },
                         { "config": { "k": ["y"] } }
@@ -2220,7 +2245,7 @@ mod tests {
                 },
                 {
                     "benchmark": "other",
-                    "command": ["cmd"],
+                    "command": ["cmd", "{k}"],
                     "config": { "k": ["x"] }
                 }
             ]
@@ -2388,6 +2413,33 @@ mod tests {
     }
 
     #[test]
+    fn test_unused_config_key_in_template() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug"] },
+                "threads": { "values": ["1", "2"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": ["run", "{build}"],
+                    "config": {
+                        "build": ["debug"],
+                        "threads": ["1", "2"]
+                    }
+                }
+            ]
+        }"#;
+
+        let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::UnusedConfigKeyInTemplate { key, .. } if key == "threads"
+        ));
+    }
+
+    #[test]
     fn test_invalid_single_benchmark() {
         let tmp_dir = TempDir::new().unwrap();
 
@@ -2432,13 +2484,13 @@ mod tests {
             "benchmarks": [
                 {
                     "benchmark": "bad-both",
-                    "command": ["run"],
+                    "command": ["run", "{build}"],
                     "config": {
                         "build": ["debug"]
                     },
                     "variants": [
                         {
-                            "command": ["run"],
+                            "command": ["run", "{build}"],
                             "config": {
                                 "build": ["debug"]
                             }
