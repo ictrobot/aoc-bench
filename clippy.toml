@@ -1,1 +1,3 @@
 doc-valid-idents = ["SQLite", ".."]
+# ahash::{HashMap, HashMapExt as _} or ahash::{HashSet, HashSetExt as _} should be used
+disallowed-types = ["std::collections::HashMap", "std::collections::HashSet", "ahash::AHashMap", "ahash::AHashSet"]

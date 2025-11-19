@@ -1,8 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
+use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
 
 use super::{
     Benchmark, BenchmarkId, BenchmarkVariant, ConfigError, ConfigFile, ConfigProduct, Key,

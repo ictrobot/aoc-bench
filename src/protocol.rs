@@ -1,6 +1,6 @@
 // Protocol parser for META and SAMPLE lines
 
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt as _};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProtocolLine {
