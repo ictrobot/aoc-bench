@@ -41,7 +41,8 @@ pub fn execute(args: DebugArgs) -> ExitCode {
         }
     };
 
-    let runner = match Runner::new(Path::new("."), &benchmark, Config::new()) {
+    let variant = &benchmark.variants()[0];
+    let runner = match Runner::new(Path::new("."), variant, Config::new()) {
         Ok(runner) => runner,
         Err(error) => {
             error!(%error, "failed to construct runner instance");

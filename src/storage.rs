@@ -76,6 +76,8 @@ impl Storage {
 
     /// Write the immutable JSON file for a run series using atomic rename.
     pub fn write_run_series_json(&self, series: &RunSeries) -> Result<PathBuf, StorageError> {
+        self.ensure_config_valid_for_benchmark(&series.bench, &series.config)?;
+
         let series_dir = self.ensure_run_series_dir(&series.bench, &series.config)?;
         let path = self.series_file(&series.bench, &series.config, series.timestamp)?;
         let mut tmp = NamedTempFile::new_in(&series_dir).map_err(|e| io_error(&series_dir, e))?;
@@ -99,6 +101,8 @@ impl Storage {
         config: &Config,
         timestamp: Timestamp,
     ) -> Result<RunSeries, StorageError> {
+        // Don't check for valid config for benchmark when reading existing results
+
         let path = self.series_file(bench, config, timestamp)?;
         let data = fs::read(&path).map_err(|e| io_error(&path, e))?;
 
@@ -160,6 +164,8 @@ impl Storage {
         series: &RunSeries,
     ) -> Result<(), StorageError> {
         self.ensure_host_matches(&series.config)?;
+        self.ensure_config_valid_for_benchmark(&series.bench, &series.config)?;
+
         let config_json = serde_json::to_string(&series.config)?;
 
         let mut stmt = tx.prepare_cached(
@@ -184,6 +190,8 @@ impl Storage {
         row: &ResultsRow,
     ) -> Result<(), StorageError> {
         self.ensure_host_matches(&row.config)?;
+        self.ensure_config_valid_for_benchmark(&row.bench, &row.config)?;
+
         let config_json = serde_json::to_string(&row.config)?;
 
         let mut stmt = tx.prepare_cached(
@@ -213,6 +221,8 @@ impl Storage {
         config: Config,
     ) -> Result<Option<ResultsRow>, StorageError> {
         self.ensure_host_matches(&config)?;
+        // Don't check for valid config for benchmark when reading existing results
+
         let config_json = serde_json::to_string(&config)?;
 
         let mut stmt = tx.prepare_cached(
@@ -261,10 +271,28 @@ impl Storage {
         config: &Config,
         timestamp: Timestamp,
     ) -> Result<PathBuf, StorageError> {
-        self.ensure_host_matches(config)?;
         let run_series_dir = self.run_series_dir(bench, config)?;
         let filename = format!("{}.json", timestamp.strftime("%Y-%m-%dT%H-%M-%S"));
         Ok(run_series_dir.join(filename))
+    }
+
+    fn ensure_config_valid_for_benchmark(
+        &self,
+        bench: &BenchmarkId,
+        config: &Config,
+    ) -> Result<(), StorageError> {
+        if let Some(candidate) = self.config_file.benchmark_by_id(bench) {
+            if candidate.valid_config(config) {
+                return Ok(());
+            }
+
+            Err(StorageError::BenchmarkConfigMismatch {
+                bench: bench.clone(),
+                config: config.to_string(),
+            })
+        } else {
+            Err(StorageError::UnknownBenchmark(bench.to_string()))
+        }
     }
 
     fn ensure_host_matches<'a>(&self, config: &'a Config) -> Result<&'a KeyValue, StorageError> {
@@ -339,6 +367,10 @@ impl StorageLock {
 pub enum StorageError {
     #[error("host '{0}' not in loaded config file")]
     UnknownHost(String),
+    #[error("benchmark '{0}' not in loaded config file")]
+    UnknownBenchmark(String),
+    #[error("config '{config}' is not valid for benchmark '{bench}'")]
+    BenchmarkConfigMismatch { bench: BenchmarkId, config: String },
     #[error("config missing host key: {0}")]
     ConfigMissingHostKey(String),
     #[error("config host mismatch: expected '{expected}', found '{found}'")]
@@ -389,9 +421,24 @@ mod tests {
         let json = r#"{
             "config_keys": {
                 "build": {"values": ["generic", "native"]},
-                "commit": {"values": ["abc1234", "def4567"]}
+                "commit": {"values": ["abc1234", "def4567"]},
+                "opt": {"values": ["x"]}
             },
-            "benchmarks": []
+            "benchmarks": [
+                {
+                    "benchmark": "2015-04",
+                    "command": ["run"],
+                    "config": {
+                        "build": ["generic", "native"],
+                        "commit": ["abc1234", "def4567"]
+                    }
+                },
+                {
+                    "benchmark": "empty-config",
+                    "command": ["run"],
+                    "config": {}
+                }
+            ]
         }"#;
         let config_file = ConfigFile::from_str(dir.path(), Some(host), json).unwrap();
         let storage = Storage::new(config_file, host).unwrap();
@@ -426,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn without_host_key() {
+    fn test_without_host_key() {
         let (_dir, storage) = temp_storage("pi5");
 
         let config = storage
@@ -444,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_host_key() {
+    fn test_mismatched_host_key() {
         let (_dir, storage) = temp_storage("pi5");
 
         let config = storage
@@ -462,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn write_and_read_series_json() {
+    fn test_write_and_read_series_json() {
         let (_dir, storage) = temp_storage("pi5");
 
         let config = storage
@@ -515,11 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_insert_and_query() {
+    fn test_sqlite_insert_and_query() {
         let (_dir, storage) = temp_storage("pi5");
         let config = storage
             .config_file()
-            .config_from_string("commit=def4567,host=pi5")
+            .config_from_string("build=generic,commit=def4567,host=pi5")
             .unwrap();
         let series = sample_series(config.clone());
 
@@ -545,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn lock_is_exclusive() {
+    fn test_lock_is_exclusive() {
         let (_dir, storage) = temp_storage("pi5");
 
         let lock1 = storage.acquire_lock().unwrap();
@@ -580,13 +627,33 @@ mod tests {
             .config_file()
             .config_from_string("host=pi5")
             .unwrap();
-        let series = sample_series(config.clone());
+        let mut series = sample_series(config.clone());
+        series.bench = "empty-config".try_into().unwrap();
 
         let path = storage.write_run_series_json(&series).unwrap();
         assert!(
             path.to_string_lossy()
-                .ends_with("results/pi5/runs/2015-04/__default__/2023-11-14T22-13-20.json")
+                .ends_with("results/pi5/runs/empty-config/__default__/2023-11-14T22-13-20.json")
         );
+    }
+
+    #[test]
+    fn test_invalid_config_rejected_write() {
+        let (_dir, storage) = temp_storage("pi5");
+
+        let config = storage
+            .config_file()
+            .config_from_string("commit=abc1234,opt=x,host=pi5")
+            .unwrap();
+        let series = sample_series(config.clone());
+
+        let err = storage.write_run_series_json(&series).unwrap_err();
+        assert!(matches!(err, StorageError::BenchmarkConfigMismatch { .. }));
+
+        let err = storage
+            .read_run_series_json(&series.bench, &config, series.timestamp)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::Io { .. }));
     }
 
     #[test]
@@ -611,7 +678,7 @@ mod tests {
 
         let config = storage
             .config_file()
-            .config_from_string("build=native,host=pi5")
+            .config_from_string("build=native,commit=abc1234,host=pi5")
             .unwrap();
         let timestamp = Timestamp::from_second(1_600_000_000).unwrap();
 
@@ -627,7 +694,7 @@ mod tests {
 
         let config = storage
             .config_file()
-            .config_from_string("build=native,host=pi5")
+            .config_from_string("build=native,commit=abc1234,host=pi5")
             .unwrap();
         let series = sample_series(config.clone());
 
@@ -650,7 +717,7 @@ mod tests {
         let (_dir, storage) = temp_storage("pi5");
         let config = storage
             .config_file()
-            .config_from_string("commit=def4567,host=pi5")
+            .config_from_string("build=generic,commit=def4567,host=pi5")
             .unwrap();
 
         storage
@@ -703,13 +770,13 @@ mod tests {
         let (_dir, storage) = temp_storage("pi5");
         let config = storage
             .config_file()
-            .config_from_string("commit=abc1234,host=pi5")
+            .config_from_string("build=generic,commit=abc1234,host=pi5")
             .unwrap();
+        let bench: BenchmarkId = "2015-04".try_into().unwrap();
 
         storage
             .with_transaction(|tx| {
-                let result =
-                    storage.get_results_row(tx, "nonexistent".try_into().unwrap(), config)?;
+                let result = storage.get_results_row(tx, bench.clone(), config.clone())?;
                 assert!(result.is_none());
                 Ok(())
             })
@@ -721,7 +788,7 @@ mod tests {
         let (_dir, storage) = temp_storage("pi5");
         let config = storage
             .config_file()
-            .config_from_string("commit=abc1234,host=pi5")
+            .config_from_string("build=generic,commit=abc1234,host=pi5")
             .unwrap();
         let series = sample_series(config.clone());
 
@@ -751,7 +818,7 @@ mod tests {
         let (_dir, storage) = temp_storage("pi5");
         let config = storage
             .config_file()
-            .config_from_string("commit=abc1234,host=pi5")
+            .config_from_string("build=generic,commit=abc1234,host=pi5")
             .unwrap();
 
         // Insert multiple series with different timestamps

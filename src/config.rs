@@ -1,5 +1,7 @@
 // Config management: parse config.json, expand Cartesian products, validate constraints
 
+mod parse;
+
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use std::cmp::Ordering;
@@ -24,6 +26,8 @@ pub struct ConfigFile {
     config_keys: Arc<[Key]>,
     /// Benchmark definitions
     benchmarks: Arc<[Benchmark]>,
+    /// Benchmark lookup map
+    benchmarks_by_id: Arc<HashMap<BenchmarkId, usize>>,
     /// Host key
     host_key: Key,
 }
@@ -49,116 +53,23 @@ impl ConfigFile {
         current_host: Option<&str>,
         json_str: &str,
     ) -> Result<Self, ConfigError> {
-        #[derive(Deserialize)]
-        struct ConfigFileJson {
-            config_keys: HashMap<String, ConfigKeyDef>,
-            benchmarks: Vec<BenchmarkDef>,
-        }
+        let parsed = parse::parse_config_file(data_dir, current_host, json_str)?;
 
-        #[derive(Deserialize)]
-        struct ConfigKeyDef {
-            values: Vec<String>,
-            #[serde(default)]
-            presets: HashMap<String, Vec<String>>,
-        }
-
-        #[derive(Deserialize)]
-        struct BenchmarkDef {
-            benchmark: String,
-            command: Vec<String>,
-            #[serde(default)]
-            input: Option<String>,
-            #[serde(default)]
-            checksum: Option<String>,
-            config: HashMap<String, ConfigSpec>,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum ConfigSpec {
-            Preset(String),
-            Literal(Vec<String>),
-        }
-
-        let json: ConfigFileJson = serde_json::from_str(json_str)?;
-
-        let mut config_keys = Vec::new();
-        let mut key_map = HashMap::new();
-
-        // Parse and validate config keys
-        for (key_name, key_def) in json.config_keys {
-            let key = Key::new(key_name.clone(), key_def.values)?;
-
-            // Parse presets
-            let mut presets = HashMap::new();
-            for (preset_name, preset_values) in key_def.presets {
-                presets.insert(
-                    preset_name,
-                    key.subset_from_names(preset_values.iter().map(String::as_str))?,
-                );
-            }
-
-            config_keys.push(key.clone());
-            key_map.insert(key_name, (key, presets));
-        }
-
-        // Parse benchmarks
-        let mut benchmarks = Vec::new();
-        for bench_def in json.benchmarks {
-            // Parse config expansion
-            let mut subsets = Vec::new();
-            for (key_name, spec) in bench_def.config {
-                let (key, presets) = key_map
-                    .get(&key_name)
-                    .ok_or_else(|| ConfigError::UnknownKey(key_name.clone()))?;
-
-                subsets.push(match spec {
-                    ConfigSpec::Preset(preset_name) => presets
-                        .get(&preset_name)
-                        .ok_or_else(|| ConfigError::UnknownPreset {
-                            key: key_name.clone(),
-                            preset: preset_name,
-                        })?
-                        .clone(),
-                    ConfigSpec::Literal(values) => {
-                        key.subset_from_names(values.iter().map(String::as_str))?
-                    }
-                });
-            }
-
-            if bench_def.command.is_empty() {
-                return Err(ConfigError::EmptyBenchmarkCommand(bench_def.benchmark));
-            }
-
-            let input =
-                if let Some(name) = bench_def.input {
-                    let path = data_dir.join(Self::INPUTS_DIR).join(&name);
-                    // std::fs::canonicalize is documented to return an error if the path does not exist
-                    let path = fs::canonicalize(&path)
-                        .map_err(|error| ConfigError::MissingInput { name, path, error })?;
-                    Some(path)
-                } else {
-                    None
-                };
-
-            benchmarks.push(Benchmark::new(
-                bench_def.benchmark.try_into()?,
-                ConfigProduct::new(subsets),
-                bench_def.command,
-                input,
-                bench_def.checksum,
-            )?);
-        }
-
-        let host_key = Key::new_host_key(&data_dir.join(Self::RESULTS_DIR), current_host)?;
-        config_keys.push(host_key.clone());
-        config_keys.sort_unstable();
+        let benchmarks_by_id = Arc::new(
+            parsed
+                .benchmarks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.id().clone(), i))
+                .collect(),
+        );
 
         Ok(ConfigFile {
             data_dir: data_dir.into(),
-            config_keys: config_keys.into(),
-            benchmarks: benchmarks.into(),
-            host_key,
+            config_keys: parsed.config_keys.into(),
+            benchmarks: parsed.benchmarks.into(),
+            benchmarks_by_id,
+            host_key: parsed.host_key,
         })
     }
 
@@ -178,6 +89,13 @@ impl ConfigFile {
     #[must_use]
     pub fn benchmarks(&self) -> &[Benchmark] {
         &self.benchmarks
+    }
+
+    /// Get the benchmark with the given ID if it exists
+    #[must_use]
+    pub fn benchmark_by_id(&self, id: &BenchmarkId) -> Option<&Benchmark> {
+        let index = *self.benchmarks_by_id.get(id)?;
+        Some(&self.benchmarks[index])
     }
 
     /// Get the host key
@@ -270,13 +188,13 @@ impl Key {
     ///
     /// Validates that the key name matches `[a-z][a-z0-9_]+` and values match `[a-zA-Z0-9_-]+`.
     /// Returns an error if values are empty, contain duplicates, or fail validation.
-    pub fn new(name: String, values: Vec<String>) -> Result<Self, ConfigError> {
-        Self::validate_key_name(&name)?;
+    pub fn new(name: &str, values: Vec<&str>) -> Result<Self, ConfigError> {
+        Self::validate_key_name(name)?;
 
         let values = values
             .into_iter()
             .map(|s| {
-                Self::validate_value(&s)?;
+                Self::validate_value(s)?;
                 Ok(Arc::from(s))
             })
             .collect::<Result<Vec<Arc<str>>, ConfigError>>()?;
@@ -285,7 +203,7 @@ impl Key {
         for (idx, value) in values.iter().enumerate() {
             if name_to_idx.insert(value.clone(), idx).is_some() {
                 return Err(ConfigError::DuplicateValue {
-                    key: name,
+                    key: name.to_string(),
                     value: value.to_string(),
                 });
             }
@@ -587,6 +505,20 @@ impl KeyValuesSubset {
             indexes: indexes.into(),
         })
     }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        if self.key != other.key {
+            return false;
+        }
+
+        let (small, large) = if self.indexes.len() <= other.indexes.len() {
+            (&*self.indexes, &*other.indexes)
+        } else {
+            (&*other.indexes, &*self.indexes)
+        };
+
+        small.iter().any(|index| large.binary_search(index).is_ok())
+    }
 }
 
 /// A configuration key-value map with canonical ordering.
@@ -787,6 +719,29 @@ impl ConfigProduct {
         Some(Self { subsets })
     }
 
+    /// Return true if this product shares any concrete config with another product.
+    #[must_use]
+    pub fn overlaps(&self, other: &ConfigProduct) -> bool {
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < self.subsets.len() && j < other.subsets.len() {
+            match self.subsets[i].key.cmp(&other.subsets[j].key) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
+                    if !self.subsets[i].overlaps(&other.subsets[j]) {
+                        return false;
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+
+        true
+    }
+
     /// Get the total number of configs in the Cartesian product
     #[must_use]
     #[allow(clippy::len_without_is_empty, reason = "len is always > 0")]
@@ -872,21 +827,15 @@ impl ExactSizeIterator for ConfigProductIter<'_> {
     }
 }
 
-/// A benchmark with its command template and config expansion
+/// A benchmark with one or more config variants
 #[derive(Debug)]
 pub struct Benchmark {
     id: BenchmarkId,
-    config: ConfigProduct,
-    command_template: Vec<String>,
-    input: Option<PathBuf>,
-    checksum: Option<String>,
+    variants: Arc<[BenchmarkVariant]>,
 }
 
 impl Benchmark {
-    /// Create a new benchmark.
-    ///
-    /// Validates that the command template can be expanded with the first config
-    /// in the product (all placeholders must have corresponding keys).
+    /// Create a benchmark with a single variant.
     pub fn new(
         id: BenchmarkId,
         config: ConfigProduct,
@@ -894,18 +843,39 @@ impl Benchmark {
         input: Option<PathBuf>,
         checksum: Option<String>,
     ) -> Result<Self, ConfigError> {
-        // Check that the command template can be expanded
-        let first_config = config.iter().next().unwrap();
-        for placeholder in &command_template {
-            first_config.expand_template(placeholder)?;
+        let id_clone = id.clone();
+        Self::new_with_variants(
+            id,
+            vec![BenchmarkVariant::new(
+                id_clone,
+                config,
+                command_template,
+                input,
+                checksum,
+            )?],
+        )
+    }
+
+    /// Create a benchmark with a multiple variants.
+    pub fn new_with_variants(
+        id: BenchmarkId,
+        variants: Vec<BenchmarkVariant>,
+    ) -> Result<Self, ConfigError> {
+        if variants.is_empty() {
+            return Err(ConfigError::EmptyBenchmarkVariants(id.to_string()));
+        }
+
+        for (i, lhs) in variants.iter().enumerate() {
+            for rhs in variants.iter().skip(i + 1) {
+                if lhs.config.overlaps(&rhs.config) {
+                    return Err(ConfigError::OverlappingBenchmarkVariants(id.to_string()));
+                }
+            }
         }
 
         Ok(Self {
             id,
-            config,
-            command_template,
-            input,
-            checksum,
+            variants: variants.into(),
         })
     }
 
@@ -915,10 +885,76 @@ impl Benchmark {
         &self.id
     }
 
-    /// Get the config product specification for this benchmark
+    /// Iterate over concrete variants
+    #[must_use]
+    pub fn variants(&self) -> &[BenchmarkVariant] {
+        &self.variants
+    }
+
+    /// Find the variant whose config specification matches `config`.
+    #[must_use]
+    pub fn variant_for_config(&self, config: &Config) -> Option<&BenchmarkVariant> {
+        self.variants
+            .iter()
+            .find(|variant| variant.valid_config(config))
+    }
+
+    /// Check if any variant accepts `config`.
+    #[must_use]
+    pub fn valid_config(&self, config: &Config) -> bool {
+        self.variant_for_config(config).is_some()
+    }
+}
+
+/// Concrete benchmark variant data
+#[derive(Debug)]
+pub struct BenchmarkVariant {
+    benchmark_id: BenchmarkId,
+    config: ConfigProduct,
+    command_template: Vec<String>,
+    input: Option<PathBuf>,
+    checksum: Option<String>,
+}
+
+impl BenchmarkVariant {
+    fn new(
+        benchmark_id: BenchmarkId,
+        config: ConfigProduct,
+        command_template: Vec<String>,
+        input: Option<PathBuf>,
+        checksum: Option<String>,
+    ) -> Result<Self, ConfigError> {
+        if command_template.is_empty() {
+            return Err(ConfigError::MissingBenchmarkCommand(
+                benchmark_id.to_string(),
+            ));
+        }
+
+        // Check that the command template can be expanded
+        let first_config = config.iter().next().unwrap();
+        for placeholder in &command_template {
+            first_config.expand_template(placeholder)?;
+        }
+
+        Ok(Self {
+            benchmark_id,
+            config,
+            command_template,
+            input,
+            checksum,
+        })
+    }
+
+    /// Get the config product specification for this variant
     #[must_use]
     pub fn config(&self) -> &ConfigProduct {
         &self.config
+    }
+
+    /// Get the benchmark identifier for this variant
+    #[must_use]
+    pub fn benchmark_id(&self) -> &BenchmarkId {
+        &self.benchmark_id
     }
 
     /// Get command template with {key} placeholders
@@ -938,27 +974,62 @@ impl Benchmark {
     pub fn checksum(&self) -> Option<&str> {
         self.checksum.as_deref()
     }
+
+    /// Check whether `config` exactly matches one of the variant's config combinations.
+    ///
+    /// Host keys are ignored, but additional non-host keys are rejected.
+    #[must_use]
+    pub fn valid_config(&self, config: &Config) -> bool {
+        let mut iter = config
+            .kv
+            .iter()
+            .filter(|kv| kv.key.name() != Key::HOST_KEY_NAME);
+
+        for subset in &self.config.subsets {
+            let Some(kv) = iter.next() else {
+                return false;
+            };
+
+            if kv.key != subset.key {
+                return false;
+            }
+
+            if subset.indexes.binary_search(&kv.value_index()).is_err() {
+                return false;
+            }
+        }
+
+        iter.next().is_none()
+    }
 }
 
 /// New type wrapper for valid benchmark identifiers.
+///
+/// Cheap to clone (uses Arc internally).
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct BenchmarkId(Box<str>);
+pub struct BenchmarkId(Arc<str>);
 
 impl BenchmarkId {
+    /// Create a new benchmark identifier from a string.
+    ///
+    /// The string must match the regular expression `[a-zA-Z0-9_-]+`.
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ConfigError> {
+        let value = value.as_ref();
+        Key::validate_value(value)
+            .map_err(|_| ConfigError::InvalidBenchmarkId(value.to_string()))?;
+        Ok(Self(Arc::from(value)))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    fn validate(value: &str) -> Result<(), ConfigError> {
-        Key::validate_value(value).map_err(|_| ConfigError::InvalidBenchmarkId(value.to_string()))
     }
 }
 
 impl From<BenchmarkId> for String {
     fn from(value: BenchmarkId) -> Self {
-        value.0.into_string()
+        value.0.to_string()
     }
 }
 
@@ -966,8 +1037,7 @@ impl TryFrom<String> for BenchmarkId {
     type Error = ConfigError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::validate(&value)?;
-        Ok(Self(value.into_boxed_str()))
+        Self::new(value)
     }
 }
 
@@ -975,8 +1045,7 @@ impl TryFrom<&str> for BenchmarkId {
     type Error = ConfigError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::validate(value)?;
-        Ok(Self(value.into()))
+        Self::new(value)
     }
 }
 
@@ -1040,8 +1109,18 @@ pub enum ConfigError {
     UnknownValueForKey { key: String, value: String },
     #[error("Invalid config string: '{0}'")]
     InvalidConfigString(String),
-    #[error("Empty benchmark command for '{0}'")]
-    EmptyBenchmarkCommand(String),
+    #[error("Missing benchmark command for '{0}'")]
+    MissingBenchmarkCommand(String),
+    #[error("Benchmark '{0}' must define at least one variant")]
+    EmptyBenchmarkVariants(String),
+    #[error("Benchmark '{0}' defines overlapping variants")]
+    OverlappingBenchmarkVariants(String),
+    #[error("Benchmark '{0}' defined multiple times")]
+    DuplicateBenchmark(String),
+    #[error(
+        "Benchmark '{0}' must define either a single variant (with config and command keys) or multiple variants"
+    )]
+    InvalidBenchmarkOptions(String),
     #[error("Input file '{name}' not found at '{path:?}': {error}")]
     MissingInput {
         name: String,
@@ -1063,49 +1142,45 @@ mod tests {
     #[test]
     fn test_key_validation() {
         // Valid key names
-        assert!(Key::new("commit".to_string(), vec!["a".to_string()]).is_ok());
-        assert!(Key::new("build_type".to_string(), vec!["a".to_string()]).is_ok());
-        assert!(Key::new("t123".to_string(), vec!["a".to_string()]).is_ok());
+        assert!(Key::new("commit", vec!["a"]).is_ok());
+        assert!(Key::new("build_type", vec!["a"]).is_ok());
+        assert!(Key::new("t123", vec!["a"]).is_ok());
 
         // Invalid key names
-        assert!(Key::new(String::new(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("Commit".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("123".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("build-type".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("build type".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("host".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("bench".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("benchmark".to_string(), vec!["a".to_string()]).is_err());
-        assert!(Key::new("timestamp".to_string(), vec!["a".to_string()]).is_err());
+        assert!(Key::new("", vec!["a"]).is_err());
+        assert!(Key::new("Commit", vec!["a"]).is_err());
+        assert!(Key::new("123", vec!["a"]).is_err());
+        assert!(Key::new("build-type", vec!["a"]).is_err());
+        assert!(Key::new("build type", vec!["a"]).is_err());
+        assert!(Key::new("host", vec!["a"]).is_err());
+        assert!(Key::new("bench", vec!["a"]).is_err());
+        assert!(Key::new("benchmark", vec!["a"]).is_err());
+        assert!(Key::new("timestamp", vec!["a"]).is_err());
     }
 
     #[test]
     fn test_value_validation() {
         // Valid values
-        assert!(Key::new("test".to_string(), vec!["abc123".to_string()]).is_ok());
-        assert!(Key::new("test".to_string(), vec!["build_type".to_string()]).is_ok());
-        assert!(Key::new("test".to_string(), vec!["build-type".to_string()]).is_ok());
-        assert!(Key::new("test".to_string(), vec!["ABC123".to_string()]).is_ok());
+        assert!(Key::new("test", vec!["abc123"]).is_ok());
+        assert!(Key::new("test", vec!["build_type"]).is_ok());
+        assert!(Key::new("test", vec!["build-type"]).is_ok());
+        assert!(Key::new("test", vec!["ABC123"]).is_ok());
 
         // Invalid values
-        assert!(Key::new("test".to_string(), vec![String::new()]).is_err());
-        assert!(Key::new("test".to_string(), vec!["build type".to_string()]).is_err());
-        assert!(Key::new("test".to_string(), vec!["build/type".to_string()]).is_err());
+        assert!(Key::new("test", vec![""]).is_err());
+        assert!(Key::new("test", vec!["build type"]).is_err());
+        assert!(Key::new("test", vec!["build/type"]).is_err());
     }
 
     #[test]
     fn test_key_duplicate_values() {
-        let err = Key::new(
-            "test".to_string(),
-            vec!["val1".to_string(), "val2".to_string(), "val1".to_string()],
-        )
-        .unwrap_err();
+        let err = Key::new("test", vec!["val1", "val2", "val1"]).unwrap_err();
         assert!(matches!(err, ConfigError::DuplicateValue { .. }));
     }
 
     #[test]
     fn test_key_interning() {
-        let key1 = Key::new("test".to_string(), vec!["a".to_string()]).unwrap();
+        let key1 = Key::new("test", vec!["a"]).unwrap();
         let key2 = key1.clone();
 
         // Keys should share the same Arc
@@ -1164,13 +1239,233 @@ mod tests {
         assert_eq!(config_file.data_dir(), temp_dir.path());
 
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
         assert_eq!(bench.id().as_str(), "test-bench");
         assert_eq!(
-            bench.command_template(),
+            variant.command_template(),
             vec!["bin/{build}", "run", "{threads}"]
         );
-        assert_eq!(bench.input(), Some(input_path.as_path()));
-        assert_eq!(bench.checksum(), Some("abc123"));
+        assert_eq!(variant.input(), Some(input_path.as_path()));
+        assert_eq!(variant.checksum(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_benchmark_variant_overrides() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "multi",
+                    "command": ["bin/{build}"],
+                    "input": "base.txt",
+                    "checksum": "base",
+                    "variants": [
+                        {
+                            "config": { "build": ["debug"] }
+                        },
+                        {
+                            "command": ["bin-custom/{build}"],
+                            "input": "override.txt",
+                            "checksum": "override",
+                            "config": { "build": ["release"] }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let inputs_dir = temp_dir.path().join("inputs");
+        fs::create_dir_all(&inputs_dir).unwrap();
+
+        let base_path = inputs_dir.join("base.txt");
+        fs::write(&base_path, []).unwrap();
+        let base_path = fs::canonicalize(&base_path).unwrap();
+
+        let override_path = inputs_dir.join("override.txt");
+        fs::write(&override_path, []).unwrap();
+        let override_path = fs::canonicalize(&override_path).unwrap();
+
+        let config_file = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
+        assert_eq!(config_file.benchmarks().len(), 1);
+
+        let bench = &config_file.benchmarks()[0];
+        assert_eq!(bench.variants().len(), 2);
+
+        let default_variant = &bench.variants()[0];
+        assert_eq!(default_variant.command_template(), &["bin/{build}"]);
+        assert_eq!(default_variant.input(), Some(base_path.as_path()));
+        assert_eq!(default_variant.checksum(), Some("base"));
+
+        let override_variant = &bench.variants()[1];
+        assert_eq!(override_variant.command_template(), &["bin-custom/{build}"]);
+        assert_eq!(override_variant.input(), Some(override_path.as_path()));
+        assert_eq!(override_variant.checksum(), Some("override"));
+    }
+
+    #[test]
+    fn test_duplicate_benchmarks_rejected() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "dup",
+                    "command": ["cmd"],
+                    "config": { "build": ["debug"] }
+                },
+                {
+                    "benchmark": "dup",
+                    "command": ["cmd"],
+                    "config": { "build": ["release"] }
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateBenchmark(name) if name == "dup"));
+    }
+
+    #[test]
+    fn test_disjoint_variants_allowed() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] },
+                "threads": { "values": ["1", "2", "4"] },
+                "aa": { "values": ["off", "2x", "4x"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "suite",
+                    "variants": [
+                        {
+                            "command": ["./render", "--build={build}", "--threads={threads}"],
+                            "config": {
+                                "build": ["debug"],
+                                "threads": ["1", "2", "4"]
+                            }
+                        },
+                        {
+                            "command": [
+                                "./render",
+                                "--build={build}",
+                                "--threads={threads}",
+                                "--aa={aa}"
+                            ],
+                            "config": {
+                                "build": ["release"],
+                                "threads": ["2", "4"],
+                                "aa": ["2x", "4x"]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
+        assert_eq!(config.benchmarks()[0].variants().len(), 2);
+    }
+
+    #[test]
+    fn test_overlapping_variants_rejected() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "suite",
+                    "variants": [
+                        {
+                            "command": ["echo", "{build}"],
+                            "config": { "build": ["debug", "release"] }
+                        },
+                        {
+                            "command": ["echo", "{build}"],
+                            "config": { "build": ["debug"] }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::OverlappingBenchmarkVariants(name) if name == "suite"
+        ));
+    }
+
+    #[test]
+    fn test_disjoint_keys_still_overlap() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] },
+                "threads": { "values": ["1", "2"] },
+                "aa": { "values": ["off", "2x"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "suite",
+                    "variants": [
+                        {
+                            "command": ["./render", "--build={build}", "--threads={threads}"],
+                            "config": {
+                                "build": ["debug"],
+                                "threads": ["1", "2"]
+                            }
+                        },
+                        {
+                            "command": [
+                                "./render",
+                                "--build={build}",
+                                "--threads={threads}",
+                                "--aa={aa}"
+                            ],
+                            "config": {
+                                "build": ["debug", "release"],
+                                "threads": ["2"],
+                                "aa": ["2x"]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+                err,
+                ConfigError::OverlappingBenchmarkVariants(name) if name == "suite"
+        ));
+    }
+
+    #[test]
+    fn test_config_product_overlap_logic() {
+        let build = Key::new("build", vec!["debug", "release"]).unwrap();
+        let threads = Key::new("threads", vec!["1", "2"]).unwrap();
+
+        let build_debug = build.subset_from_names(["debug"].into_iter()).unwrap();
+        let build_release = build.subset_from_names(["release"].into_iter()).unwrap();
+        let threads_one = threads.subset_from_names(["1"].into_iter()).unwrap();
+        let threads_two = threads.subset_from_names(["2"].into_iter()).unwrap();
+
+        let combined = ConfigProduct::new(vec![build_debug.clone(), threads_one.clone()]);
+        let subset = ConfigProduct::new(vec![build_debug.clone()]);
+        let disjoint = ConfigProduct::new(vec![build_release]);
+        let different_key = ConfigProduct::new(vec![threads_two]);
+
+        assert!(combined.overlaps(&subset));
+        assert!(!combined.overlaps(&disjoint));
+        assert!(subset.overlaps(&different_key));
     }
 
     #[test]
@@ -1199,11 +1494,12 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
         // Should expand to 2 x 2 = 4 configs
-        assert_eq!(bench.config().len(), 4);
+        assert_eq!(variant.config().len(), 4);
 
-        let configs: Vec<_> = bench.config().iter().collect();
+        let configs: Vec<_> = variant.config().iter().collect();
         assert_eq!(configs.len(), 4);
 
         // Verify all combinations exist (sorted by key)
@@ -1240,10 +1536,11 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
-        assert_eq!(bench.config().len(), 2);
+        assert_eq!(variant.config().len(), 2);
 
-        let configs: Vec<_> = bench.config().iter().collect();
+        let configs: Vec<_> = variant.config().iter().collect();
         assert_eq!(configs.len(), 2);
 
         let config_strings: Vec<String> = configs.iter().map(Config::to_string).collect();
@@ -1274,11 +1571,12 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
-        let mut configs = bench.config().iter();
+        let mut configs = variant.config().iter();
         let config = configs.next().unwrap();
 
-        let expanded = config.expand_templates(bench.command_template()).unwrap();
+        let expanded = config.expand_templates(variant.command_template()).unwrap();
         assert_eq!(expanded, vec!["bin/debug/bench", "4"]);
     }
 
@@ -1403,8 +1701,9 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
-        let mut configs = bench.config().iter();
+        let mut configs = variant.config().iter();
         let config = configs.next().unwrap();
 
         // Keys are sorted alphabetically
@@ -1436,11 +1735,12 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
         // 3 x 3 x 2 = 18 configs
-        assert_eq!(bench.config().len(), 18);
+        assert_eq!(variant.config().len(), 18);
 
-        let mut iter = bench.config().iter();
+        let mut iter = variant.config().iter();
         assert_eq!(iter.len(), 18);
 
         // Take only first 5 (demonstrating lazy evaluation)
@@ -1453,8 +1753,8 @@ mod tests {
 
     #[test]
     fn test_expand_command_edge_cases() {
-        let key1 = Key::new("key".to_string(), vec!["value".to_string()]).unwrap();
-        let key2 = Key::new("another".to_string(), vec!["test".to_string()]).unwrap();
+        let key1 = Key::new("key", vec!["value"]).unwrap();
+        let key2 = Key::new("another", vec!["test"]).unwrap();
 
         let kv1 = key1.value_from_name("value").unwrap();
         let kv2 = key2.value_from_name("test").unwrap();
@@ -1527,11 +1827,12 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
         // Empty config should produce exactly one empty config
-        assert_eq!(bench.config().len(), 1);
+        assert_eq!(variant.config().len(), 1);
 
-        let configs: Vec<_> = bench.config().iter().collect();
+        let configs: Vec<_> = variant.config().iter().collect();
         assert_eq!(configs.len(), 1);
         assert!(configs[0].is_empty());
     }
@@ -1561,10 +1862,11 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
-        assert_eq!(bench.config().len(), 1);
+        assert_eq!(variant.config().len(), 1);
 
-        let configs: Vec<_> = bench.config().iter().collect();
+        let configs: Vec<_> = variant.config().iter().collect();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].to_string(), "build=debug");
     }
@@ -1593,12 +1895,8 @@ mod tests {
 
     #[test]
     fn test_config_product_filter() {
-        let key1 = Key::new(
-            "a".to_string(),
-            vec!["1".to_string(), "2".to_string(), "3".to_string()],
-        )
-        .unwrap();
-        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+        let key1 = Key::new("a", vec!["1", "2", "3"]).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"]).unwrap();
 
         let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
         let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
@@ -1620,8 +1918,8 @@ mod tests {
 
     #[test]
     fn test_key_value_ordering() {
-        let key1 = Key::new("aaa".to_string(), vec!["1".to_string()]).unwrap();
-        let key2 = Key::new("zzz".to_string(), vec!["2".to_string()]).unwrap();
+        let key1 = Key::new("aaa", vec!["1"]).unwrap();
+        let key2 = Key::new("zzz", vec!["2"]).unwrap();
 
         let kv1 = key1.value_from_name("1").unwrap();
         let kv2 = key2.value_from_name("2").unwrap();
@@ -1654,9 +1952,10 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
         let bench = &config_file.benchmarks()[0];
+        let variant = &bench.variants()[0];
 
         // Collect all configs in iteration order
-        let configs: Vec<_> = bench.config().iter().map(|c| c.to_string()).collect();
+        let configs: Vec<_> = variant.config().iter().map(|c| c.to_string()).collect();
 
         // The first dimension should vary fastest (like odometer)
         // Keys are sorted alphabetically: a, b, c
@@ -1677,9 +1976,9 @@ mod tests {
 
     #[test]
     fn test_config_filter_with_missing_key() {
-        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
-        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
-        let key3 = Key::new("c".to_string(), vec!["p".to_string()]).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"]).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"]).unwrap();
+        let key3 = Key::new("c", vec!["p"]).unwrap();
 
         let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
         let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
@@ -1695,8 +1994,8 @@ mod tests {
 
     #[test]
     fn test_config_filter_with_missing_value() {
-        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
-        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"]).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"]).unwrap();
 
         // Product only contains a=1 (not a=2)
         let subset1 = key1.subset_from_names(["1"].iter().copied()).unwrap();
@@ -1713,7 +2012,7 @@ mod tests {
 
     #[test]
     fn test_config_filter_empty() {
-        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"]).unwrap();
         let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
         let product = ConfigProduct::new(vec![subset1]);
 
@@ -1726,8 +2025,8 @@ mod tests {
 
     #[test]
     fn test_config_with() {
-        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
-        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"]).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"]).unwrap();
 
         let kv1 = key1.value_from_name("1").unwrap();
         let kv2 = key2.value_from_name("x").unwrap();
@@ -1750,9 +2049,9 @@ mod tests {
 
     #[test]
     fn test_config_without_key() {
-        let key1 = Key::new("a".to_string(), vec!["1".to_string()]).unwrap();
-        let key2 = Key::new("b".to_string(), vec!["x".to_string()]).unwrap();
-        let key3 = Key::new("c".to_string(), vec!["p".to_string()]).unwrap();
+        let key1 = Key::new("a", vec!["1"]).unwrap();
+        let key2 = Key::new("b", vec!["x"]).unwrap();
+        let key3 = Key::new("c", vec!["p"]).unwrap();
 
         let kv1 = key1.value_from_name("1").unwrap();
         let kv2 = key2.value_from_name("x").unwrap();
@@ -1780,8 +2079,8 @@ mod tests {
 
     #[test]
     fn test_config_get_by_name() {
-        let key1 = Key::new("build".to_string(), vec!["debug".to_string()]).unwrap();
-        let key2 = Key::new("threads".to_string(), vec!["4".to_string()]).unwrap();
+        let key1 = Key::new("build", vec!["debug"]).unwrap();
+        let key2 = Key::new("threads", vec!["4"]).unwrap();
 
         let kv1 = key1.value_from_name("debug").unwrap();
         let kv2 = key2.value_from_name("4").unwrap();
@@ -1844,33 +2143,111 @@ mod tests {
     #[test]
     fn test_benchmark_id_validation() {
         // Valid IDs
-        let id1 = BenchmarkId::try_from("test-bench".to_string()).unwrap();
+        let id1 = BenchmarkId::try_from("test-bench").unwrap();
         assert_eq!(id1.as_str(), "test-bench");
 
-        let id2 = BenchmarkId::try_from("2015-04".to_string()).unwrap();
+        let id2 = BenchmarkId::try_from("2015-04").unwrap();
         assert_eq!(id2.as_str(), "2015-04");
 
-        assert!(BenchmarkId::try_from("compile_test".to_string()).is_ok());
-        assert!(BenchmarkId::try_from("ABC123".to_string()).is_ok());
+        assert!(BenchmarkId::try_from("compile_test").is_ok());
+        assert!(BenchmarkId::try_from("ABC123").is_ok());
 
         // Invalid IDs
         let empty_err = BenchmarkId::try_from(String::new()).unwrap_err();
         assert!(matches!(empty_err, ConfigError::InvalidBenchmarkId(_)));
 
-        let space_err = BenchmarkId::try_from("test bench".to_string()).unwrap_err();
+        let space_err = BenchmarkId::try_from("test bench").unwrap_err();
         assert!(matches!(space_err, ConfigError::InvalidBenchmarkId(_)));
 
-        let slash_err = BenchmarkId::try_from("test/bench".to_string()).unwrap_err();
+        let slash_err = BenchmarkId::try_from("test/bench").unwrap_err();
         assert!(matches!(slash_err, ConfigError::InvalidBenchmarkId(_)));
 
-        let special_err = BenchmarkId::try_from("test@bench".to_string()).unwrap_err();
+        let special_err = BenchmarkId::try_from("test@bench").unwrap_err();
         assert!(matches!(special_err, ConfigError::InvalidBenchmarkId(_)));
     }
 
     #[test]
+    fn test_benchmark_valid_config() {
+        let json = r#"{
+            "config_keys": {
+                "a": { "values": ["1"] },
+                "b": { "values": ["2", "3"] },
+                "c": { "values": ["9"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["{a}", "{b}"],
+                    "config": {
+                        "a": ["1"],
+                        "b": ["2"]
+                    }
+                }
+            ]
+        }"#;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
+        let bench = &config_file.benchmarks()[0];
+
+        let full_config = config_file.config_from_string("a=1,b=2").unwrap();
+        assert!(bench.valid_config(&full_config));
+
+        let missing_config = config_file.config_from_string("a=1").unwrap();
+        assert!(!bench.valid_config(&missing_config));
+
+        let superset_config = config_file.config_from_string("a=1,b=2,c=9").unwrap();
+        assert!(!bench.valid_config(&superset_config));
+
+        let invalid_value = config_file.config_from_string("a=1,b=3").unwrap();
+        assert!(!bench.valid_config(&invalid_value));
+    }
+
+    #[test]
+    fn test_benchmarks_by_id_single_entry() {
+        let json = r#"{
+            "config_keys": {
+                "k": { "values": ["x", "y"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "dup",
+                    "command": ["cmd"],
+                    "variants": [
+                        { "config": { "k": ["x"] } },
+                        { "config": { "k": ["y"] } }
+                    ]
+                },
+                {
+                    "benchmark": "other",
+                    "command": ["cmd"],
+                    "config": { "k": ["x"] }
+                }
+            ]
+        }"#;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
+        let bench_id: BenchmarkId = "dup".try_into().unwrap();
+
+        let configs = [
+            config_file.config_from_string("k=x").unwrap(),
+            config_file.config_from_string("k=y").unwrap(),
+        ];
+
+        let matches = config_file.benchmark_by_id(&bench_id);
+        assert!(matches.is_some());
+        let bench = matches.unwrap();
+
+        for config in configs {
+            assert!(bench.valid_config(&config));
+        }
+    }
+
+    #[test]
     fn test_config_serialization() {
-        let key1 = Key::new("build".to_string(), vec!["debug".to_string()]).unwrap();
-        let key2 = Key::new("threads".to_string(), vec!["4".to_string()]).unwrap();
+        let key1 = Key::new("build", vec!["debug"]).unwrap();
+        let key2 = Key::new("threads", vec!["4"]).unwrap();
 
         let kv1 = key1.value_from_name("debug").unwrap();
         let kv2 = key2.value_from_name("4").unwrap();
@@ -1896,8 +2273,8 @@ mod tests {
 
     #[test]
     fn test_config_to_btreemap() {
-        let key1 = Key::new("build".to_string(), vec!["release".to_string()]).unwrap();
-        let key2 = Key::new("threads".to_string(), vec!["8".to_string()]).unwrap();
+        let key1 = Key::new("build", vec!["release"]).unwrap();
+        let key2 = Key::new("threads", vec!["8"]).unwrap();
 
         let kv1 = key1.value_from_name("release").unwrap();
         let kv2 = key2.value_from_name("8").unwrap();
@@ -2006,7 +2383,75 @@ mod tests {
         }"#;
 
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::EmptyBenchmarkCommand(_)));
-        assert_eq!(err.to_string(), "Empty benchmark command for 'test'");
+        assert!(matches!(err, ConfigError::MissingBenchmarkCommand(_)));
+        assert_eq!(err.to_string(), "Missing benchmark command for 'test'");
+    }
+
+    #[test]
+    fn test_invalid_single_benchmark() {
+        let tmp_dir = TempDir::new().unwrap();
+
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": [
+                {
+                    "benchmark": "bad",
+                    "command": ["run"]
+                }
+            ]
+        }"#;
+        let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBenchmarkOptions(name) if name == "bad"
+        ));
+
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": [
+                {
+                    "benchmark": "bad",
+                    "config": {}
+                }
+            ]
+        }"#;
+        let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBenchmarkOptions(name) if name == "bad"
+        ));
+    }
+
+    #[test]
+    fn test_invalid_benchmark_with_config_and_variants() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bad-both",
+                    "command": ["run"],
+                    "config": {
+                        "build": ["debug"]
+                    },
+                    "variants": [
+                        {
+                            "command": ["run"],
+                            "config": {
+                                "build": ["debug"]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBenchmarkOptions(name) if name == "bad-both"
+        ));
     }
 }

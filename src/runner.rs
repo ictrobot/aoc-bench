@@ -1,8 +1,8 @@
 // Runner: process spawning, SAMPLE collection, run series execution
 
-use crate::config::{Benchmark, BenchmarkId, Config};
+use crate::config::{BenchmarkId, BenchmarkVariant, Config};
 use crate::protocol::{
-    parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
+    ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
 };
 use crate::run::{Run, RunSeries};
 use crate::stats::{StatsAccumulator, StatsError, StatsState};
@@ -13,7 +13,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 use tempfile::TempDir;
-use tracing::{info, info_span, trace, trace_span, warn, Span};
+use tracing::{Span, info, info_span, trace, trace_span, warn};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -33,7 +33,11 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn new(data_dir: &Path, benchmark: &Benchmark, config: Config) -> Result<Self, RunError> {
+    pub fn new(
+        data_dir: &Path,
+        benchmark: &BenchmarkVariant,
+        config: Config,
+    ) -> Result<Self, RunError> {
         let mut args = config.expand_templates(benchmark.command_template())?;
 
         let executable = args.remove(0);
@@ -57,7 +61,7 @@ impl Runner {
             args,
             expected_checksum: benchmark.checksum().map(str::to_string),
             stdin_input,
-            benchmark_id: benchmark.id().clone(),
+            benchmark_id: benchmark.benchmark_id().clone(),
             benchmark_config: config,
         })
     }
@@ -366,7 +370,7 @@ impl Drop for RunnerChild {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ConfigProduct;
+    use crate::config::{Benchmark, ConfigProduct};
     use crate::stats::{EstimationMode, Sample};
     use tempfile::NamedTempFile;
 
@@ -383,7 +387,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
+        let variant = &benchmark.variants()[0];
+        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
 
         let result = runner.run_single();
         assert!(result.is_ok());
@@ -435,7 +440,8 @@ mod tests {
         };
 
         let benchmark = create_benchmark(None);
-        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
+        let variant = &benchmark.variants()[0];
+        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
         let result = runner.run_single();
         assert!(matches!(result, Err(RunError::PrematureEof)));
 
@@ -445,7 +451,8 @@ mod tests {
             .unwrap();
 
         let benchmark = create_benchmark(Some(tmp_file.path().to_owned()));
-        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
+        let variant = &benchmark.variants()[0];
+        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
         let result = runner.run_single().unwrap();
         assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
     }
@@ -461,7 +468,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let runner = Runner::new(tmp_dir.path(), &benchmark, Config::default()).unwrap();
+        let variant = &benchmark.variants()[0];
+        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
 
         assert!(matches!(
             runner.run_single(),

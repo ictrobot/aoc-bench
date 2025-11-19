@@ -121,7 +121,7 @@ class MatrixBuilder:
 
         post_processed = []
         for key in sorted(results["benchmarks"].keys()):
-            post_processed.extend(self.post_process_benchmark(key, results["benchmarks"][key], results["config_keys"]))
+            post_processed.append(self.post_process_benchmark(key, results["benchmarks"][key], results["config_keys"]))
         results["benchmarks"] = post_processed
 
         return results
@@ -137,8 +137,8 @@ class MatrixBuilder:
 
                 results["benchmarks"][f"{puzzle[0]}-{puzzle[1]}"][commit] = details
 
-    def post_process_benchmark(self, name: str, benchmark: dict, config_keys: dict) -> list[dict]:
-        benchmarks = []
+    def post_process_benchmark(self, name: str, benchmark: dict, config_keys: dict) -> dict:
+        variants = []
         year, day = name.split("-")
 
         all_commits = config_keys["commit"]["values"]
@@ -164,17 +164,7 @@ class MatrixBuilder:
                 config_keys["commit"]["presets"][preset_name] = chunk_commits
                 chunk_commits = preset_name
 
-            benchmarks.append({
-                "benchmark": name,
-                "command": [
-                    "builds/{build}/{commit}",
-                    "bench",
-                    year,
-                    day,
-                    "{threads}",
-                    "{multiversion}",
-                ],
-                "input": self.get_input_hash(year, day),
+            variants.append({
                 "checksum": chunk_metadata["checksum"],
                 "config": {
                     "commit": chunk_commits,
@@ -183,7 +173,24 @@ class MatrixBuilder:
                     "multiversion": chunk_metadata["multiversion"],
                 }
             })
-        return benchmarks
+
+        return {
+            "benchmark": name,
+            "command": [
+                "builds/{build}/{commit}",
+                "bench",
+                year,
+                day,
+                "{threads}",
+                "{multiversion}",
+            ],
+            "input": self.get_input_hash(year, day),
+            **(
+                variants[0] if len(variants) == 1 else {
+                    "variants": variants,
+                }
+            )
+        }
 
     async def get_build_puzzles(self, commit: str, kind: str) -> list[tuple[str, str]]:
         cache = self.cache[commit][kind]
