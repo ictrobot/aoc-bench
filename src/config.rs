@@ -1161,6 +1161,7 @@ mod tests {
         // Should succeed now the input file exists
         let config_file = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
         assert_eq!(config_file.benchmarks().len(), 1);
+        assert_eq!(config_file.data_dir(), temp_dir.path());
 
         let bench = &config_file.benchmarks()[0];
         assert_eq!(bench.id().as_str(), "test-bench");
@@ -1721,5 +1722,291 @@ mod tests {
         let filtered = product.filter(&filter_config).unwrap();
 
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_config_with() {
+        let key1 = Key::new("a".to_string(), vec!["1".to_string(), "2".to_string()]).unwrap();
+        let key2 = Key::new("b".to_string(), vec!["x".to_string(), "y".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("1").unwrap();
+        let kv2 = key2.value_from_name("x").unwrap();
+
+        // Start with one key-value pair
+        let mut config = Config::new();
+        config.kv.push(kv1.clone());
+
+        // Add a new key
+        let config2 = config.with(kv2.clone());
+        assert_eq!(config2.len(), 2);
+        assert_eq!(config2.to_string(), "a=1,b=x");
+
+        // Replace existing key with different value
+        let kv1_new = key1.value_from_name("2").unwrap();
+        let config3 = config2.with(kv1_new);
+        assert_eq!(config3.len(), 2);
+        assert_eq!(config3.to_string(), "a=2,b=x");
+    }
+
+    #[test]
+    fn test_config_without_key() {
+        let key1 = Key::new("a".to_string(), vec!["1".to_string()]).unwrap();
+        let key2 = Key::new("b".to_string(), vec!["x".to_string()]).unwrap();
+        let key3 = Key::new("c".to_string(), vec!["p".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("1").unwrap();
+        let kv2 = key2.value_from_name("x").unwrap();
+
+        let mut config = Config::new();
+        config.kv.push(kv1);
+        config.kv.push(kv2);
+
+        // Remove existing key
+        let config2 = config.without_key(&key1);
+        assert_eq!(config2.len(), 1);
+        assert_eq!(config2.to_string(), "b=x");
+        assert!(config2.get(&key1).is_none());
+        assert!(config2.get(&key2).is_some());
+
+        // Remove non-existent key (should be no-op)
+        let config3 = config2.without_key(&key3);
+        assert_eq!(config3.len(), 1);
+        assert_eq!(config3.to_string(), "b=x");
+
+        // Remove all keys
+        let config4 = config3.without_key(&key2);
+        assert!(config4.is_empty());
+    }
+
+    #[test]
+    fn test_config_get_by_name() {
+        let key1 = Key::new("build".to_string(), vec!["debug".to_string()]).unwrap();
+        let key2 = Key::new("threads".to_string(), vec!["4".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("debug").unwrap();
+        let kv2 = key2.value_from_name("4").unwrap();
+
+        let mut config = Config::new();
+        config.kv.push(kv1);
+        config.kv.push(kv2);
+
+        // Get existing keys by name
+        assert!(config.get_by_name("build").is_some());
+        assert_eq!(config.get_by_name("build").unwrap().value_name(), "debug");
+        assert!(config.get_by_name("threads").is_some());
+        assert_eq!(config.get_by_name("threads").unwrap().value_name(), "4");
+
+        // Get non-existent key
+        assert!(config.get_by_name("nonexistent").is_none());
+        assert!(config.get_by_name("").is_none());
+    }
+
+    #[test]
+    fn test_config_from_map() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] },
+                "threads": { "values": ["1", "4"] }
+            },
+            "benchmarks": []
+        }"#;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
+
+        // Test valid map
+        let mut map = BTreeMap::new();
+        map.insert("build".to_string(), "release".to_string());
+        map.insert("threads".to_string(), "4".to_string());
+
+        let config = config_file.config_from_map(&map).unwrap();
+        assert_eq!(config.len(), 2);
+        assert_eq!(config.to_string(), "build=release,threads=4");
+
+        // Test empty map
+        let empty_map = BTreeMap::new();
+        let empty_config = config_file.config_from_map(&empty_map).unwrap();
+        assert!(empty_config.is_empty());
+
+        // Test unknown key
+        let mut bad_map = BTreeMap::new();
+        bad_map.insert("unknown".to_string(), "value".to_string());
+        let err = config_file.config_from_map(&bad_map).unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKey(_)));
+
+        // Test unknown value
+        let mut bad_map2 = BTreeMap::new();
+        bad_map2.insert("build".to_string(), "unknown".to_string());
+        let err2 = config_file.config_from_map(&bad_map2).unwrap_err();
+        assert!(matches!(err2, ConfigError::UnknownValueForKey { .. }));
+    }
+
+    #[test]
+    fn test_benchmark_id_validation() {
+        // Valid IDs
+        let id1 = BenchmarkId::try_from("test-bench".to_string()).unwrap();
+        assert_eq!(id1.as_str(), "test-bench");
+
+        let id2 = BenchmarkId::try_from("2015-04".to_string()).unwrap();
+        assert_eq!(id2.as_str(), "2015-04");
+
+        assert!(BenchmarkId::try_from("compile_test".to_string()).is_ok());
+        assert!(BenchmarkId::try_from("ABC123".to_string()).is_ok());
+
+        // Invalid IDs
+        let empty_err = BenchmarkId::try_from(String::new()).unwrap_err();
+        assert!(matches!(empty_err, ConfigError::InvalidBenchmarkId(_)));
+
+        let space_err = BenchmarkId::try_from("test bench".to_string()).unwrap_err();
+        assert!(matches!(space_err, ConfigError::InvalidBenchmarkId(_)));
+
+        let slash_err = BenchmarkId::try_from("test/bench".to_string()).unwrap_err();
+        assert!(matches!(slash_err, ConfigError::InvalidBenchmarkId(_)));
+
+        let special_err = BenchmarkId::try_from("test@bench".to_string()).unwrap_err();
+        assert!(matches!(special_err, ConfigError::InvalidBenchmarkId(_)));
+    }
+
+    #[test]
+    fn test_config_serialization() {
+        let key1 = Key::new("build".to_string(), vec!["debug".to_string()]).unwrap();
+        let key2 = Key::new("threads".to_string(), vec!["4".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("debug").unwrap();
+        let kv2 = key2.value_from_name("4").unwrap();
+
+        let mut config = Config::new();
+        config.kv.push(kv1);
+        config.kv.push(kv2);
+
+        // Serialize to JSON
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.is_object());
+
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("build").unwrap().as_str().unwrap(), "debug");
+        assert_eq!(obj.get("threads").unwrap().as_str().unwrap(), "4");
+
+        // Empty config
+        let empty = Config::new();
+        let empty_json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(empty_json.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_config_to_btreemap() {
+        let key1 = Key::new("build".to_string(), vec!["release".to_string()]).unwrap();
+        let key2 = Key::new("threads".to_string(), vec!["8".to_string()]).unwrap();
+
+        let kv1 = key1.value_from_name("release").unwrap();
+        let kv2 = key2.value_from_name("8").unwrap();
+
+        let mut config = Config::new();
+        config.kv.push(kv1);
+        config.kv.push(kv2);
+
+        // Convert to BTreeMap
+        let map: BTreeMap<String, String> = config.into();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("build").unwrap(), "release");
+        assert_eq!(map.get("threads").unwrap(), "8");
+
+        // Keys should be sorted (BTreeMap property)
+        let keys: Vec<_> = map.keys().collect();
+        assert_eq!(keys, vec!["build", "threads"]);
+    }
+
+    #[test]
+    fn test_host_key_with_current_host() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": []
+        }"#;
+
+        // Create config with a current host
+        let config_file = ConfigFile::from_str(tmp_dir.path(), Some("my-machine"), json).unwrap();
+        let host_key = config_file.host_key();
+
+        assert_eq!(host_key.name(), "host");
+
+        // Verify we can get host value
+        let host_value = host_key.value_from_name("my-machine");
+        assert!(host_value.is_some());
+        assert_eq!(host_value.unwrap().value_name(), "my-machine");
+    }
+
+    #[test]
+    fn test_host_key_autodiscovery() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": []
+        }"#;
+
+        // Create some host directories
+        let results_dir = tmp_dir.path().join("results");
+        fs::create_dir_all(&results_dir).unwrap();
+        fs::create_dir_all(results_dir.join("host1")).unwrap();
+        fs::create_dir_all(results_dir.join("host2")).unwrap();
+
+        // Load config without current host
+        let config_file = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
+        let host_key = config_file.host_key();
+
+        // Should autodiscover both hosts
+        assert!(host_key.value_from_name("host1").is_some());
+        assert!(host_key.value_from_name("host2").is_some());
+        assert!(host_key.value_from_name("host3").is_none());
+        assert_eq!(host_key.values_len(), 2);
+
+        // Load config with current host
+        let config_file = ConfigFile::from_str(tmp_dir.path(), Some("host3"), json).unwrap();
+        let host_key = config_file.host_key();
+        assert!(host_key.value_from_name("host1").is_some());
+        assert!(host_key.value_from_name("host2").is_some());
+        assert!(host_key.value_from_name("host3").is_some());
+        assert_eq!(host_key.values_len(), 3);
+    }
+
+    #[test]
+    fn test_host_key_invalid_name() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": []
+        }"#;
+
+        // Invalid host name with space
+        let err = ConfigFile::from_str(tmp_dir.path(), Some("my machine"), json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidHost(_)));
+        assert_eq!(
+            err.to_string(),
+            "Invalid host 'my machine': must match the format for config values [a-zA-Z0-9_-]+"
+        );
+
+        // Invalid host name with special char
+        let err2 = ConfigFile::from_str(tmp_dir.path(), Some("my@machine"), json).unwrap_err();
+        assert!(matches!(err2, ConfigError::InvalidHost(_)));
+    }
+
+    #[test]
+    fn test_empty_benchmark_command() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": [
+                {
+                    "benchmark": "test",
+                    "command": [],
+                    "config": {}
+                }
+            ]
+        }"#;
+
+        let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyBenchmarkCommand(_)));
+        assert_eq!(err.to_string(), "Empty benchmark command for 'test'");
     }
 }

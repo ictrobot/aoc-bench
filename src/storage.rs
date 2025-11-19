@@ -25,7 +25,6 @@ const EMPTY_CONFIG_DIR: &str = "__default__";
 pub struct Storage {
     config_file: ConfigFile,
     host: KeyValue,
-    host_dir: PathBuf,
     runs_dir: PathBuf,
     lock_path: PathBuf,
     db_path: PathBuf,
@@ -57,7 +56,6 @@ impl Storage {
         Ok(Self {
             config_file,
             host,
-            host_dir,
             runs_dir,
             lock_path,
             db_path,
@@ -74,18 +72,6 @@ impl Storage {
     #[must_use]
     pub fn host(&self) -> &KeyValue {
         &self.host
-    }
-
-    /// Directory containing JSON run series for this host.
-    #[must_use]
-    pub fn runs_dir(&self) -> &Path {
-        &self.runs_dir
-    }
-
-    /// Host-specific results directory (`data/results/{host}`).
-    #[must_use]
-    pub fn host_dir(&self) -> &Path {
-        &self.host_dir
     }
 
     /// Write the immutable JSON file for a run series using atomic rename.
@@ -570,5 +556,224 @@ mod tests {
         drop(lock1);
 
         storage.acquire_lock().unwrap();
+    }
+
+    #[test]
+    fn test_storage_new_unknown_host() {
+        let (_dir, storage) = temp_storage("pi5");
+
+        // Try to create storage with unknown host
+        let err = Storage::new(storage.config_file, "unknown-host").unwrap_err();
+        assert!(matches!(err, StorageError::UnknownHost(_)));
+        assert_eq!(
+            err.to_string(),
+            "host 'unknown-host' not in loaded config file"
+        );
+    }
+
+    #[test]
+    fn test_empty_config_directory_naming() {
+        let (_dir, storage) = temp_storage("pi5");
+
+        // Config with only host key should use __default__ directory
+        let config = storage
+            .config_file()
+            .config_from_string("host=pi5")
+            .unwrap();
+        let series = sample_series(config.clone());
+
+        let path = storage.write_run_series_json(&series).unwrap();
+        assert!(
+            path.to_string_lossy()
+                .ends_with("results/pi5/runs/2015-04/__default__/2023-11-14T22-13-20.json")
+        );
+    }
+
+    #[test]
+    fn test_series_file_path_format() {
+        let (_dir, storage) = temp_storage("pi5");
+
+        // Check path structure
+        let config = storage
+            .config_file()
+            .config_from_string("build=native,commit=abc1234,host=pi5")
+            .unwrap();
+        let series = sample_series(config.clone());
+        let path = storage.write_run_series_json(&series).unwrap();
+        assert!(path.to_string_lossy().ends_with(
+            "results/pi5/runs/2015-04/build=native,commit=abc1234/2023-11-14T22-13-20.json"
+        ));
+    }
+
+    #[test]
+    fn test_read_nonexistent_series() {
+        let (_dir, storage) = temp_storage("pi5");
+
+        let config = storage
+            .config_file()
+            .config_from_string("build=native,host=pi5")
+            .unwrap();
+        let timestamp = Timestamp::from_second(1_600_000_000).unwrap();
+
+        let err = storage
+            .read_run_series_json(&"2015-04".try_into().unwrap(), &config, timestamp)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::Io { .. }));
+    }
+
+    #[test]
+    fn test_read_series_json_content_mismatch_bench() {
+        let (_dir, storage) = temp_storage("pi5");
+
+        let config = storage
+            .config_file()
+            .config_from_string("build=native,host=pi5")
+            .unwrap();
+        let series = sample_series(config.clone());
+
+        // Write with one bench name
+        let path = storage.write_run_series_json(&series).unwrap();
+
+        // Modify the bench name in the JSON file
+        let json = fs::read_to_string(&path).unwrap();
+        fs::write(path, json.replace("2015-04", "2016-05").as_bytes()).unwrap();
+
+        // Try to read expecting the original bench name (2015-04)
+        let err = storage
+            .read_run_series_json(&series.bench, &config, series.timestamp)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::JsonContentsMismatch { .. }));
+    }
+
+    #[test]
+    fn test_upsert_results_row_updates_existing() {
+        let (_dir, storage) = temp_storage("pi5");
+        let config = storage
+            .config_file()
+            .config_from_string("commit=def4567,host=pi5")
+            .unwrap();
+
+        storage
+            .with_transaction(|tx| {
+                let bench: BenchmarkId = "2015-04".try_into().unwrap();
+                let timestamp1 = Timestamp::from_second(1_700_000_000).unwrap();
+                let timestamp2 = Timestamp::from_second(1_700_000_100).unwrap();
+
+                // Insert run_series rows first (foreign key requirement)
+                let mut series1 = sample_series(config.clone());
+                series1.timestamp = timestamp1;
+                storage.insert_run_series_row(tx, &series1)?;
+
+                let mut series2 = sample_series(config.clone());
+                series2.timestamp = timestamp2;
+                storage.insert_run_series_row(tx, &series2)?;
+
+                // Insert initial results row
+                let row1 = ResultsRow {
+                    bench: bench.clone(),
+                    config: config.clone(),
+                    stable_series_timestamp: timestamp1,
+                    last_series_timestamp: timestamp1,
+                    suspicious_series_count: 0,
+                };
+                storage.upsert_results_row(tx, &row1)?;
+
+                // Update with new data
+                let row2 = ResultsRow {
+                    bench: bench.clone(),
+                    config: config.clone(),
+                    stable_series_timestamp: timestamp1, // Keep stable
+                    last_series_timestamp: timestamp2,   // Update last
+                    suspicious_series_count: 2,
+                };
+                storage.upsert_results_row(tx, &row2)?;
+
+                // Verify update
+                let retrieved = storage.get_results_row(tx, bench, config.clone())?.unwrap();
+                assert_eq!(retrieved.last_series_timestamp, timestamp2);
+                assert_eq!(retrieved.suspicious_series_count, 2);
+
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_get_results_row_not_found() {
+        let (_dir, storage) = temp_storage("pi5");
+        let config = storage
+            .config_file()
+            .config_from_string("commit=abc1234,host=pi5")
+            .unwrap();
+
+        storage
+            .with_transaction(|tx| {
+                let result =
+                    storage.get_results_row(tx, "nonexistent".try_into().unwrap(), config)?;
+                assert!(result.is_none());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_transaction_rollback_on_error() {
+        let (_dir, storage) = temp_storage("pi5");
+        let config = storage
+            .config_file()
+            .config_from_string("commit=abc1234,host=pi5")
+            .unwrap();
+        let series = sample_series(config.clone());
+
+        // Transaction that fails
+        let result = storage.with_transaction(|tx| {
+            storage.insert_run_series_row(tx, &series)?;
+            // Simulate an error
+            Err::<(), _>(StorageError::UnknownHost("test-error".to_string()))
+        });
+
+        assert!(result.is_err());
+
+        // Verify nothing was committed
+        storage
+            .with_transaction(|tx| {
+                let mut stmt = tx.prepare("SELECT COUNT(*) FROM run_series WHERE bench = ?1")?;
+                let count: i64 =
+                    stmt.query_row(params![series.bench.as_str()], |row| row.get(0))?;
+                assert_eq!(count, 0);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_multiple_run_series_for_same_config() {
+        let (_dir, storage) = temp_storage("pi5");
+        let config = storage
+            .config_file()
+            .config_from_string("commit=abc1234,host=pi5")
+            .unwrap();
+
+        // Insert multiple series with different timestamps
+        storage
+            .with_transaction(|tx| {
+                for i in 0..5 {
+                    let mut series = sample_series(config.clone());
+                    series.timestamp = Timestamp::from_second(1_700_000_000 + i * 100).unwrap();
+                    storage.insert_run_series_row(tx, &series)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // Verify all were inserted
+        storage
+            .with_transaction(|tx| {
+                let mut stmt = tx.prepare("SELECT COUNT(*) FROM run_series WHERE bench = ?1")?;
+                let count: i64 = stmt.query_row(params!["2015-04"], |row| row.get(0))?;
+                assert_eq!(count, 5);
+                Ok(())
+            })
+            .unwrap();
     }
 }
