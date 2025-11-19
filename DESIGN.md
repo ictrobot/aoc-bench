@@ -242,7 +242,13 @@ All commands and paths specified in the config are relative to the `data/` direc
   "benchmarks": [
     {
       "benchmark": "2015-04",
-      "command": "builds/{build}/{commit} bench 2015 04 {threads}",
+      "command": [
+        "builds/{build}/{commit}",
+        "bench",
+        "2015",
+        "04",
+        "{threads}"
+      ],
       "input": "2015-04.txt",
       "checksum": "expected_output_hash",
       "config": {
@@ -265,7 +271,7 @@ All commands and paths specified in the config are relative to the `data/` direc
 For each key (e.g., `commit`, `build`, `threads`):
 
 - **`values`**: Array of all valid values for this key (in canonical order)
-- **`presets`**: Named groups of values for convenient reuse
+- **`presets`** *(optional)*: Named groups of values for convenient reuse
     - Preset names can be any string (e.g., `"all"`, `"from_abc1234"`, `"power_of_2"`)
     - Preset values must be subsets of `values`
 
@@ -276,40 +282,129 @@ strings or stored, values are sorted according to this order.
 
 **All keys are optional**: A benchmark config can omit any key. Only specified keys are included in the final config.
 
-**Disallowed keys**: The following keys are reserved to avoid confusion: `bench`, `benchmark`, `host`, `timestamp`
+**Disallowed keys**: The following keys are reserved to avoid confusion: `bench`, `benchmark`, `host`, `timestamp`.
+The system synthesizes the `host` key automatically, so user configs must never define it manually.
 
 ## 4.3 Benchmarks Section
 
-**`benchmarks`**: Array of benchmark definitions.
+**`benchmarks`**: Array of benchmark definitions. Each entry describes either a single benchmark variant or a
+collection of mutually-exclusive variants that share an identifier.
 
-Each benchmark entry:
+Common fields:
 
 - **`benchmark`**: Benchmark name/identifier (string)
-- **`command`**: Command template with `{key}` placeholders for config values. Path is relative to the `data/`
-  directory.
-- **`input`**: Input filename in `data/inputs/` directory (e.g., `"2015-04.txt"` refers to `data/inputs/2015-04.txt`),
-  or `null` if no input is required
-- **`checksum`**: Expected output checksum (for correctness verification). Optional. If present the command must output
-  the expected checksum.
-- **`config`**: Configuration specification for this benchmark
+- **`command`**: Required command template expressed *as an argv array*, e.g.
+  `"command": ["builds/{build}/{commit}", "bench", "2024", "04", "{threads}"]`. The first element is the
+  executable relative to `data/`, the rest are arguments. Every `{key}` placeholder must match a key defined in the
+  variant’s config.
+- **`input`** *(optional)*: Input filename in `data/inputs/`. If provided the runner streams the file to stdin.
+- **`checksum`** *(optional)*: Expected checksum emitted by the benchmark.
 
-**Config specification**:
+### Single-variant entries
 
-- Keys must exist in `config_keys`
+Structure:
+
+```json
+{
+  "benchmark": "2024-04",
+  "command": [
+    "builds/{build}/{commit}",
+    "bench",
+    "2024",
+    "04",
+    "{threads}"
+  ],
+  "input": "2015-04.txt",
+  "checksum": "deadbeef",
+  "config": {
+    "build": [
+      "generic",
+      "native"
+    ],
+    "commit": [
+      "abc1234",
+      "def5678"
+    ]
+  }
+}
+```
+
+Rules:
+
+- `command` and `config` are required; `variants` must be omitted.
+- The config specification (see below) expands to a Cartesian product of concrete configs.
+
+### Multi-variant entries
+
+Structure:
+
+```json
+{
+  "benchmark": "solver",
+  "command": [
+    "builds/{build}/{commit}",
+    "bench"
+  ],
+  "input": "shared-input.bin",
+  "checksum": "abcd1234",
+  "variants": [
+    {
+      "command": [
+        "builds/{build}/{commit}",
+        "bench",
+        "{threads}"
+      ],
+      "config": {
+        "build": [
+          "native"
+        ],
+        "commit": [
+          "abc1234",
+          "def5678"
+        ],
+        "threads": [
+          "1",
+          "8"
+        ]
+      }
+    },
+    {
+      "config": {
+        "build": [
+          "generic"
+        ],
+        "commit": [
+          "abc1234",
+          "def5678"
+        ]
+      }
+    }
+  ]
+}
+```
+
+Rules:
+
+- The top-level `config` must be omitted and each variant must supply its own `config` map.
+- Variant entries may override `command`, `input`, and `checksum`. When omitted, the system uses the top-level fallback.
+- At least one variant must be present, and their config products must be disjoint (the system rejects overlaps).
+
+### Config specification
+
+- Keys must exist in `config_keys`.
 - Values can be:
-    - **Preset name** (string): References a preset from `config_keys[key].presets`
-    - **Literal array** (array of strings): Explicit list of values
-- Values must be subsets of the canonical `values` for that key
-
-**Expansion**: The config expands via **Cartesian product** of all key values.
+    - **Preset name** (string): References `config_keys[key].presets[preset]`.
+    - **Literal array** (array of strings): Explicit list of values.
+- Values must be subsets of the canonical `values` for that key.
+- The Cartesian product of all key subsets defines the concrete configs used for scheduling.
 
 Example:
 
 ```json
 "config": {
-"commit": "recent", // Preset → ["ghi9012", "jkl3456"]
-"build": ["generic"], // Literal
-"threads": ["1", "32"]   // Literal
+"commit": "recent",
+"build": ["generic"],
+"threads": ["1", "32"]
 }
 ```
 
@@ -320,13 +415,11 @@ Expands to 4 configs:
 - `commit=jkl3456,build=generic,threads=1`
 - `commit=jkl3456,build=generic,threads=32`
 
-**Multiple entries with same benchmark**: The benchmarks array can have multiple entries with the same `benchmark` name
-but different configs. This allows specifying disjoint config sets (e.g., different commit ranges) for the same
-benchmark.
-
 ## 4.4 Command Templating
 
-The `command` field is a template string with `{key}` placeholders that are filled in during execution.
+Every command argument is a template string with `{key}` placeholders that are filled in during execution. The first
+argument becomes the executable path relative to `data/`, and the rest are passed verbatim after placeholder
+substitution.
 
 **Command path resolution:**
 
@@ -336,18 +429,19 @@ The `command` field is a template string with `{key}` placeholders that are fill
 **Example:**
 
 ```json
-"command": "builds/{build}/{commit} bench 2015 04 {threads}"
+"command": ["builds/{build}/{commit}", "bench", "2015", "04", "{threads}", "{multiversion}"]
 ```
 
 For config `commit=abc1234,build=native,threads=1`, the command becomes:
 
 ```
-builds/native/abc1234 bench 2015 04 1
+builds/native/abc1234 bench 2015 04 1 default
 ```
 
 This is relative to the `data/` directory, so the full path is `data/builds/native/abc1234`.
 
-All config keys used in the command template must be present in the config.
+**Placeholder validation:** Every key referenced in a variant’s config must appear at least once in its command
+template.
 
 ---
 
