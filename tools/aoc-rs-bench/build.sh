@@ -24,9 +24,10 @@ framework_revisions=(
     "7189784717f71bba0260b4de3a7cc8d27c116054" # glue-v0 Initial
     "b9c2f7faf8da1c0b73dc2afb8c1d7466f606cb39" # glue-v1 Rename InvalidInputError to InputError
     "9676a84981560f110728475366b9170c47972884" # glue-v2 Multiversion support
-    "ab1e77c27919360630046d825583af16a1423d16" # glue-v3 Year 2016 added
-    "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v4 Nested macro repeats for year and day
-    "421df7084cf3de9e7279ca9b841fed222c6b33fa" # glue-v5 One DATE constant instead of YEAR and DAY
+    "2ee87f5e33a26a1fc99237c49120214a568c014c" # glue-v3 Multithreading support
+    "ab1e77c27919360630046d825583af16a1423d16" # glue-v4 Year 2016 added
+    "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Nested macro repeats for year and day
+    "421df7084cf3de9e7279ca9b841fed222c6b33fa" # glue-v6 One DATE constant instead of YEAR and DAY
 )
 
 build_binary() {
@@ -62,7 +63,7 @@ build_binary() {
         "utils"
         "year2015"
     )
-    if [[ "$framework_version" -gt 2 ]]; then
+    if [[ "$framework_version" -gt 3 ]]; then
         patch_crates+=("year2016")
     fi
 

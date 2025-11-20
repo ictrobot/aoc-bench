@@ -1,7 +1,9 @@
+use crate::multithreading_glue::*;
 use crate::multiversion_glue::*;
 use crate::puzzle_glue::*;
 use std::io::Write;
 use std::io::{stdin, stdout, Read};
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 const MAX_ITERS_PER_SAMPLE: u32 = 1024 * 1024;
@@ -55,7 +57,9 @@ fn main() {
         }
         ["bench", y, d, threads, multiversion] => {
             if *threads != "n" {
-                // TODO
+                let threads: usize = threads.parse().unwrap();
+                let threads = NonZeroUsize::new(threads).unwrap();
+                set_thread_count(threads);
             }
             if *multiversion != "default" {
                 set_override(multiversion);
@@ -173,14 +177,20 @@ fn fnv1a64(data: &[u8]) -> u64 {
     feature = "glue-v0",
     feature = "glue-v1",
     feature = "glue-v2",
-    feature = "glue-v3"
+    feature = "glue-v3",
+    feature = "glue-v4"
 ))]
 mod puzzle_glue {
     use aoc::all_puzzles;
     use utils::date::{Day, Year};
-    #[cfg(any(feature = "glue-v1", feature = "glue-v2", feature = "glue-v3"))]
+    #[cfg(any(
+        feature = "glue-v1",
+        feature = "glue-v2",
+        feature = "glue-v3",
+        feature = "glue-v4"
+    ))]
     use utils::input::{InputError, InputType};
-    #[cfg(any(feature = "glue-v0"))]
+    #[cfg(feature = "glue-v0")]
     use utils::input::{InputType, InvalidInputError as InputError};
     use utils::Puzzle;
 
@@ -203,12 +213,12 @@ mod puzzle_glue {
     all_puzzles!(matcher);
 }
 
-#[cfg(feature = "glue-v4")]
+#[cfg(feature = "glue-v5")]
 mod puzzle_glue {
     pub use aoc::PUZZLES;
 }
 
-#[cfg(feature = "glue-v5")]
+#[cfg(feature = "glue-v6")]
 mod puzzle_glue {
     use aoc::utils::date::{Day, Year};
     use aoc::utils::input::{strip_final_newline, InputType};
@@ -253,13 +263,14 @@ mod multiversion_glue {
     feature = "glue-v2",
     feature = "glue-v3",
     feature = "glue-v4",
-    feature = "glue-v5"
+    feature = "glue-v5",
+    feature = "glue-v6"
 ))]
 mod multiversion_glue {
-    #[cfg(any(feature = "glue-v4", feature = "glue-v5"))]
+    #[cfg(any(feature = "glue-v5", feature = "glue-v6"))]
     use aoc::utils::multiversion::{Version, VERSIONS};
     use std::panic;
-    #[cfg(any(feature = "glue-v2", feature = "glue-v3"))]
+    #[cfg(any(feature = "glue-v2", feature = "glue-v3", feature = "glue-v4"))]
     use utils::multiversion::{Version, VERSIONS};
 
     pub fn get_supported_versions() -> Vec<String> {
@@ -287,4 +298,13 @@ mod multiversion_glue {
     pub fn set_override(version: &str) {
         Version::set_override(version.parse().unwrap());
     }
+}
+
+mod multithreading_glue {
+    #[cfg(any(feature = "glue-v5", feature = "glue-v6"))]
+    pub use aoc::utils::multithreading::set_thread_count;
+    #[cfg(any(feature = "glue-v3", feature = "glue-v4"))]
+    pub use utils::multithreading::set_thread_count;
+    #[cfg(any(feature = "glue-v0", feature = "glue-v1", feature = "glue-v2"))]
+    pub fn set_thread_count(_: std::num::NonZeroUsize) {}
 }

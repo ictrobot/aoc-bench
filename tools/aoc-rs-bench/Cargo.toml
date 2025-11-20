@@ -22,6 +22,7 @@ year2016 = { git = "https://github.com/ictrobot/aoc-rs", rev = "ab1e77c279193606
 glue-v0 = ["utils", "year2015"] # Doesn't re-export crates
 glue-v1 = ["utils", "year2015"]
 glue-v2 = ["utils", "year2015"]
-glue-v3 = ["utils", "year2015", "year2016"]
-glue-v4 = []
+glue-v3 = ["utils", "year2015"]
+glue-v4 = ["utils", "year2015", "year2016"]
 glue-v5 = []
+glue-v6 = []
