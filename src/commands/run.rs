@@ -1,5 +1,6 @@
 use crate::commands::DEFAULT_DATA_DIR;
 use aoc_bench::config::{BenchmarkId, Config, ConfigFile};
+use aoc_bench::host_config::HostConfig;
 use aoc_bench::runner::Runner;
 use aoc_bench::stable::{record_run_series, RecordOptions, RecordOutcome};
 use aoc_bench::storage::{HybridDiskStorage, Storage};
@@ -47,6 +48,14 @@ pub fn execute(args: RunArgs) -> ExitCode {
         Ok(cfg) => cfg,
         Err(error) => {
             error!(%error, "failed to load data/config.json");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let host_config = match HostConfig::load(data_dir, &host) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            error!(%error, "failed to load host config");
             return ExitCode::FAILURE;
         }
     };
@@ -119,7 +128,12 @@ pub fn execute(args: RunArgs) -> ExitCode {
                 let span = info_span!("config", %config);
                 let _enter = span.enter();
 
-                let runner = match Runner::new(config_file.data_dir(), variant, config.clone()) {
+                let runner = match Runner::new(
+                    config_file.data_dir(),
+                    variant,
+                    config.clone(),
+                    host_config.clone(),
+                ) {
                     Ok(runner) => runner,
                     Err(error) => {
                         error!(%error, bench = bench.id().as_str(), %config, "failed to build runner");

@@ -1,8 +1,9 @@
 // Runner: process spawning, SAMPLE collection, run series execution
 
 use crate::config::{BenchmarkId, BenchmarkVariant, Config};
+use crate::host_config::{CpuAffinity, HostConfig};
 use crate::protocol::{
-    ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
+    parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
 };
 use crate::run::{Run, RunSeries};
 use crate::stats::{StatsAccumulator, StatsError, StatsState};
@@ -13,7 +14,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 use tempfile::TempDir;
-use tracing::{Span, info, info_span, trace, trace_span, warn};
+use tracing::{info, info_span, trace, trace_span, warn, Span};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -30,6 +31,7 @@ pub struct Runner {
     stdin_input: Option<Vec<u8>>,
     benchmark_id: BenchmarkId,
     benchmark_config: Config,
+    host_config: HostConfig,
 }
 
 impl Runner {
@@ -37,6 +39,7 @@ impl Runner {
         data_dir: &Path,
         benchmark: &BenchmarkVariant,
         config: Config,
+        host_config: HostConfig,
     ) -> Result<Self, RunError> {
         let mut args = config.expand_templates(benchmark.command_template())?;
 
@@ -63,6 +66,7 @@ impl Runner {
             stdin_input,
             benchmark_id: benchmark.benchmark_id().clone(),
             benchmark_config: config,
+            host_config,
         })
     }
 
@@ -224,29 +228,24 @@ impl Runner {
         let temp_dir = TempDir::with_prefix(env!("CARGO_PKG_NAME"))?;
         cmd.current_dir(temp_dir.path());
 
-        // Disable ASLR on Linux for consistent measurements
-        //
-        // Particularly on AMD K8, ASLR can cause significant differences in performance run to run.
-        // For example,  ~105us or ~175us for 2015 day 1 depending on memory layout.
-        #[cfg(target_os = "linux")]
-        #[allow(clippy::cast_sign_loss)]
-        unsafe {
-            cmd.pre_exec(|| {
-                let current = libc::personality(0xffff_ffff);
-                if current == -1 {
-                    return Err(io::Error::last_os_error());
-                }
+        if let CpuAffinity::Cpus(cpus) = &self.host_config.cpu_affinity {
+            if let Err(e) = set_affinity(&mut cmd, cpus) {
+                warn!(error = %e, "failed to set cpu affinity");
+            } else {
+                trace!(cpus = %&self.host_config.cpu_affinity, "cpu affinity set for child process");
+            }
+        }
 
-                let ret = libc::personality((current | libc::ADDR_NO_RANDOMIZE) as libc::c_ulong);
-                if ret == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
+        if self.host_config.disable_aslr {
+            if let Err(e) = disable_aslr(&mut cmd) {
+                warn!(error = %e, "failed to disable ASLR");
+            } else {
+                trace!("aslr disabled for child process");
+            }
         }
 
         let mut child = cmd.spawn()?;
+        trace!(pid = child.id(), "spawned child process");
 
         // Write input to stdin in a separate thread to avoid deadlock
         if let Some(input) = self.stdin_input.clone() {
@@ -367,6 +366,69 @@ impl Drop for RunnerChild {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn set_affinity(cmd: &mut Command, cpus: &[usize]) -> io::Result<()> {
+    let Some(&max) = cpus.iter().max() else {
+        return Err(io::Error::other("empty cpu set"));
+    };
+    if max >= libc::CPU_SETSIZE as usize {
+        return Err(io::Error::other("max cpu number >= CPU_SETSIZE"));
+    }
+
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::CPU_ZERO(&mut set) };
+
+    for &cpu in cpus {
+        unsafe { libc::CPU_SET(cpu, &mut set) };
+    }
+
+    let hook = move || {
+        let result = unsafe { libc::sched_setaffinity(0, size_of_val(&set), &raw const set) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    };
+
+    unsafe { cmd.pre_exec(hook) };
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_affinity(_: &mut Command, _: &[usize]) -> io::Result<()> {
+    Err(io::Error::other("not supported on this platform"))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::cast_sign_loss, clippy::unnecessary_wraps)]
+fn disable_aslr(cmd: &mut Command) -> io::Result<()> {
+    let hook = || {
+        let current = unsafe { libc::personality(0xffff_ffff) };
+        if current == -1 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let ret =
+            unsafe { libc::personality((current | libc::ADDR_NO_RANDOMIZE) as libc::c_ulong) };
+        if ret == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+
+    unsafe { cmd.pre_exec(hook) };
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disable_aslr(_: &mut Command) -> io::Result<()> {
+    Err(io::Error::other("not supported on this platform"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,7 +450,13 @@ mod tests {
         )
         .unwrap();
         let variant = &benchmark.variants()[0];
-        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
+        let runner = Runner::new(
+            tmp_dir.path(),
+            variant,
+            Config::default(),
+            HostConfig::default(),
+        )
+        .unwrap();
 
         let result = runner.run_single();
         assert!(result.is_ok());
@@ -441,7 +509,13 @@ mod tests {
 
         let benchmark = create_benchmark(None);
         let variant = &benchmark.variants()[0];
-        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
+        let runner = Runner::new(
+            tmp_dir.path(),
+            variant,
+            Config::default(),
+            HostConfig::default(),
+        )
+        .unwrap();
         let result = runner.run_single();
         assert!(matches!(result, Err(RunError::PrematureEof)));
 
@@ -452,7 +526,13 @@ mod tests {
 
         let benchmark = create_benchmark(Some(tmp_file.path().to_owned()));
         let variant = &benchmark.variants()[0];
-        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
+        let runner = Runner::new(
+            tmp_dir.path(),
+            variant,
+            Config::default(),
+            HostConfig::default(),
+        )
+        .unwrap();
         let result = runner.run_single().unwrap();
         assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
     }
@@ -469,16 +549,22 @@ mod tests {
         )
         .unwrap();
         let variant = &benchmark.variants()[0];
-        let runner = Runner::new(tmp_dir.path(), variant, Config::default()).unwrap();
+        let runner = Runner::new(
+            tmp_dir.path(),
+            variant,
+            Config::default(),
+            HostConfig::default(),
+        )
+        .unwrap();
 
         assert!(matches!(
             runner.run_single(),
-            Err(RunError::ProcessCrashed(Some(1)))
+            Err(RunError::ProcessCrashed(_))
         ));
 
         assert!(matches!(
             runner.run_series(),
-            Err(RunError::ProcessCrashed(Some(1)))
+            Err(RunError::ProcessCrashed(_))
         ));
     }
 }

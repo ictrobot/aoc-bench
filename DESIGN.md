@@ -69,6 +69,9 @@ All benchmark data and configuration is stored in a single `data/` directory wit
 * **`data/results/`** (auto-created by tool): Benchmark results organized by host
     - **`results/{host}/metadata.db`**: SQLite database with indexed results for fast queries
     - **`results/{host}/runs/`**: Immutable JSON files containing full run series data
+* **`data/hosts/{host}.json`** (optional): Host-specific runner settings
+    - `cpu_affinity`: cpuset string (e.g., `"0-3,6"`) or omitted/`null` for all CPUs
+    - `disable_aslr`: bool, defaults to `true` on Linux to reduce noise
 
 # 2. Concepts and Terminology
 
@@ -538,30 +541,26 @@ at `data/.lock`. This is implemented using `std::fs::File::lock` to acquire an e
 The child process should be spawned with its working directory set to a **temporary directory**.
 The temporary directory should be created fresh for each run and cleaned up afterward.
 
-## 6.3 CPU Affinity (Linux)
+## 6.3 Host-Specific Runtime Options
 
-The system provides a top-level configuration option for CPU affinity to pin the benchmark process to specific CPU
-cores:
+Runtime noise controls are configured per-host (not in the shared `config.json`) via optional files:
+`data/hosts/{host}.json`.
 
-**In `data/config.json` (top-level):**
+Supported keys:
 
 ```json
 {
-  "cpu_affinity": [
-    0,
-    1
-  ],
-  "config_keys": {
-    ...
-  },
-  "benchmarks": [
-    ...
-  ]
+  "cpu_affinity": "0-3,6",
+  "disable_aslr": true
 }
 ```
 
-The `cpu_affinity` field is optional and specifies a list of CPU core IDs to pin the process to. If present, the child
-process is pinned using a `pre_exec` hook that calls `sched_setaffinity`:
+All keys are optional.
+
+## 6.4 CPU Affinity (Linux)
+
+The `cpu_affinity` host config option is optional and specifies a list of CPU numbers to pin the process to.
+If present, the child process is pinned using a `pre_exec` hook that calls `sched_setaffinity`:
 
 **Rationale**:
 
@@ -571,8 +570,10 @@ process is pinned using a `pre_exec` hook that calls `sched_setaffinity`:
 
 ## 6.4 ASLR (Linux)
 
-On Linux, Address Space Layout Randomization (ASLR) should be disabled for the child process to reduce run-to-run
-variance. This is accomplished using a `pre_exec` hook that calls `personality(ADDR_NO_RANDOMIZE)`:
+The `disable_aslr` host config option is optional and specifies whether to disable ASLR for the child process to reduce
+run-to-run variance.
+It defaults to `true` on Linux where it is supported, and is implemented using a `pre_exec` hook that calls
+`personality(ADDR_NO_RANDOMIZE)`.
 
 **Rationale**: ASLR randomizes the location of code and data in memory, which can affect cache behavior and branch
 prediction. While the median-of-means approach in run series helps mitigate this, disabling ASLR provides more

@@ -5,7 +5,8 @@ mod run;
 mod sample;
 mod timeline;
 
-use clap::Subcommand;
+use aoc_bench::host_config::{CpuAffinity, HostConfig};
+use clap::{Args, Subcommand};
 use std::process::ExitCode;
 
 pub const DEFAULT_DATA_DIR: &str = "data";
@@ -41,5 +42,28 @@ impl Commands {
             Commands::Impact(args) => impact::execute(args),
             Commands::Debug(args) => debug::execute(args),
         }
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct HostConfigOverrides {
+    /// Override CPU affinity for child processes
+    #[arg(long)]
+    cpu_affinity: Option<CpuAffinity>,
+    /// Override whether ASLR is disabled for child processes
+    #[arg(long)]
+    disable_aslr: Option<bool>,
+}
+
+impl From<HostConfigOverrides> for HostConfig {
+    fn from(overrides: HostConfigOverrides) -> HostConfig {
+        let mut config = HostConfig::default();
+        if let Some(cpu_affinity) = overrides.cpu_affinity {
+            config.cpu_affinity = cpu_affinity;
+        }
+        if let Some(disable_aslr) = overrides.disable_aslr {
+            config.disable_aslr = disable_aslr;
+        }
+        config
     }
 }

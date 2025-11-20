@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn first_run_promotes_to_stable() {
+    fn test_first_run_promotes_to_stable() {
         let (_dir, storage, config) = storage_with_config();
         let series = run_series(&config, 1000, 50, 10);
 
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn non_suspicious_resets_counter() {
+    fn test_non_suspicious_resets_counter() {
         let (_dir, storage, config) = storage_with_config();
         let stable = run_series(&config, 1000, 100, 10);
         let newer = run_series(&config, 1010, 50, 20); // overlaps, small diff
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn suspicious_three_times_promotes() {
+    fn test_suspicious_three_times_promotes() {
         let (_dir, storage, config) = storage_with_config();
         let stable = run_series(&config, 1000, 10, 10);
         record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn force_update_bypasses_counter() {
+    fn test_force_update_bypasses_counter() {
         let (_dir, storage, config) = storage_with_config();
         let stable = run_series(&config, 1000, 10, 10);
         record_run_series(&storage, &stable, RecordOptions::default()).unwrap();

@@ -203,21 +203,24 @@
 - [ ] Group into regressions/improvements/unchanged
 - [ ] Format output summary
 
-## Phase 8: Linux-Specific Optimizations
+## Phase 8: Host configuration
 
-### 8.1 CPU Affinity
+### 8.1 Host configuration system
 
-- [ ] Parse cpu_affinity from config.json
-- [ ] Implement sched_setaffinity via libc
-- [ ] Add pre_exec hook for process spawning
-- [ ] Add tests (skip on non-Linux)
+- [X] Implement host configuration file parsing
+- [X] Implement host configuration file loading
+- [X] Support specifying config values with cli arguments for the debug subcommand
 
-### 8.2 ASLR Disable
+### 8.2 CPU Affinity
+
+- [X] Parse cpu_affinity
+- [X] Implement sched_setaffinity via libc
+- [X] Add pre_exec hook for process spawning
+
+### 8.3 ASLR Disable
 
 - [x] Implement personality(ADDR_NO_RANDOMIZE) via libc
 - [x] Add pre_exec hook for ASLR disable
-- [ ] Combine with CPU affinity hook
-- [ ] Add tests (skip on non-Linux)
 
 ## Phase 9: Recovery and Robustness
 

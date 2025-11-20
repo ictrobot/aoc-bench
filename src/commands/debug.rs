@@ -1,3 +1,4 @@
+use crate::commands::HostConfigOverrides;
 use aoc_bench::config::{Benchmark, Config, ConfigProduct};
 use aoc_bench::runner;
 use clap::Args;
@@ -15,6 +16,9 @@ pub struct DebugArgs {
     /// Expected checksum for output validation
     #[arg(long)]
     pub checksum: Option<String>,
+
+    #[command(flatten)]
+    pub host_config: HostConfigOverrides,
 
     /// Command and arguments to run (after --)
     #[arg(last = true, required = true)]
@@ -40,9 +44,11 @@ pub fn execute(args: DebugArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
     let variant = &benchmark.variants()[0];
-    let runner = match Runner::new(Path::new("."), variant, Config::new()) {
+
+    let host_config = args.host_config.into();
+
+    let runner = match Runner::new(Path::new("."), variant, Config::new(), host_config) {
         Ok(runner) => runner,
         Err(error) => {
             error!(%error, "failed to construct runner instance");
