@@ -77,8 +77,8 @@ pub struct ResultsRowWithStats {
 /// Stats for a run series, including confidence interval bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunSeriesStats {
-    pub(crate) mean_ns_per_iter: f64,
-    pub(crate) ci95_half_width_ns: f64,
+    pub mean_ns_per_iter: f64,
+    pub ci95_half_width_ns: f64,
 }
 
 impl From<&RunSeries> for RunSeriesStats {

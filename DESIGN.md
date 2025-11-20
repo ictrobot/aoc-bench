@@ -1185,12 +1185,15 @@ Typical workflow (for AoC):
 3. You run:
 
    ```bash
-   aoc-bench run --benchmark 2015-04 --config commit=abc123,threads=1
-   ```
+   # run a subset of configs for a benchmark
+   aoc-bench run 2015-04 --config commit=abc123,threads=1
 
-   The CLI accepts either:
-    - `--config key=value,key2=value2` (comma-separated key=value pairs, converted to JSON)
-    - `--config-json '{...}'` (explicit JSON string)
+   # run all configs for a benchmark
+   aoc-bench run 2015-04
+   
+   # run all benchmarks
+   aoc-bench run
+   ```
 
 The `aoc-bench run` command:
 

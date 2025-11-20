@@ -7,28 +7,12 @@ use std::path::PathBuf;
 const STABLE_RESULT_CHANGE_REL_THRESHOLD: f64 = 0.03; // 3%
 const STABLE_RESULT_CHANGE_REQUIRED_COUNT: i64 = 3;
 
-/// Options that control how a run series is recorded.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RecordRunSeriesOptions {
-    /// Force the new run series to become the stable result regardless of drift checks.
-    pub force_update_stable: bool,
-}
-
-/// Outcome of [`record_run_series`].
-#[derive(Debug, Clone)]
-pub struct RunSeriesRecordOutcome {
-    pub json_path: PathBuf,
-    pub stable_result_changed: bool,
-    pub was_suspicious: bool,
-    pub suspicious_series_count: i64,
-}
-
 /// Write JSON, insert `run_series` row, and update results with drift detection.
 pub fn record_run_series<S: Storage>(
     storage: &S,
     series: &RunSeries,
-    options: RecordRunSeriesOptions,
-) -> Result<RunSeriesRecordOutcome, S::Error> {
+    options: RecordOptions,
+) -> Result<(RecordOutcome, PathBuf), S::Error> {
     let json_path = storage.write_run_series_json(series)?;
 
     let update = storage.with_transaction(|tx| {
@@ -36,12 +20,7 @@ pub fn record_run_series<S: Storage>(
         update_results_with_series(storage, tx, series, options.force_update_stable)
     })?;
 
-    Ok(RunSeriesRecordOutcome {
-        json_path,
-        stable_result_changed: update.stable_result_changed,
-        was_suspicious: update.was_suspicious,
-        suspicious_series_count: update.suspicious_series_count,
-    })
+    Ok((update, json_path))
 }
 
 fn update_results_with_series<S: Storage>(
@@ -49,7 +28,7 @@ fn update_results_with_series<S: Storage>(
     tx: &S::Tx<'_>,
     series: &RunSeries,
     force_update_stable: bool,
-) -> Result<StableResultUpdate, S::Error> {
+) -> Result<RecordOutcome, S::Error> {
     let bench = series.bench.clone();
     let config = series.config.clone();
 
@@ -60,30 +39,43 @@ fn update_results_with_series<S: Storage>(
             last_stats: _,
         } = with_stats;
         let new_stats = RunSeriesStats::from(series);
-        let drift = DriftEvaluation::new(stable_stats, new_stats);
+        let is_suspicious = is_suspicious(stable_stats, new_stats);
 
-        let mut suspicious_series_count = if drift.is_suspicious {
-            row.suspicious_series_count + 1
+        let outcome = if is_suspicious || force_update_stable {
+            let suspicious_count = row.suspicious_series_count + 1;
+
+            if suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT {
+                row.stable_series_timestamp = series.timestamp;
+                row.suspicious_series_count = 0;
+
+                RecordOutcome::Replaced {
+                    old_stable: stable_stats,
+                }
+            } else if force_update_stable {
+                row.stable_series_timestamp = series.timestamp;
+                row.suspicious_series_count = 0;
+
+                RecordOutcome::Forced {
+                    old_stable: stable_stats,
+                }
+            } else {
+                row.suspicious_series_count = suspicious_count;
+
+                RecordOutcome::Suspicious {
+                    current_stable: stable_stats,
+                    suspicious_count,
+                }
+            }
         } else {
-            0
+            row.suspicious_series_count = 0;
+
+            RecordOutcome::Matched
         };
 
-        let mut stable_result_changed = false;
-        if force_update_stable || suspicious_series_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT {
-            row.stable_series_timestamp = series.timestamp;
-            suspicious_series_count = 0;
-            stable_result_changed = true;
-        }
-
         row.last_series_timestamp = series.timestamp;
-        row.suspicious_series_count = suspicious_series_count;
         storage.upsert_results(tx, &row)?;
 
-        Ok(StableResultUpdate {
-            stable_result_changed,
-            was_suspicious: drift.is_suspicious,
-            suspicious_series_count,
-        })
+        Ok(outcome)
     } else {
         let row = ResultsRow {
             bench,
@@ -93,41 +85,47 @@ fn update_results_with_series<S: Storage>(
             suspicious_series_count: 0,
         };
         storage.upsert_results(tx, &row)?;
-        Ok(StableResultUpdate {
-            stable_result_changed: true,
-            was_suspicious: false,
-            suspicious_series_count: 0,
-        })
+
+        Ok(RecordOutcome::Initial)
     }
 }
 
-#[derive(Debug, Clone)]
-struct StableResultUpdate {
-    stable_result_changed: bool,
-    was_suspicious: bool,
-    suspicious_series_count: i64,
+fn is_suspicious(stable: RunSeriesStats, new_stats: RunSeriesStats) -> bool {
+    let (stable_low, stable_high) = stable.bounds();
+    let (new_low, new_high) = new_stats.bounds();
+    let overlap = !(stable_high < new_low || new_high < stable_low);
+
+    let rel_diff = if stable.mean_ns_per_iter == 0.0 {
+        f64::INFINITY
+    } else {
+        (new_stats.mean_ns_per_iter - stable.mean_ns_per_iter).abs() / stable.mean_ns_per_iter
+    };
+
+    !overlap && rel_diff >= STABLE_RESULT_CHANGE_REL_THRESHOLD
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DriftEvaluation {
-    is_suspicious: bool,
+/// Options that control how a run series is recorded.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecordOptions {
+    /// Force the new run series to become the stable result regardless of drift checks.
+    pub force_update_stable: bool,
 }
 
-impl DriftEvaluation {
-    fn new(stable: RunSeriesStats, new_stats: RunSeriesStats) -> Self {
-        let (stable_low, stable_high) = stable.bounds();
-        let (new_low, new_high) = new_stats.bounds();
-        let overlap = !(stable_high < new_low || new_high < stable_low);
-
-        let rel_diff = if stable.mean_ns_per_iter == 0.0 {
-            f64::INFINITY
-        } else {
-            (new_stats.mean_ns_per_iter - stable.mean_ns_per_iter).abs() / stable.mean_ns_per_iter
-        };
-
-        let is_suspicious = !overlap && rel_diff >= STABLE_RESULT_CHANGE_REL_THRESHOLD;
-        Self { is_suspicious }
-    }
+/// Outcome of [`record_run_series`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordOutcome {
+    Initial,
+    Matched,
+    Suspicious {
+        current_stable: RunSeriesStats,
+        suspicious_count: i64,
+    },
+    Replaced {
+        old_stable: RunSeriesStats,
+    },
+    Forced {
+        old_stable: RunSeriesStats,
+    },
 }
 
 #[cfg(test)]
@@ -195,12 +193,8 @@ mod tests {
         let (_dir, storage, config) = storage_with_config();
         let series = run_series(&config, 1000, 50, 10);
 
-        let outcome =
-            record_run_series(&storage, &series, RecordRunSeriesOptions::default()).unwrap();
-
-        assert!(outcome.stable_result_changed);
-        assert!(!outcome.was_suspicious);
-        assert_eq!(outcome.suspicious_series_count, 0);
+        let (outcome, _) = record_run_series(&storage, &series, RecordOptions::default()).unwrap();
+        assert_eq!(outcome, RecordOutcome::Initial);
 
         let results_row = storage
             .with_transaction(|tx| {
@@ -220,7 +214,7 @@ mod tests {
         let stable = run_series(&config, 1000, 100, 10);
         let newer = run_series(&config, 1010, 50, 20); // overlaps, small diff
 
-        record_run_series(&storage, &stable, RecordRunSeriesOptions::default()).unwrap();
+        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
 
         // artificially mark as suspicious once
         storage
@@ -234,12 +228,8 @@ mod tests {
             })
             .unwrap();
 
-        let outcome =
-            record_run_series(&storage, &newer, RecordRunSeriesOptions::default()).unwrap();
-
-        assert!(!outcome.stable_result_changed);
-        assert!(!outcome.was_suspicious);
-        assert_eq!(outcome.suspicious_series_count, 0);
+        let (outcome, _) = record_run_series(&storage, &newer, RecordOptions::default()).unwrap();
+        assert_eq!(outcome, RecordOutcome::Matched);
 
         let results_row = storage
             .with_transaction(|tx| {
@@ -257,12 +247,12 @@ mod tests {
     fn suspicious_three_times_promotes() {
         let (_dir, storage, config) = storage_with_config();
         let stable = run_series(&config, 1000, 10, 10);
-        record_run_series(&storage, &stable, RecordRunSeriesOptions::default()).unwrap();
+        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
 
         for i in 1..=3 {
             let series = run_series(&config, 1050 + i, 10, 20 + i64::from(i));
-            let outcome =
-                record_run_series(&storage, &series, RecordRunSeriesOptions::default()).unwrap();
+            let (outcome, _) =
+                record_run_series(&storage, &series, RecordOptions::default()).unwrap();
 
             let results_row = storage
                 .with_transaction(|tx| {
@@ -272,16 +262,21 @@ mod tests {
                 .unwrap();
 
             if i < 3 {
-                assert!(!outcome.stable_result_changed);
-                assert!(outcome.was_suspicious);
-                assert_eq!(outcome.suspicious_series_count, i64::from(i));
-
+                assert_eq!(
+                    outcome,
+                    RecordOutcome::Suspicious {
+                        current_stable: RunSeriesStats::from(&stable),
+                        suspicious_count: i64::from(i),
+                    }
+                );
                 assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
             } else {
-                assert!(outcome.stable_result_changed);
-                assert!(outcome.was_suspicious);
-                assert_eq!(outcome.suspicious_series_count, 0);
-
+                assert_eq!(
+                    outcome,
+                    RecordOutcome::Replaced {
+                        old_stable: RunSeriesStats::from(&stable),
+                    }
+                );
                 assert_eq!(results_row.row.stable_series_timestamp, series.timestamp);
             }
             assert_eq!(results_row.row.last_series_timestamp, series.timestamp);
@@ -292,20 +287,24 @@ mod tests {
     fn force_update_bypasses_counter() {
         let (_dir, storage, config) = storage_with_config();
         let stable = run_series(&config, 1000, 10, 10);
-        record_run_series(&storage, &stable, RecordRunSeriesOptions::default()).unwrap();
+        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
 
         let new = run_series(&config, 1010, 10, 20);
-        let outcome = record_run_series(
+        let (outcome, _) = record_run_series(
             &storage,
             &new,
-            RecordRunSeriesOptions {
+            RecordOptions {
                 force_update_stable: true,
             },
         )
         .unwrap();
 
-        assert!(outcome.stable_result_changed);
-        assert_eq!(outcome.suspicious_series_count, 0);
+        assert_eq!(
+            outcome,
+            RecordOutcome::Forced {
+                old_stable: RunSeriesStats::from(&stable)
+            }
+        );
 
         let results_row = storage
             .with_transaction(|tx| {

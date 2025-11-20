@@ -163,13 +163,12 @@
 
 ### 7.1 `run` Command
 
-- [ ] Implement benchmark selection (--benchmark)
-- [ ] Implement config filtering (--config key=value,key=value)
-- [ ] Implement config JSON input (--config-json)
-- [ ] Integrate with config expansion
-- [ ] Add command execution and result storage
-- [ ] Add progress output
-- [ ] Add --force-update-stable flag
+- [x] Implement benchmark selection (positional bench arg)
+- [x] Implement config filtering (--config key=value,key=value)
+- [x] Integrate with config expansion
+- [x] Add command execution and result storage
+- [x] Add progress output
+- [x] Add --force-update-stable flag
 
 ### 7.2 `sample` Command
 

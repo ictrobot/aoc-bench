@@ -1,5 +1,6 @@
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,8 +60,10 @@ struct ConfigKeyDef<'a> {
 #[derive(Deserialize)]
 struct BenchmarkDef<'a> {
     benchmark: &'a str,
+    // Plain &'a str doesn't support parsing strings with escaped characters (e.g. \t), so use Cow
+    // to avoid allocating where possible but still allow escaped strings to be parsed
     #[serde(borrow, default)]
-    command: Option<Vec<&'a str>>,
+    command: Option<Vec<Cow<'a, str>>>,
     #[serde(borrow, default)]
     input: Option<&'a str>,
     #[serde(borrow, default)]
@@ -75,7 +78,7 @@ struct BenchmarkDef<'a> {
 #[serde(deny_unknown_fields)]
 struct BenchmarkVariantDef<'a> {
     #[serde(borrow, default)]
-    command: Option<Vec<&'a str>>,
+    command: Option<Vec<Cow<'a, str>>>,
     #[serde(borrow, default)]
     input: Option<&'a str>,
     #[serde(borrow, default)]
@@ -159,7 +162,7 @@ fn parse_benchmarks<'a>(
             (Some(config), Some(command), None) => Benchmark::new(
                 benchmark_id,
                 build_config_product(key_lookup, config)?,
-                command.into_iter().map(str::to_string).collect::<Vec<_>>(),
+                command.into_iter().map(Cow::into_owned).collect::<Vec<_>>(),
                 base_input,
                 bench_def.checksum.map(str::to_string),
             )?,
@@ -172,7 +175,7 @@ fn parse_benchmarks<'a>(
                         let command = variant
                             .command
                             .or_else(|| base_command.clone())
-                            .map(|cmd| cmd.into_iter().map(str::to_string).collect::<Vec<_>>())
+                            .map(|cmd| cmd.into_iter().map(Cow::into_owned).collect::<Vec<_>>())
                             .unwrap_or_default();
                         let input = match variant.input {
                             Some(name) => Some(resolve_input_path(data_dir, name)?),

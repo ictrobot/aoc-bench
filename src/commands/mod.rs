@@ -8,6 +8,8 @@ mod timeline;
 use clap::Subcommand;
 use std::process::ExitCode;
 
+pub const DEFAULT_DATA_DIR: &str = "data";
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Execute benchmarks by spawning commands from the config file

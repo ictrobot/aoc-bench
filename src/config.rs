@@ -19,7 +19,7 @@ use std::{fs, io};
 /// Parsed and validated configuration file
 ///
 /// Cheap to clone (uses Arc internally).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ConfigFile {
     /// Data directory
     data_dir: Arc<Path>,
@@ -127,6 +127,15 @@ impl ConfigFile {
             pair.split_once('=')
                 .ok_or_else(|| ConfigError::InvalidConfigString(s.to_string()))
         }))
+    }
+
+    /// Parse a config string into a [`Config`], not allowing the host key.
+    pub fn config_without_host_from_string(&self, s: &str) -> Result<Config, ConfigError> {
+        let config = self.config_from_string(s)?;
+        if config.get(self.host_key()).is_some() {
+            return Err(ConfigError::UnknownKey(Key::HOST_KEY_NAME.to_string()));
+        }
+        Ok(config)
     }
 
     /// Convert a [`BTreeMap<String, String>`] into a [`Config`] in the context of this `ConfigFile`.
@@ -2124,6 +2133,51 @@ mod tests {
         // Get non-existent key
         assert!(config.get_by_name("nonexistent").is_none());
         assert!(config.get_by_name("").is_none());
+    }
+
+    #[test]
+    fn test_config_from_string() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] },
+                "threads": { "values": ["1", "4"] }
+            },
+            "benchmarks": []
+        }"#;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let config_file = ConfigFile::from_str(tmp_dir.path(), Some("pi3"), json).unwrap();
+
+        // Test valid map
+        let config = config_file
+            .config_from_string("build=release,threads=4")
+            .unwrap();
+        assert_eq!(config.len(), 2);
+        assert_eq!(config.to_string(), "build=release,threads=4");
+
+        // Test empty map
+        let empty_config = config_file.config_from_string("").unwrap();
+        assert!(empty_config.is_empty());
+
+        // Test unknown key
+        let err = config_file.config_from_string("unknown=debug").unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKey(_)));
+
+        // Test unknown value
+        let err = config_file.config_from_string("build=unknown").unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownValueForKey { .. }));
+
+        // Test host key
+        let config = config_file
+            .config_from_string("build=release,host=pi3")
+            .unwrap();
+        assert_eq!(config.len(), 2);
+
+        // Test disallowed host key
+        let err = config_file
+            .config_without_host_from_string("build=release,host=pi3")
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKey(_)));
     }
 
     #[test]
