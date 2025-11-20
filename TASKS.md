@@ -146,19 +146,18 @@
 
 ### 6.1 Drift Detection
 
-- [ ] Implement CI overlap check
-- [ ] Implement relative difference calculation (3% threshold)
-- [ ] Implement suspicious series counter logic
-- [ ] Implement stable result update (after 3 consecutive suspicious)
-- [ ] Add tests for drift detection scenarios
+- [x] Implement CI overlap check
+- [x] Implement relative difference calculation (3% threshold)
+- [x] Implement suspicious series counter logic
+- [x] Implement stable result update (after 3 consecutive suspicious)
+- [x] Add tests for drift detection scenarios
 
 ### 6.2 Storage Integration
 
-- [ ] Integrate drift detection with database operations
-- [ ] Implement first-run logic (no existing stable result)
-- [ ] Implement stable result preservation (within noise)
-- [ ] Implement stable result replacement (environment changed)
-- [ ] Add --force-update-stable flag
+- [X] Integrate drift detection with database operations
+- [X] Implement first-run logic (no existing stable result)
+- [X] Implement stable result preservation (within noise)
+- [X] Implement stable result replacement (environment changed)
 
 ## Phase 7: CLI Commands
 
@@ -170,6 +169,7 @@
 - [ ] Integrate with config expansion
 - [ ] Add command execution and result storage
 - [ ] Add progress output
+- [ ] Add --force-update-stable flag
 
 ### 7.2 `sample` Command
 
