@@ -268,7 +268,7 @@
 
 ### 11.1 Additional Features
 
-- [ ] Add --dry-run flag for run command
+- [X] Add --dry-run flag for run command
 - [ ] Add result comparison tool
 - [ ] Add config validation command
 - [ ] Add database statistics command (disk usage, result counts)

@@ -230,7 +230,21 @@ impl Storage for HybridDiskStorage {
         FileLock::new(self.lock_path.clone())
     }
 
-    fn with_transaction<F, T>(&self, f: F) -> Result<T, HybridDiskError>
+    fn read_transaction<F, T>(&self, f: F) -> Result<T, HybridDiskError>
+    where
+        F: FnOnce(&Transaction<'_>) -> Result<T, HybridDiskError>,
+    {
+        let mut conn = self.open_connection()?;
+        let result;
+        {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            result = f(&tx)?;
+            tx.rollback()?;
+        }
+        Ok(result)
+    }
+
+    fn write_transaction<F, T>(&self, f: F) -> Result<T, HybridDiskError>
     where
         F: FnOnce(&Transaction<'_>) -> Result<T, HybridDiskError>,
     {
@@ -578,7 +592,7 @@ mod tests {
         let series = sample_series(config.clone());
 
         storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 storage.insert_run_series(tx, &series)?;
 
                 storage.upsert_results(
@@ -738,7 +752,7 @@ mod tests {
             .unwrap();
 
         storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 let bench: BenchmarkId = "2015-04".try_into().unwrap();
                 let timestamp1 = Timestamp::from_second(1_700_000_000).unwrap();
                 let timestamp2 = Timestamp::from_second(1_700_000_100).unwrap();
@@ -794,7 +808,7 @@ mod tests {
         let bench: BenchmarkId = "2015-04".try_into().unwrap();
 
         storage
-            .with_transaction(|tx| {
+            .read_transaction(|tx| {
                 let result = storage.get_results_with_stats(tx, &bench, &config)?;
                 assert!(result.is_none());
                 Ok(())
@@ -812,7 +826,7 @@ mod tests {
         let series = sample_series(config.clone());
 
         // Transaction that fails
-        let result = storage.with_transaction(|tx| {
+        let result = storage.write_transaction(|tx| {
             storage.insert_run_series(tx, &series)?;
             // Simulate an error
             Err::<(), _>(HybridDiskError::UnknownHost("test-error".to_string()))
@@ -822,7 +836,7 @@ mod tests {
 
         // Verify nothing was committed
         storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 let mut stmt = tx.prepare("SELECT COUNT(*) FROM run_series WHERE bench = ?1")?;
                 let count: i64 =
                     stmt.query_row(params![series.bench.as_str()], |row| row.get(0))?;
@@ -842,7 +856,7 @@ mod tests {
 
         // Insert multiple series with different timestamps
         storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 for i in 0..5 {
                     let mut series = sample_series(config.clone());
                     series.timestamp = Timestamp::from_second(1_700_000_000 + i * 100).unwrap();
@@ -854,7 +868,7 @@ mod tests {
 
         // Verify all were inserted
         storage
-            .with_transaction(|tx| {
+            .read_transaction(|tx| {
                 let mut stmt = tx.prepare("SELECT COUNT(*) FROM run_series WHERE bench = ?1")?;
                 let count: i64 = stmt.query_row(params!["2015-04"], |row| row.get(0))?;
                 assert_eq!(count, 5);

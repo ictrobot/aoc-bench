@@ -15,78 +15,97 @@ pub fn record_run_series<S: Storage>(
 ) -> Result<(RecordOutcome, PathBuf), S::Error> {
     let json_path = storage.write_run_series_json(series.clone())?;
 
-    let update = storage.with_transaction(|tx| {
+    let update = storage.write_transaction(|tx| {
         storage.insert_run_series(tx, series)?;
-        update_results_with_series(storage, tx, series, options.force_update_stable)
+        let (row, outcome) = process_series(storage, tx, series, options)?;
+        storage.upsert_results(tx, &row)?;
+        Ok(outcome)
     })?;
 
     Ok((update, json_path))
 }
 
-fn update_results_with_series<S: Storage>(
+/// Simulate recording a run series without writing JSON or DB rows.
+///
+/// This runs the same drift-detection logic as [`record_run_series`] and returns the outcome
+/// that would occur, but leaves storage untouched.
+pub fn preview_run_series<S: Storage>(
+    storage: &S,
+    series: &RunSeries,
+    options: RecordOptions,
+) -> Result<RecordOutcome, S::Error> {
+    storage.read_transaction(|tx| {
+        let (_, outcome) = process_series(storage, tx, series, options)?;
+        Ok(outcome)
+    })
+}
+
+fn process_series<S: Storage>(
     storage: &S,
     tx: &S::Tx<'_>,
     series: &RunSeries,
-    force_update_stable: bool,
-) -> Result<RecordOutcome, S::Error> {
-    let bench = series.bench.clone();
-    let config = series.config.clone();
-
-    if let Some(with_stats) = storage.get_results_with_stats(tx, &bench, &config)? {
-        let ResultsRowWithStats {
-            mut row,
-            stable_stats,
-            last_stats: _,
-        } = with_stats;
-        let new_stats = RunSeriesStats::from(series);
-        let is_suspicious = is_suspicious(stable_stats, new_stats);
-
-        let outcome = if is_suspicious || force_update_stable {
-            let suspicious_count = row.suspicious_series_count + 1;
-
-            if suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT {
-                row.stable_series_timestamp = series.timestamp;
-                row.suspicious_series_count = 0;
-
-                RecordOutcome::Replaced {
-                    old_stable: stable_stats,
-                }
-            } else if force_update_stable {
-                row.stable_series_timestamp = series.timestamp;
-                row.suspicious_series_count = 0;
-
-                RecordOutcome::Forced {
-                    old_stable: stable_stats,
-                }
-            } else {
-                row.suspicious_series_count = suspicious_count;
-
-                RecordOutcome::Suspicious {
-                    current_stable: stable_stats,
-                    suspicious_count,
-                }
-            }
-        } else {
-            row.suspicious_series_count = 0;
-
-            RecordOutcome::Matched
-        };
-
-        row.last_series_timestamp = series.timestamp;
-        storage.upsert_results(tx, &row)?;
-
-        Ok(outcome)
+    options: RecordOptions,
+) -> Result<(ResultsRow, RecordOutcome), S::Error> {
+    if let Some(ResultsRowWithStats {
+        mut row,
+        stable_stats,
+        ..
+    }) = storage.get_results_with_stats(tx, &series.bench, &series.config)?
+    {
+        let outcome = compute_outcome(&mut row, stable_stats, series, options.force_update_stable);
+        Ok((row, outcome))
     } else {
         let row = ResultsRow {
-            bench,
-            config,
+            bench: series.bench.clone(),
+            config: series.config.clone(),
             stable_series_timestamp: series.timestamp,
             last_series_timestamp: series.timestamp,
             suspicious_series_count: 0,
         };
-        storage.upsert_results(tx, &row)?;
+        Ok((row, RecordOutcome::Initial))
+    }
+}
 
-        Ok(RecordOutcome::Initial)
+fn compute_outcome(
+    row: &mut ResultsRow,
+    stable_stats: RunSeriesStats,
+    series: &RunSeries,
+    force_update_stable: bool,
+) -> RecordOutcome {
+    row.last_series_timestamp = series.timestamp;
+
+    let new_stats = RunSeriesStats::from(series);
+    let is_suspicious = is_suspicious(stable_stats, new_stats);
+
+    if is_suspicious || force_update_stable {
+        let suspicious_count = row.suspicious_series_count + 1;
+
+        if suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT {
+            row.stable_series_timestamp = series.timestamp;
+            row.suspicious_series_count = 0;
+
+            RecordOutcome::Replaced {
+                old_stable: stable_stats,
+            }
+        } else if force_update_stable {
+            row.stable_series_timestamp = series.timestamp;
+            row.suspicious_series_count = 0;
+
+            RecordOutcome::Forced {
+                old_stable: stable_stats,
+            }
+        } else {
+            row.suspicious_series_count = suspicious_count;
+
+            RecordOutcome::Suspicious {
+                current_stable: stable_stats,
+                suspicious_count,
+            }
+        }
+    } else {
+        row.suspicious_series_count = 0;
+
+        RecordOutcome::Matched
     }
 }
 
@@ -197,7 +216,7 @@ mod tests {
         assert_eq!(outcome, RecordOutcome::Initial);
 
         let results_row = storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 storage.get_results_with_stats(tx, &series.bench, &series.config)
             })
             .unwrap()
@@ -218,7 +237,7 @@ mod tests {
 
         // artificially mark as suspicious once
         storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 let mut row = storage
                     .get_results_with_stats(tx, &stable.bench, &stable.config)?
                     .unwrap()
@@ -232,7 +251,7 @@ mod tests {
         assert_eq!(outcome, RecordOutcome::Matched);
 
         let results_row = storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 storage.get_results_with_stats(tx, &stable.bench, &stable.config)
             })
             .unwrap()
@@ -255,7 +274,7 @@ mod tests {
                 record_run_series(&storage, &series, RecordOptions::default()).unwrap();
 
             let results_row = storage
-                .with_transaction(|tx| {
+                .write_transaction(|tx| {
                     storage.get_results_with_stats(tx, &stable.bench, &stable.config)
                 })
                 .unwrap()
@@ -307,7 +326,7 @@ mod tests {
         );
 
         let results_row = storage
-            .with_transaction(|tx| {
+            .write_transaction(|tx| {
                 storage.get_results_with_stats(tx, &stable.bench, &stable.config)
             })
             .unwrap()
@@ -316,5 +335,47 @@ mod tests {
         assert_eq!(results_row.row.stable_series_timestamp, new.timestamp);
         assert_eq!(results_row.row.last_series_timestamp, new.timestamp);
         assert_eq!(results_row.row.suspicious_series_count, 0);
+    }
+
+    #[test]
+    fn test_preview_run_series_does_not_mutate_storage() {
+        let (_dir, storage, config) = storage_with_config();
+        let stable = run_series(&config, 1000, 10, 10);
+        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
+
+        // Manually mark two suspicious runs so the next suspicious one would replace stable.
+        storage
+            .write_transaction(|tx| {
+                let mut row = storage
+                    .get_results_with_stats(tx, &stable.bench, &stable.config)?
+                    .unwrap()
+                    .row;
+                row.suspicious_series_count = 2;
+                storage.upsert_results(tx, &row)
+            })
+            .unwrap();
+
+        let new_series = run_series(&config, 1100, 10, 20);
+        let outcome = preview_run_series(
+            &storage,
+            &new_series,
+            RecordOptions {
+                force_update_stable: false,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, RecordOutcome::Replaced { .. }));
+
+        // Storage state should remain unchanged after preview.
+        let results_row = storage
+            .read_transaction(|tx| {
+                storage.get_results_with_stats(tx, &stable.bench, &stable.config)
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
+        assert_eq!(results_row.row.suspicious_series_count, 2);
     }
 }

@@ -32,8 +32,13 @@ pub trait Storage {
 
     // DB transactions
 
+    /// Execute `f` inside a read transaction.
+    fn read_transaction<F, T>(&self, f: F) -> Result<T, Self::Error>
+    where
+        F: FnOnce(&Self::Tx<'_>) -> Result<T, Self::Error>;
+
     /// Execute `f` inside a write transaction.
-    fn with_transaction<F, T>(&self, f: F) -> Result<T, Self::Error>
+    fn write_transaction<F, T>(&self, f: F) -> Result<T, Self::Error>
     where
         F: FnOnce(&Self::Tx<'_>) -> Result<T, Self::Error>;
 

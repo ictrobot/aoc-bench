@@ -2,7 +2,7 @@ use crate::commands::DEFAULT_DATA_DIR;
 use aoc_bench::config::{BenchmarkId, Config, ConfigFile};
 use aoc_bench::host_config::HostConfig;
 use aoc_bench::runner::Runner;
-use aoc_bench::stable::{record_run_series, RecordOptions, RecordOutcome};
+use aoc_bench::stable::{preview_run_series, record_run_series, RecordOptions, RecordOutcome};
 use aoc_bench::storage::{HybridDiskStorage, Storage};
 use clap::Args;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,10 @@ pub struct RunArgs {
     /// Benchmark name to run. Runs all if omitted.
     #[arg(value_name = "BENCH")]
     pub benchmark: Option<String>,
+
+    /// Execute benchmarks but do not save the results
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Config filter (key=value,key=value format, host key not allowed)
     #[arg(long)]
@@ -111,6 +115,10 @@ pub fn execute(args: RunArgs) -> ExitCode {
         }
     };
 
+    if args.dry_run {
+        warn!("running in dry-run mode, no results will be persisted");
+    }
+
     let mut count = 0usize;
     for bench in benches {
         let span = info_span!("bench", bench = %bench.id());
@@ -150,55 +158,45 @@ pub fn execute(args: RunArgs) -> ExitCode {
                     }
                 };
 
-                match record_run_series(
-                    &storage,
-                    &series,
-                    RecordOptions {
-                        force_update_stable: args.force_update_stable,
-                    },
-                ) {
-                    Ok((outcome, json_path)) => {
-                        count += 1;
-                        info!(
-                            path = %json_path.display(),
-                            "stored run series"
-                        );
-                        match outcome {
-                            RecordOutcome::Initial => {
-                                info!("new run series");
-                            }
-                            RecordOutcome::Matched => {
-                                info!("matched existing stable result");
-                            }
-                            RecordOutcome::Suspicious {
-                                current_stable,
-                                suspicious_count,
-                            } => {
-                                warn!(
-                                    suspicious_count,
-                                    stable_ns = current_stable.mean_ns_per_iter,
-                                    "didn't match stable result, suspicious"
-                                );
-                            }
-                            RecordOutcome::Replaced { old_stable } => {
-                                warn!(
-                                    old_stable_ns = old_stable.mean_ns_per_iter,
-                                    "didn't match stable result, replaced"
-                                );
-                            }
-                            RecordOutcome::Forced { old_stable } => {
-                                warn!(
-                                    old_stable_ns = old_stable.mean_ns_per_iter,
-                                    "forced replacement of stable result"
-                                );
-                            }
+                let outcome = if args.dry_run {
+                    match preview_run_series(
+                        &storage,
+                        &series,
+                        RecordOptions {
+                            force_update_stable: args.force_update_stable,
+                        },
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            error!(%error, bench = bench.id().as_str(), %config, "failed to compute dry-run outcome");
+                            return ExitCode::FAILURE;
                         }
                     }
-                    Err(error) => {
-                        error!(%error, bench = bench.id().as_str(), %config, "failed to persist results");
-                        return ExitCode::FAILURE;
+                } else {
+                    match record_run_series(
+                        &storage,
+                        &series,
+                        RecordOptions {
+                            force_update_stable: args.force_update_stable,
+                        },
+                    ) {
+                        Ok((outcome, json_path)) => {
+                            info!(
+                                path = %json_path.display(),
+                                "stored run series"
+                            );
+                            outcome
+                        }
+                        Err(error) => {
+                            error!(%error, bench = bench.id().as_str(), %config, "failed to persist results");
+                            return ExitCode::FAILURE;
+                        }
                     }
-                }
+                };
+
+                log_outcome(&outcome, args.dry_run);
+
+                count += 1;
             }
         }
     }
@@ -217,4 +215,52 @@ fn current_host() -> io::Result<String> {
         return Ok(host);
     }
     hostname::get().map(|os| os.to_string_lossy().to_string())
+}
+
+fn log_outcome(outcome: &RecordOutcome, dry_run: bool) {
+    match outcome {
+        RecordOutcome::Initial if dry_run => {
+            info!("would have recorded new run series");
+        }
+        RecordOutcome::Initial => {
+            info!("new run series");
+        }
+        RecordOutcome::Matched => {
+            info!("matched existing stable result");
+        }
+        RecordOutcome::Suspicious {
+            current_stable,
+            suspicious_count,
+        } => {
+            warn!(
+                suspicious_count,
+                stable_ns = current_stable.mean_ns_per_iter,
+                "didn't match stable result, suspicious"
+            );
+        }
+        RecordOutcome::Replaced { old_stable } if dry_run => {
+            warn!(
+                old_stable_ns = old_stable.mean_ns_per_iter,
+                "didn't match stable result, would have replaced"
+            );
+        }
+        RecordOutcome::Replaced { old_stable } => {
+            warn!(
+                old_stable_ns = old_stable.mean_ns_per_iter,
+                "didn't match stable result, replaced"
+            );
+        }
+        RecordOutcome::Forced { old_stable } if dry_run => {
+            warn!(
+                old_stable_ns = old_stable.mean_ns_per_iter,
+                "would have forced replacement of stable result"
+            );
+        }
+        RecordOutcome::Forced { old_stable } => {
+            warn!(
+                old_stable_ns = old_stable.mean_ns_per_iter,
+                "forced replacement of stable result"
+            );
+        }
+    }
 }
