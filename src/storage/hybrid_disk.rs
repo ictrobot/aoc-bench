@@ -160,14 +160,16 @@ impl Storage for HybridDiskStorage {
     type Error = HybridDiskError;
     type Lock = FileLock;
 
-    fn write_run_series_json(&self, series: &RunSeries) -> Result<PathBuf, HybridDiskError> {
+    fn write_run_series_json(&self, mut series: RunSeries) -> Result<PathBuf, HybridDiskError> {
         self.ensure_config_valid_for_benchmark(&series.bench, &series.config)?;
 
         let series_dir = self.ensure_run_series_dir(&series.bench, &series.config)?;
         let path = self.series_file(&series.bench, &series.config, series.timestamp)?;
         let mut tmp = NamedTempFile::new_in(&series_dir).map_err(|e| io_error(&series_dir, e))?;
 
-        serde_json::to_writer_pretty(tmp.as_file_mut(), series)?;
+        // Persist hostless configs; storage is already split per-host.
+        series.config = series.config.without_key(self.config_file.host_key());
+        serde_json::to_writer_pretty(tmp.as_file_mut(), &series)?;
 
         tmp.as_file_mut()
             .sync_all()
@@ -196,12 +198,15 @@ impl Storage for HybridDiskStorage {
                 source,
             })?;
 
-        let series = series_def
+        let mut series = series_def
             .try_to_run_series(&self.config_file)
             .map_err(|_| HybridDiskError::JsonContentsMismatch {
                 path: path.clone(),
                 key: "config",
             })?;
+
+        // Reattach the current host to complete the in-memory config
+        series.config = series.config.with(self.host.clone());
 
         // Ensure the JSON file contains the expected path keys
         if &series.bench != bench {
@@ -247,7 +252,7 @@ impl Storage for HybridDiskStorage {
         self.ensure_host_matches(&series.config)?;
         self.ensure_config_valid_for_benchmark(&series.bench, &series.config)?;
 
-        let config_json = serde_json::to_string(&series.config)?;
+        let config_json = serde_json::to_string(&series.config.without_host_key())?;
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO run_series (bench, config, timestamp, mean_ns_per_iter, ci95_half_width_ns)
@@ -272,7 +277,7 @@ impl Storage for HybridDiskStorage {
         self.ensure_host_matches(&row.config)?;
         self.ensure_config_valid_for_benchmark(&row.bench, &row.config)?;
 
-        let config_json = serde_json::to_string(&row.config)?;
+        let config_json = serde_json::to_string(&row.config.without_host_key())?;
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO results (bench, config, stable_series_timestamp, last_series_timestamp, suspicious_series_count)
@@ -302,7 +307,7 @@ impl Storage for HybridDiskStorage {
         self.ensure_host_matches(config)?;
         // Don't check for valid config for benchmark when reading existing results
 
-        let config_json = serde_json::to_string(&config)?;
+        let config_json = serde_json::to_string(&config.without_host_key())?;
         let mut stmt = tx.prepare_cached(
             "SELECT r.stable_series_timestamp, r.last_series_timestamp, r.suspicious_series_count,
                     s.mean_ns_per_iter, s.ci95_half_width_ns,
@@ -484,7 +489,7 @@ mod tests {
             .config_from_string("build=native,commit=abc1234")
             .unwrap();
         let series = sample_series(config.clone());
-        let err = storage.write_run_series_json(&series).unwrap_err();
+        let err = storage.write_run_series_json(series.clone()).unwrap_err();
         assert!(matches!(err, HybridDiskError::ConfigMissingHostKey(_)));
 
         let err = storage
@@ -502,7 +507,7 @@ mod tests {
             .config_from_string("build=native,commit=abc1234,host=pi3")
             .unwrap();
         let series = sample_series(config.clone());
-        let err = storage.write_run_series_json(&series).unwrap_err();
+        let err = storage.write_run_series_json(series.clone()).unwrap_err();
         assert!(matches!(err, HybridDiskError::HostMismatch { .. }));
 
         let err = storage
@@ -521,7 +526,7 @@ mod tests {
             .unwrap();
         let series = sample_series(config.clone());
 
-        let path = storage.write_run_series_json(&series).unwrap();
+        let path = storage.write_run_series_json(series.clone()).unwrap();
         assert!(path.exists());
 
         assert_eq!(
@@ -531,8 +536,7 @@ mod tests {
   "bench": "2015-04",
   "config": {
     "build": "native",
-    "commit": "abc1234",
-    "host": "pi5"
+    "commit": "abc1234"
   },
   "timestamp": 1700000000,
   "runs": [
@@ -640,7 +644,7 @@ mod tests {
         let mut series = sample_series(config.clone());
         series.bench = "empty-config".try_into().unwrap();
 
-        let path = storage.write_run_series_json(&series).unwrap();
+        let path = storage.write_run_series_json(series.clone()).unwrap();
         assert!(
             path.to_string_lossy()
                 .ends_with("results/pi5/runs/empty-config/__default__/2023-11-14T22-13-20.json")
@@ -657,7 +661,7 @@ mod tests {
             .unwrap();
         let series = sample_series(config.clone());
 
-        let err = storage.write_run_series_json(&series).unwrap_err();
+        let err = storage.write_run_series_json(series.clone()).unwrap_err();
         assert!(matches!(
             err,
             HybridDiskError::BenchmarkConfigMismatch { .. }
@@ -679,7 +683,7 @@ mod tests {
             .config_from_string("build=native,commit=abc1234,host=pi5")
             .unwrap();
         let series = sample_series(config.clone());
-        let path = storage.write_run_series_json(&series).unwrap();
+        let path = storage.write_run_series_json(series.clone()).unwrap();
         assert!(path.to_string_lossy().ends_with(
             "results/pi5/runs/2015-04/build=native,commit=abc1234/2023-11-14T22-13-20.json"
         ));
@@ -712,7 +716,7 @@ mod tests {
         let series = sample_series(config.clone());
 
         // Write with one bench name
-        let path = storage.write_run_series_json(&series).unwrap();
+        let path = storage.write_run_series_json(series.clone()).unwrap();
 
         // Modify the bench name in the JSON file
         let json = fs::read_to_string(&path).unwrap();

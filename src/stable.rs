@@ -13,7 +13,7 @@ pub fn record_run_series<S: Storage>(
     series: &RunSeries,
     options: RecordOptions,
 ) -> Result<(RecordOutcome, PathBuf), S::Error> {
-    let json_path = storage.write_run_series_json(series)?;
+    let json_path = storage.write_run_series_json(series.clone())?;
 
     let update = storage.with_transaction(|tx| {
         storage.insert_run_series(tx, series)?;

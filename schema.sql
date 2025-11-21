@@ -26,7 +26,6 @@ CREATE TABLE results (
 
     -- Generated columns for fast filtering (NULL if key not present)
     config_commit TEXT GENERATED ALWAYS AS (json_extract(config, '$.commit')) VIRTUAL,
-    config_host TEXT GENERATED ALWAYS AS (json_extract(config, '$.host')) VIRTUAL,
 
     -- Which run series is the stable result
     stable_series_timestamp INTEGER NOT NULL,
@@ -48,6 +47,5 @@ CREATE TABLE results (
 -- Indexes for common query patterns
 CREATE INDEX idx_results_bench ON results(bench);
 CREATE INDEX idx_results_commit ON results(config_commit) WHERE config_commit IS NOT NULL;
-CREATE INDEX idx_results_host ON results(config_host) WHERE config_host IS NOT NULL;
-CREATE INDEX idx_results_bench_commit_host ON results(bench, config_commit, config_host);
+CREATE INDEX idx_results_bench_commit ON results(bench, config_commit);
 CREATE INDEX idx_results_last_series ON results(last_series_timestamp);

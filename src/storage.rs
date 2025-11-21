@@ -15,7 +15,7 @@ pub trait Storage {
     // Immutable JSON files
 
     /// Write the immutable JSON file for a run series
-    fn write_run_series_json(&self, series: &RunSeries) -> Result<PathBuf, Self::Error>;
+    fn write_run_series_json(&self, series: RunSeries) -> Result<PathBuf, Self::Error>;
 
     /// Read a run series JSON file back into memory
     fn read_run_series_json(

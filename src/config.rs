@@ -606,6 +606,18 @@ impl Config {
         Self { kv }
     }
 
+    /// Clone this config without the host key.
+    #[must_use]
+    pub fn without_host_key(&self) -> Self {
+        let kv = self
+            .kv
+            .iter()
+            .filter(|kv| kv.key.name() != Key::HOST_KEY_NAME)
+            .cloned()
+            .collect();
+        Self { kv }
+    }
+
     /// Expand a template by replacing `{key}` placeholders with config values.
     ///
     /// Returns an error if a placeholder references an unknown key.
