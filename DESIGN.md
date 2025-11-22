@@ -1027,8 +1027,6 @@ Each host has its own `metadata.db` with two core tables:
 database. The config file's `config_keys.commit.values` array defines the canonical commit order, which can be used for
 timeline views and commit-based queries
 
-See `schema.sql` for complete schema definition with indexes and constraints.
-
 **Critical rule: Always write JSON before updating the database.**
 
 **Why this ordering:**
@@ -1121,7 +1119,7 @@ On startup, if the database is corrupted or missing, the system will attempt to 
 **Algorithm:**
 
 1. Delete or backup corrupted `metadata.db`
-2. Create new database with schema from `schema.sql`
+2. Create new database apply migrations
 3. Scan `runs/` directory recursively for all JSON files
 4. For each JSON file:
     * Parse and validate (check for `schema` version 1)

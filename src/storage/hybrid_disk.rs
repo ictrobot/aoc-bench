@@ -17,15 +17,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tracing::trace;
+use tracing::{info, trace};
 
 const RESULTS_DIR: &str = "results";
 const RUNS_DIR: &str = "runs";
 const LOCK_FILE: &str = ".lock";
 const DB_FILE: &str = "metadata.db";
-const SCHEMA_SQL: &str = include_str!("../../schema.sql");
 const EMPTY_CONFIG_DIR: &str = "__default__";
 const CONFIG_GENERATED_COLUMNS: &[&str] = &["commit"];
+
+static MIGRATIONS: &[&str] = &[include_str!("sql_migrations/00-schema.sql")];
 
 /// Hybrid storage backend that stores individual run series in immutable JSON files and metadata
 /// in an SQLite database.
@@ -151,7 +152,9 @@ impl HybridDiskStorage {
     }
 
     fn open_connection(&self) -> Result<Connection, HybridDiskError> {
-        let conn = Connection::open(&self.db_path)?;
+        trace!(db = ?self.db_path, "opening database connection");
+
+        let mut conn = Connection::open(&self.db_path)?;
         conn.busy_timeout(Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -178,11 +181,49 @@ impl HybridDiskStorage {
             );
         }
 
-        if !conn.table_exists(Some("main"), "results")? {
-            conn.execute_batch(SCHEMA_SQL)?;
-        }
+        self.run_migrations(&mut conn)?;
 
         Ok(conn)
+    }
+
+    fn run_migrations(&self, conn: &mut Connection) -> Result<(), HybridDiskError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );",
+        )?;
+
+        // None iff no migrations have been run yet
+        let current_version: Option<usize> =
+            conn.query_one("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })?;
+
+        let complete_migrations = current_version.map_or(0, |v| v + 1);
+
+        for (version, migration) in MIGRATIONS.iter().enumerate().skip(complete_migrations) {
+            info!(migration = version, db = ?self.db_path, "apply database migration");
+
+            if let Err(err) = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .and_then(|tx| {
+                    tx.execute_batch(migration)?;
+                    tx.execute(
+                        "INSERT INTO schema_migrations (version) VALUES (?1)",
+                        params![version],
+                    )?;
+                    tx.commit()
+                })
+            {
+                return Err(HybridDiskError::MigrationError {
+                    version,
+                    source: err,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     fn sql_to_ts(value: ValueRef<'_>) -> rusqlite::Result<Timestamp> {
@@ -599,6 +640,12 @@ pub enum HybridDiskError {
     },
     #[error("json file at '{path:?}' does not contain expected key '{key:?}'")]
     JsonContentsMismatch { path: PathBuf, key: &'static str },
+    #[error("failed to apply migration {version:?} to database: {source}")]
+    MigrationError {
+        version: usize,
+        #[source]
+        source: rusqlite::Error,
+    },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
