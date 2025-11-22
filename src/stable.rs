@@ -60,7 +60,9 @@ fn process_series<S: Storage>(
             config: series.config.clone(),
             stable_series_timestamp: series.timestamp,
             last_series_timestamp: series.timestamp,
-            suspicious_series_count: 0,
+            suspicious_count: 0,
+            matched_count: 0,
+            replaced_count: 0,
         };
         Ok((row, RecordOutcome::Initial))
     }
@@ -78,24 +80,30 @@ fn compute_outcome(
     let is_suspicious = is_suspicious(stable_stats, new_stats);
 
     if is_suspicious || force_update_stable {
-        let suspicious_count = row.suspicious_series_count + 1;
+        let suspicious_count = row.suspicious_count + 1;
 
         if suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT {
             row.stable_series_timestamp = series.timestamp;
-            row.suspicious_series_count = 0;
+            row.matched_count = 0;
+            row.suspicious_count = 0;
+            row.replaced_count += 1;
 
             RecordOutcome::Replaced {
                 old_stable: stable_stats,
             }
         } else if force_update_stable {
             row.stable_series_timestamp = series.timestamp;
-            row.suspicious_series_count = 0;
+            row.matched_count = 0;
+            row.suspicious_count = 0;
+            row.replaced_count += 1;
 
             RecordOutcome::Forced {
                 old_stable: stable_stats,
             }
         } else {
-            row.suspicious_series_count = suspicious_count;
+            // Does not reset matched_count which is the number of matches since replacement, not
+            // the number of consecutive matches
+            row.suspicious_count = suspicious_count;
 
             RecordOutcome::Suspicious {
                 current_stable: stable_stats,
@@ -103,7 +111,8 @@ fn compute_outcome(
             }
         }
     } else {
-        row.suspicious_series_count = 0;
+        row.suspicious_count = 0;
+        row.matched_count += 1;
 
         RecordOutcome::Matched
     }
@@ -224,7 +233,9 @@ mod tests {
 
         assert_eq!(results_row.row.stable_series_timestamp, series.timestamp);
         assert_eq!(results_row.row.last_series_timestamp, series.timestamp);
-        assert_eq!(results_row.row.suspicious_series_count, 0);
+        assert_eq!(results_row.row.suspicious_count, 0);
+        assert_eq!(results_row.row.matched_count, 0);
+        assert_eq!(results_row.row.replaced_count, 0);
     }
 
     #[test]
@@ -242,7 +253,7 @@ mod tests {
                     .get_results_with_stats(tx, &stable.bench, &stable.config)?
                     .unwrap()
                     .row;
-                row.suspicious_series_count = 1;
+                row.suspicious_count = 1;
                 storage.upsert_results(tx, &row)
             })
             .unwrap();
@@ -259,7 +270,9 @@ mod tests {
 
         assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
         assert_eq!(results_row.row.last_series_timestamp, newer.timestamp);
-        assert_eq!(results_row.row.suspicious_series_count, 0);
+        assert_eq!(results_row.row.suspicious_count, 0);
+        assert_eq!(results_row.row.matched_count, 1);
+        assert_eq!(results_row.row.replaced_count, 0);
     }
 
     #[test]
@@ -267,6 +280,19 @@ mod tests {
         let (_dir, storage, config) = storage_with_config();
         let stable = run_series(&config, 1000, 10, 10);
         record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
+
+        // artificially increase matched_count and replaced_count
+        storage
+            .write_transaction(|tx| {
+                let mut row = storage
+                    .get_results_with_stats(tx, &stable.bench, &stable.config)?
+                    .unwrap()
+                    .row;
+                row.matched_count = 54;
+                row.replaced_count = 2;
+                storage.upsert_results(tx, &row)
+            })
+            .unwrap();
 
         for i in 1..=3 {
             let series = run_series(&config, 1050 + i, 10, 20 + i64::from(i));
@@ -288,6 +314,9 @@ mod tests {
                         suspicious_count: i64::from(i),
                     }
                 );
+                assert_eq!(results_row.row.matched_count, 54);
+                assert_eq!(results_row.row.suspicious_count, i64::from(i));
+                assert_eq!(results_row.row.replaced_count, 2);
                 assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
             } else {
                 assert_eq!(
@@ -296,6 +325,9 @@ mod tests {
                         old_stable: RunSeriesStats::from(&stable),
                     }
                 );
+                assert_eq!(results_row.row.matched_count, 0);
+                assert_eq!(results_row.row.suspicious_count, 0);
+                assert_eq!(results_row.row.replaced_count, 3);
                 assert_eq!(results_row.row.stable_series_timestamp, series.timestamp);
             }
             assert_eq!(results_row.row.last_series_timestamp, series.timestamp);
@@ -334,7 +366,8 @@ mod tests {
 
         assert_eq!(results_row.row.stable_series_timestamp, new.timestamp);
         assert_eq!(results_row.row.last_series_timestamp, new.timestamp);
-        assert_eq!(results_row.row.suspicious_series_count, 0);
+        assert_eq!(results_row.row.suspicious_count, 0);
+        assert_eq!(results_row.row.replaced_count, 1);
     }
 
     #[test]
@@ -350,7 +383,7 @@ mod tests {
                     .get_results_with_stats(tx, &stable.bench, &stable.config)?
                     .unwrap()
                     .row;
-                row.suspicious_series_count = 2;
+                row.suspicious_count = 2;
                 storage.upsert_results(tx, &row)
             })
             .unwrap();
@@ -376,6 +409,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
-        assert_eq!(results_row.row.suspicious_series_count, 2);
+        assert_eq!(results_row.row.suspicious_count, 2);
     }
 }

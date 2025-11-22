@@ -7,7 +7,7 @@ use jiff::Timestamp;
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::types::{Type, ValueRef};
 use rusqlite::{
-    params, params_from_iter, Connection, OptionalExtension, ToSql, Transaction,
+    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, Transaction,
     TransactionBehavior,
 };
 use std::collections::BTreeMap;
@@ -26,7 +26,10 @@ const DB_FILE: &str = "metadata.db";
 const EMPTY_CONFIG_DIR: &str = "__default__";
 const CONFIG_GENERATED_COLUMNS: &[&str] = &["commit"];
 
-static MIGRATIONS: &[&str] = &[include_str!("sql_migrations/00-schema.sql")];
+static MIGRATIONS: &[&str] = &[
+    include_str!("sql_migrations/00-schema.sql"),
+    include_str!("sql_migrations/01-results-counts.sql"),
+];
 
 /// Hybrid storage backend that stores individual run series in immutable JSON files and metadata
 /// in an SQLite database.
@@ -231,14 +234,15 @@ impl HybridDiskStorage {
             .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, Type::Integer, e.into()))
     }
 
-    fn sql_to_results_row(
-        &self,
-        bench: ValueRef<'_>,
-        config: ValueRef<'_>,
-        stable_series_timestamp: ValueRef<'_>,
-        last_series_timestamp: ValueRef<'_>,
-        suspicious_series_count: ValueRef<'_>,
-    ) -> Result<ResultsRow, HybridDiskError> {
+    fn sql_to_results_row(&self, row: &Row<'_>) -> Result<ResultsRow, HybridDiskError> {
+        let bench = row.get_ref("bench")?;
+        let config = row.get_ref("config")?;
+        let stable_series_timestamp = row.get_ref("stable_series_timestamp")?;
+        let last_series_timestamp = row.get_ref("last_series_timestamp")?;
+        let suspicious_count = row.get("suspicious_count")?;
+        let matched_count = row.get("matched_count")?;
+        let replaced_count = row.get("replaced_count")?;
+
         let bench_str = bench.as_str()?;
         let bench = BenchmarkId::new(bench_str)
             .map_err(|_| HybridDiskError::UnknownBenchmark(bench_str.to_string()))?;
@@ -255,7 +259,9 @@ impl HybridDiskStorage {
             config,
             stable_series_timestamp: Self::sql_to_ts(stable_series_timestamp)?,
             last_series_timestamp: Self::sql_to_ts(last_series_timestamp)?,
-            suspicious_series_count: suspicious_series_count.as_i64()?,
+            suspicious_count,
+            matched_count,
+            replaced_count,
         })
     }
 
@@ -431,20 +437,24 @@ impl Storage for HybridDiskStorage {
         let config_json = serde_json::to_string(&row.config.without_host_key())?;
 
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO results (bench, config, stable_series_timestamp, last_series_timestamp, suspicious_series_count)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO results (bench, config, stable_series_timestamp, last_series_timestamp, suspicious_count, matched_count, replaced_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(bench, config) DO UPDATE SET
+                updated_at = unixepoch(),
                 stable_series_timestamp = excluded.stable_series_timestamp,
                 last_series_timestamp = excluded.last_series_timestamp,
-                suspicious_series_count = excluded.suspicious_series_count,
-                updated_at = unixepoch()"
+                suspicious_count = excluded.suspicious_count,
+                matched_count = excluded.matched_count,
+                replaced_count = excluded.replaced_count"
         )?;
         stmt.execute(params![
             &row.bench.as_str(),
             config_json,
             row.stable_series_timestamp.as_second(),
             row.last_series_timestamp.as_second(),
-            row.suspicious_series_count,
+            row.suspicious_count,
+            row.matched_count,
+            row.replaced_count,
         ])?;
         Ok(())
     }
@@ -460,7 +470,11 @@ impl Storage for HybridDiskStorage {
 
         let config_json = serde_json::to_string(&config.without_host_key())?;
         let mut stmt = tx.prepare_cached(
-            "SELECT r.stable_series_timestamp, r.last_series_timestamp, r.suspicious_series_count,
+            "SELECT r.stable_series_timestamp,
+                    r.last_series_timestamp,
+                    r.suspicious_count,
+                    r.matched_count,
+                    r.replaced_count,
                     s.mean_ns_per_iter, s.ci95_half_width_ns,
                     l.mean_ns_per_iter, l.ci95_half_width_ns
              FROM results r
@@ -477,15 +491,17 @@ impl Storage for HybridDiskStorage {
                         config: config.clone(),
                         stable_series_timestamp: Self::sql_to_ts(row.get_ref(0)?)?,
                         last_series_timestamp: Self::sql_to_ts(row.get_ref(1)?)?,
-                        suspicious_series_count: row.get(2)?,
+                        suspicious_count: row.get(2)?,
+                        matched_count: row.get(3)?,
+                        replaced_count: row.get(4)?,
                     },
                     stable_stats: RunSeriesStats {
-                        mean_ns_per_iter: row.get(3)?,
-                        ci95_half_width_ns: row.get(4)?,
-                    },
-                    last_stats: RunSeriesStats {
                         mean_ns_per_iter: row.get(5)?,
                         ci95_half_width_ns: row.get(6)?,
+                    },
+                    last_stats: RunSeriesStats {
+                        mean_ns_per_iter: row.get(7)?,
+                        ci95_half_width_ns: row.get(8)?,
                     },
                 })
             })
@@ -508,7 +524,7 @@ impl Storage for HybridDiskStorage {
         // Don't pass limit to query as there is extra filtering below to check the benchmarks and
         // configs still exist in the current config file
         let mut stmt = tx.prepare_cached(&format!(
-            "SELECT bench, config, stable_series_timestamp, last_series_timestamp, suspicious_series_count
+            "SELECT *
              FROM results
              WHERE {condition}
              ORDER BY last_series_timestamp ASC",
@@ -517,15 +533,8 @@ impl Storage for HybridDiskStorage {
         let mut rows = Vec::new();
         let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
         while let Some(row) = rows_iter.next()? {
-            let row = self.sql_to_results_row(
-                row.get_ref(0)?,
-                row.get_ref(1)?,
-                row.get_ref(2)?,
-                row.get_ref(3)?,
-                row.get_ref(4)?,
-            )?;
-
-            if let Some(benchmark) = self.config_file.benchmark_by_id(&row.bench)
+            if let Ok(row) = self.sql_to_results_row(row)
+                && let Some(benchmark) = self.config_file.benchmark_by_id(&row.bench)
                 && benchmark.valid_config(&row.config)
             {
                 rows.push(row);
@@ -845,7 +854,9 @@ mod tests {
                         config: config.clone(),
                         stable_series_timestamp: series.timestamp,
                         last_series_timestamp: series.timestamp,
-                        suspicious_series_count: 0,
+                        suspicious_count: 0,
+                        matched_count: 0,
+                        replaced_count: 0,
                     },
                 )?;
 
@@ -1015,7 +1026,9 @@ mod tests {
                     config: config.clone(),
                     stable_series_timestamp: timestamp1,
                     last_series_timestamp: timestamp1,
-                    suspicious_series_count: 0,
+                    suspicious_count: 0,
+                    matched_count: 0,
+                    replaced_count: 0,
                 };
                 storage.upsert_results(tx, &row1)?;
 
@@ -1025,7 +1038,9 @@ mod tests {
                     config: config.clone(),
                     stable_series_timestamp: timestamp1, // Keep stable
                     last_series_timestamp: timestamp2,   // Update last
-                    suspicious_series_count: 2,
+                    suspicious_count: 2,
+                    matched_count: 0,
+                    replaced_count: 0,
                 };
                 storage.upsert_results(tx, &row2)?;
 
@@ -1034,7 +1049,7 @@ mod tests {
                     .get_results_with_stats(tx, &bench, &config)?
                     .unwrap();
                 assert_eq!(retrieved.row.last_series_timestamp, timestamp2);
-                assert_eq!(retrieved.row.suspicious_series_count, 2);
+                assert_eq!(retrieved.row.suspicious_count, 2);
 
                 Ok(())
             })
@@ -1162,7 +1177,9 @@ mod tests {
             config: older_config,
             stable_series_timestamp: Timestamp::from_second(10).unwrap(),
             last_series_timestamp: Timestamp::from_second(10).unwrap(),
-            suspicious_series_count: 0,
+            suspicious_count: 0,
+            matched_count: 0,
+            replaced_count: 0,
         };
 
         let newer = ResultsRow {
@@ -1170,7 +1187,9 @@ mod tests {
             config: newer_config,
             stable_series_timestamp: Timestamp::from_second(20).unwrap(),
             last_series_timestamp: Timestamp::from_second(20).unwrap(),
-            suspicious_series_count: 0,
+            suspicious_count: 0,
+            matched_count: 0,
+            replaced_count: 0,
         };
 
         storage
@@ -1202,55 +1221,49 @@ mod tests {
         let bench_keep: BenchmarkId = "2015-04".try_into().unwrap();
         let bench_drop: BenchmarkId = "empty-config".try_into().unwrap();
 
-        let config_keep = storage
+        let bench_keep_config_keep = storage
             .config_file()
             .config_from_string("build=generic,commit=abc1234,host=pi3")
             .unwrap();
-        let config_drop = storage
+        let bench_keep_config_drop = storage
+            .config_file()
+            .config_from_string("build=generic,commit=def4567,host=pi3")
+            .unwrap();
+        let bench_drop_config = storage
             .config_file()
             .config_from_string("host=pi3")
             .unwrap();
 
+        let pairs = [
+            (&bench_drop, &bench_drop_config),
+            (&bench_keep, &bench_keep_config_keep),
+            (&bench_keep, &bench_keep_config_drop),
+        ];
+
         storage
             .write_transaction(|tx| {
-                storage.insert_run_series(
-                    tx,
-                    &run_series_for_bench(
-                        bench_keep.clone(),
-                        config_keep.clone(),
-                        Timestamp::from_second(20).unwrap(),
-                    ),
-                )?;
-                storage.insert_run_series(
-                    tx,
-                    &run_series_for_bench(
-                        bench_drop.clone(),
-                        config_drop.clone(),
-                        Timestamp::from_second(10).unwrap(),
-                    ),
-                )?;
+                let mut seconds = 0;
+                for &(bench, config) in &pairs {
+                    seconds += 10;
+                    let timestamp = Timestamp::from_second(seconds).unwrap();
 
-                storage.upsert_results(
-                    tx,
-                    &ResultsRow {
-                        bench: bench_keep.clone(),
-                        config: config_keep.clone(),
-                        stable_series_timestamp: Timestamp::from_second(20).unwrap(),
-                        last_series_timestamp: Timestamp::from_second(20).unwrap(),
-                        suspicious_series_count: 0,
-                    },
-                )?;
-                storage.upsert_results(
-                    tx,
-                    &ResultsRow {
-                        bench: bench_drop.clone(),
-                        config: config_drop.clone(),
-                        stable_series_timestamp: Timestamp::from_second(10).unwrap(),
-                        last_series_timestamp: Timestamp::from_second(10).unwrap(),
-                        suspicious_series_count: 0,
-                    },
-                )?;
-
+                    storage.insert_run_series(
+                        tx,
+                        &run_series_for_bench(bench.clone(), config.clone(), timestamp),
+                    )?;
+                    storage.upsert_results(
+                        tx,
+                        &ResultsRow {
+                            bench: bench.clone(),
+                            config: config.clone(),
+                            stable_series_timestamp: timestamp,
+                            last_series_timestamp: timestamp,
+                            suspicious_count: 0,
+                            matched_count: 0,
+                            replaced_count: 0,
+                        },
+                    )?;
+                }
                 Ok(())
             })
             .unwrap();
@@ -1258,16 +1271,21 @@ mod tests {
         let results = storage
             .read_transaction(|tx| storage.oldest_results(tx, None, &Config::new(), 10))
             .unwrap();
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 3);
         assert_eq!(results[0].bench, bench_drop);
+        assert_eq!(results[0].config, bench_drop_config);
         assert_eq!(results[1].bench, bench_keep);
+        assert_eq!(results[1].config, bench_keep_config_keep);
+        assert_eq!(results[1].bench, bench_keep);
+        assert_eq!(results[2].config, bench_keep_config_drop);
 
         drop(storage);
 
+        // Drop commit=def4567 kv and empty-config benchmark
         let json = r#"{
             "config_keys": {
                 "build": {"values": ["generic", "native"]},
-                "commit": {"values": ["abc1234", "def4567"]},
+                "commit": {"values": ["abc1234"]},
                 "opt": {"values": ["x"]}
             },
             "benchmarks": [
@@ -1276,7 +1294,7 @@ mod tests {
                     "command": ["run", "{build}", "{commit}"],
                     "config": {
                         "build": ["generic", "native"],
-                        "commit": ["abc1234", "def4567"]
+                        "commit": ["abc1234"]
                     }
                 }
             ]
@@ -1290,5 +1308,12 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].bench, bench_keep);
+
+        // Compare after converting to string map instances as the keys now come from different
+        // ConfigFile instances so don't equal directly
+        assert_eq!(
+            BTreeMap::from(results[0].config.clone()),
+            bench_keep_config_keep.into()
+        );
     }
 }

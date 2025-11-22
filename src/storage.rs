@@ -90,7 +90,9 @@ pub struct ResultsRow {
     pub config: Config,
     pub stable_series_timestamp: Timestamp,
     pub last_series_timestamp: Timestamp,
-    pub suspicious_series_count: i64,
+    pub suspicious_count: i64,
+    pub matched_count: i64,
+    pub replaced_count: i64,
 }
 
 /// Results row bundled with median stats for both stable and last series.

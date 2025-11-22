@@ -1018,7 +1018,7 @@ Each host has its own `metadata.db` with two core tables:
 
 - Primary key: `(bench, config)`
 - Stores: which run series is the stable result, which run series is the most recent
-- Fields: bench, config, stable_series_timestamp, last_series_timestamp, suspicious_series_count
+- Fields: bench, config, stable_series_timestamp, last_series_timestamp, matched_count, suspicious_count, replaced_count
 - Mutable: updated as new run series arrive and drift is detected
 - Generated virtual columns: `commit`, `host` (extracted from config JSON for fast filtering)
 - Partial indexes on generated columns for fast filtering
@@ -1082,22 +1082,23 @@ When a new run series arrives for a `config`:
 5. Update suspicious series counter:
 
     * If `is_suspicious`:
-        * `suspicious_series_count += 1`
+        * `suspicious_count += 1`
     * Else:
-        * `suspicious_series_count = 0`
+        * `suspicious_count = 0`
+        * `matched_count += 1`
 
-6. If `suspicious_series_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT`:
+6. If `suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT`:
 
    **Replace the stable result** (environment has changed):
 
     * Insert new run series into `run_series` table (using median run values)
     * Update `results` table: set `stable_series_timestamp = timestamp`, `last_series_timestamp = timestamp`, reset
-      `suspicious_series_count = 0`
+      `matched_count = 0`, `suspicious_count = 0`, increment `replaced_count`
 
 7. Otherwise (stable result unchanged):
 
     * Insert new run series into `run_series` table (using median run values)
-    * Update `results` table: set `last_series_timestamp = timestamp`, update `suspicious_series_count`
+    * Update `results` table: set `last_series_timestamp = timestamp`, update `suspicious_count`
     * Stable result remains unchanged
 
 **Key insights:**
@@ -1128,11 +1129,12 @@ On startup, if the database is corrupted or missing, the system will attempt to 
 5. For each unique config (exact canonical JSON match):
     * Find all run series sorted by timestamp
     * Use latest run series as both stable and last run series
-    * Insert into `results` table with `suspicious_series_count = 0`
+    * Insert into `results` table with `suspicious_count = 0`, `matched_count = 0`, `replaced_count = 0`
 
 **What is lost in recovery:**
 
-- Suspicious series counts (partial state toward next stable update)
+- Suspicious counts (partial state toward next stable update)
+- Matched and replacement counts
 - Original stable result designations (assumes latest = stable)
 
 Note: Full history is preserved in the timestamped JSON files themselves.
