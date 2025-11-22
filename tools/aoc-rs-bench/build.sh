@@ -16,6 +16,7 @@ fi
 
 builds_dir="$data_dir/builds"
 builds_commit_list="$builds_dir/commits.txt"
+builds_checksum_file="$builds_dir/checksum.txt"
 repo="https://github.com/ictrobot/aoc-rs"
 start_ref="main"
 
@@ -29,6 +30,49 @@ framework_revisions=(
     "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Nested macro repeats for year and day
     "421df7084cf3de9e7279ca9b841fed222c6b33fa" # glue-v6 One DATE constant instead of YEAR and DAY
 )
+
+profiles=(
+    "generic"
+    "native"
+)
+
+# Changes to these files will rebuild all the binaries
+checksum_files=(
+    "src/main.rs"
+    "build.sh"
+    "Cargo.toml"
+)
+# Files/folders to delete inside builds_dir on hash change
+checksum_delete=(
+    "${profiles[@]}"
+    "commits.txt"
+    ".cache.json" # config.py cache
+)
+
+check_checksum() {
+    current_checksum="$(sha256sum "${checksum_files[@]}")"
+    if [[ -f "$builds_checksum_file" ]]; then
+      saved_checksum="$(<"$builds_checksum_file")"
+    else
+      saved_checksum=""
+    fi
+
+    if [[ "$current_checksum" != "$saved_checksum" ]]; then
+        echo "Checksum changed, deleting existing builds"
+
+        for f in "${checksum_delete[@]}"; do
+            target="${builds_dir:?builds dir must be non-empty}/${f:?file must be non-empty}"
+            if [[ -e "$target" ]]; then
+                echo "Deleting $target"
+                rm -rf -- "${target:?target must be non-empty}"
+            fi
+        done
+
+        echo "$current_checksum" > "$builds_checksum_file"
+    else
+        echo "Checksum matches, keeping existing builds"
+    fi
+}
 
 build_binary() {
     git -C "$tmp_clone" checkout "$commit" -q
@@ -51,6 +95,7 @@ build_binary() {
         exit 1
     fi
 
+    echo
     echo "Building $build with rust $rust_version and glue v$framework_version"
 
     args=(
@@ -91,6 +136,7 @@ build_binary() {
 }
 
 mkdir -p "$builds_dir"
+check_checksum
 
 tmp_clone="$(mktemp -d)"
 trap 'rm -rf "$tmp_clone"' EXIT
@@ -99,7 +145,11 @@ git -C "$tmp_clone" clone "$repo" . -q
 git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
 mv "$builds_commit_list.tmp" "$builds_commit_list"
 
-for profile in generic native; do
+tmp_target_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_clone"; rm -rf "$tmp_target_dir"' EXIT
+export CARGO_TARGET_DIR="$tmp_target_dir"
+
+for profile in "${profiles[@]}"; do
     mkdir -p "$builds_dir/$profile"
 
     # Inner loop over commit instead of profile to make better use of incremental builds
