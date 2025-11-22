@@ -20,13 +20,13 @@ Key ideas:
 
 The `aoc-bench` tool provides the following subcommands:
 
-* **`run`** - Execute benchmarks by spawning commands from the config file
+* **`run-all`** - Execute all matching benchmarks by spawning commands from the config file
     * Reads benchmark definitions and command templates from config file
     * Substitutes `{key}` placeholders with config values
     * Spawns child processes and collects SAMPLE output
     * Performs run series (default: 7 runs) and stores results
 
-* **`sample`** - Periodically re-run benchmarks for drift detection
+* **`run`** - Periodically re-run benchmarks for drift detection
     * Automatically selects (bench, config) pairs to re-run
     * Prioritizes configs without results or with oldest timestamps
     * Useful for nightly/periodic runs to detect environment changes
@@ -1186,17 +1186,17 @@ Typical workflow (for AoC):
 3. You run:
 
    ```bash
-   # run a subset of configs for a benchmark
-   aoc-bench run 2015-04 --config commit=abc123,threads=1
+   # run all matching configs for a benchmark
+   aoc-bench run-all 2015-04 --config commit=abc123,threads=1
 
    # run all configs for a benchmark
-   aoc-bench run 2015-04
+   aoc-bench run-all 2015-04
    
    # run all benchmarks
-   aoc-bench run
+   aoc-bench run-all
    ```
 
-The `aoc-bench run` command:
+The `aoc-bench run-all` command:
 
 - Reads the benchmark definition from the configuration file
 - Finds the `command` template for the specified benchmark
@@ -1211,11 +1211,11 @@ The `aoc-bench run` command:
 
 ## 11.2 Periodic runs (to detect env drift per config)
 
-Each host can periodically re-run **a subset of configs** (e.g. nightly) using the `aoc-bench sample` command, which:
+Each host should periodically (e.g. nightly) run **a subset of configs** using the `aoc-bench run` command, which:
 
-* Chooses some (bench, config) pairs to re-run. These are selected from pairs without existing results, and the results
+* Chooses some (bench, config) pairs to run. These are selected from pairs without existing results, and the results
   table entries with the oldest `last_series_timestamp`.
-* Runs them similarly to the `run` command (see above).
+* Runs them similarly to the `run-all` command (see above).
 * Stable result logic will automatically update if the environment has changed enough for that config.
 * The median-of-means approach makes these drift checks more robust to transient noise.
 

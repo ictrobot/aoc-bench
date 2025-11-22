@@ -1,16 +1,8 @@
-mod commands;
+mod cli;
 
 use clap::Parser;
-use commands::Commands;
+use cli::Cli;
 use std::process::ExitCode;
-
-#[derive(Parser, Debug)]
-#[command(name = "aoc-bench")]
-#[command(about = "Benchmark runner", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
 
 fn main() -> ExitCode {
     // Initialize tracing subscriber
@@ -27,6 +19,5 @@ fn main() -> ExitCode {
         subscriber.init();
     }
 
-    let cli = Cli::parse();
-    cli.command.execute()
+    Cli::parse().run()
 }

@@ -5,6 +5,7 @@ mod parse;
 use ahash::{HashMap, HashMapExt as _, HashSet};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -97,6 +98,18 @@ impl ConfigFile {
     pub fn benchmark_by_id(&self, id: &BenchmarkId) -> Option<&Benchmark> {
         let index = *self.benchmarks_by_id.get(id)?;
         Some(&self.benchmarks[index])
+    }
+
+    /// Get the benchmarks matching the provided filter
+    #[must_use]
+    pub fn benchmarks_filtered(&self, filter: Option<&BenchmarkId>) -> &[Benchmark] {
+        match filter {
+            None => self.benchmarks(),
+            Some(id) => match self.benchmark_by_id(id) {
+                None => &[],
+                Some(benchmark) => std::slice::from_ref(benchmark),
+            },
+        }
     }
 
     /// Get the host key
@@ -285,6 +298,10 @@ impl Key {
     /// Get the key's name
     #[must_use]
     pub fn name(&self) -> &str {
+        self.name_arc()
+    }
+
+    pub(crate) fn name_arc(&self) -> &Arc<str> {
         &self.0.name
     }
 
@@ -458,6 +475,10 @@ impl KeyValue {
     /// Get the string name of this value
     #[must_use]
     pub fn value_name(&self) -> &str {
+        self.value_name_arc()
+    }
+
+    pub(crate) fn value_name_arc(&self) -> &Arc<str> {
         &self.key.0.values[self.index]
     }
 }
@@ -788,9 +809,22 @@ impl ConfigProduct {
     #[must_use]
     pub fn iter(&self) -> ConfigProductIter<'_> {
         ConfigProductIter {
-            subsets: &self.subsets,
+            subsets: Cow::Borrowed(&self.subsets),
             indexes: vec![0; self.subsets.len()],
             len: self.len(),
+        }
+    }
+}
+
+impl IntoIterator for ConfigProduct {
+    type Item = Config;
+    type IntoIter = ConfigProductIter<'static>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ConfigProductIter {
+            len: self.len(),
+            indexes: vec![0; self.subsets.len()],
+            subsets: Cow::Owned(self.subsets),
         }
     }
 }
@@ -806,9 +840,20 @@ impl<'a> IntoIterator for &'a ConfigProduct {
 
 /// Iterator over the Cartesian product of configuration values
 pub struct ConfigProductIter<'a> {
-    subsets: &'a [KeyValuesSubset],
+    subsets: Cow<'a, [KeyValuesSubset]>,
     indexes: Vec<usize>,
     len: usize,
+}
+
+impl ConfigProductIter<'_> {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            subsets: Cow::Borrowed(&[]),
+            indexes: vec![],
+            len: 0,
+        }
+    }
 }
 
 impl Iterator for ConfigProductIter<'_> {
@@ -821,13 +866,18 @@ impl Iterator for ConfigProductIter<'_> {
 
         let mut config = Config::new();
         config.kv.reserve(self.subsets.len());
-        let mut carry = true;
-        for (subset, i) in self.subsets.iter().zip(self.indexes.iter_mut()) {
+
+        // Iterate forwards to build the config
+        for (subset, &i) in self.subsets.iter().zip(self.indexes.iter()) {
             config.kv.push(KeyValue {
                 key: subset.key.clone(),
-                index: subset.indexes[*i],
+                index: subset.indexes[i],
             });
+        }
 
+        // Iterate backwards to update indexes
+        let mut carry = true;
+        for (subset, i) in self.subsets.iter().zip(self.indexes.iter_mut()).rev() {
             if carry {
                 *i += 1;
                 if *i >= subset.indexes.len() {
@@ -1068,6 +1118,11 @@ impl BenchmarkId {
 
     #[must_use]
     pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub(crate) fn as_arc(&self) -> &Arc<str> {
         &self.0
     }
 }
@@ -1964,6 +2019,41 @@ mod tests {
     }
 
     #[test]
+    fn test_config_product_iter_empty() {
+        let mut iter = ConfigProductIter::empty();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_benchmarks_filtered() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["opt"] }
+            },
+            "benchmarks": [
+                { "benchmark": "bench-a", "command": ["run"], "config": {} },
+                { "benchmark": "bench-b", "command": ["run"], "config": {} }
+            ]
+        }"#;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = ConfigFile::from_str(dir.path(), Some("host"), json).unwrap();
+
+        let all = cfg.benchmarks_filtered(None);
+        assert_eq!(all.len(), 2);
+
+        let bench_a: BenchmarkId = "bench-a".try_into().unwrap();
+        let filtered = cfg.benchmarks_filtered(Some(&bench_a));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id(), &bench_a);
+
+        let unknown: BenchmarkId = "unknown".try_into().unwrap();
+        assert!(cfg.benchmarks_filtered(Some(&unknown)).is_empty());
+    }
+
+    #[test]
     fn test_key_value_ordering() {
         let key1 = Key::new("aaa", vec!["1"]).unwrap();
         let key2 = Key::new("zzz", vec!["2"]).unwrap();
@@ -2009,13 +2099,13 @@ mod tests {
         assert_eq!(
             configs,
             vec![
-                "a=1,b=x,c=p", // a varies first
-                "a=2,b=x,c=p",
+                "a=1,b=x,c=p", // c varies first
+                "a=1,b=x,c=q",
                 "a=1,b=y,c=p", // then b
-                "a=2,b=y,c=p",
-                "a=1,b=x,c=q", // then c
-                "a=2,b=x,c=q",
                 "a=1,b=y,c=q",
+                "a=2,b=x,c=p", // then a
+                "a=2,b=x,c=q",
+                "a=2,b=y,c=p",
                 "a=2,b=y,c=q",
             ]
         );

@@ -3,7 +3,7 @@
 use crate::config::{BenchmarkId, BenchmarkVariant, Config};
 use crate::host_config::{CpuAffinity, HostConfig};
 use crate::protocol::{
-    parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
+    ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
 };
 use crate::run::{Run, RunSeries};
 use crate::stats::{StatsAccumulator, StatsError, StatsState};
@@ -14,7 +14,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 use tempfile::TempDir;
-use tracing::{info, info_span, trace, trace_span, warn, Span};
+use tracing::{Span, info, info_span, trace, trace_span, warn};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -79,12 +79,10 @@ impl Runner {
 
         let mut runs = Vec::with_capacity(RUN_SERIES_COUNT);
         for run in 0..RUN_SERIES_COUNT {
-            let span = info_span!("run", run);
-            let _enter = span.enter();
+            let _span = info_span!("run", run).entered();
 
             for retry in 0..MAX_RETRIES {
-                let span = info_span!("retry", retry);
-                let _enter = span.enter();
+                let _span = info_span!("retry", retry).entered();
 
                 match self.run_single() {
                     Ok(run_result) => {
@@ -174,7 +172,6 @@ impl Runner {
 
             // Parse protocol line
             let line = parse_line(line);
-            trace!(?line, "protocol line");
             match line {
                 Ok(ProtocolLine::Meta(meta)) => {
                     // Validate version if present
@@ -257,8 +254,7 @@ impl Runner {
             let parent_span = Span::current();
             std::thread::spawn(move || {
                 let _parent_enter = parent_span.enter();
-                let span = trace_span!("stdin_write");
-                let _enter = span.enter();
+                let _span = trace_span!("stdin_write").entered();
 
                 let _ = stdin.write_all(&input);
                 drop(stdin);
@@ -275,8 +271,7 @@ impl Runner {
         let parent_span = Span::current();
         std::thread::spawn(move || {
             let _parent_enter = parent_span.enter();
-            let span = trace_span!("stdin_write");
-            let _enter = span.enter();
+            let _span = trace_span!("stdin_write").entered();
 
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
@@ -304,33 +299,33 @@ impl Runner {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    #[error("Failed to build command from config: {0}")]
+    #[error("failed to build command from config: {0}")]
     ConfigError(#[from] crate::config::ConfigError),
-    #[error("Failed to find executable '{executable}': {error}")]
+    #[error("failed to find executable '{executable}': {error}")]
     ExecutableNotFound {
         executable: String,
         #[source]
         error: which::Error,
     },
-    #[error("Failed to read input file '{path:?}': {error}")]
+    #[error("failed to read input file '{path:?}': {error}")]
     ReadingInputFailed {
         path: PathBuf,
         #[source]
         error: io::Error,
     },
-    #[error("Failed to spawn process: {0}")]
+    #[error("failed to spawn process: {0}")]
     SpawnFailed(#[from] io::Error),
-    #[error("Process crashed with exit code: {0:?}")]
+    #[error("process crashed with exit code: {0:?}")]
     ProcessCrashed(Option<i32>),
-    #[error("Process timed out after {TIMEOUT_SECS} seconds")]
+    #[error("process timed out after {TIMEOUT_SECS} seconds")]
     Timeout,
-    #[error("Failed to parse protocol line: {0}")]
+    #[error("failed to parse protocol line: {0}")]
     ParseError(ParseError),
-    #[error("Process ended prematurely")]
+    #[error("process ended prematurely")]
     PrematureEof,
-    #[error("Checksum validation failed: {0}")]
+    #[error("checksum validation failed: {0}")]
     InvalidChecksum(ParseError),
-    #[error("Statistics collection failed: {0}")]
+    #[error("statistics collection failed: {0}")]
     StatsFailed(StatsError),
 }
 

@@ -23,15 +23,15 @@ pub struct SampleLine {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ParseError {
-    #[error("Invalid format: {0}")]
+    #[error("invalid format: {0}")]
     InvalidFormat(String),
-    #[error("Invalid number: {0}")]
+    #[error("invalid number: {0}")]
     InvalidNumber(String),
-    #[error("Missing field: {0}")]
+    #[error("missing field: {0}")]
     MissingField(String),
-    #[error("Checksum missing: expected '{expected}'")]
+    #[error("checksum missing: expected '{expected}'")]
     ChecksumMissing { expected: String },
-    #[error("Checksum mismatch: expected '{expected}', got '{actual}'")]
+    #[error("checksum mismatch: expected '{expected}', got '{actual}'")]
     ChecksumMismatch { expected: String, actual: String },
 }
 

@@ -59,6 +59,28 @@ pub trait Storage {
         bench: &BenchmarkId,
         config: &Config,
     ) -> Result<Option<ResultsRowWithStats>, Self::Error>;
+
+    /// Return up to `limit` existing results ordered by ascending `last_series_timestamp`.
+    ///
+    /// Only valid benchmarks and configs for the current config file are returned.
+    fn oldest_results(
+        &self,
+        tx: &Self::Tx<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        limit: usize,
+    ) -> Result<Vec<ResultsRow>, Self::Error>;
+
+    /// Return up to `limit` (bench, config) pairs that have never been run.
+    ///
+    /// Only valid benchmarks and configs for the current config file are returned.
+    fn missing_results(
+        &self,
+        tx: &Self::Tx<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        limit: usize,
+    ) -> Result<Vec<(BenchmarkId, Config)>, Self::Error>;
 }
 
 /// Results row, without joined stats

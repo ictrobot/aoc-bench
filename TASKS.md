@@ -161,7 +161,7 @@
 
 ## Phase 7: CLI Commands
 
-### 7.1 `run` Command
+### 7.1 `run-all` Command
 
 - [x] Implement benchmark selection (positional bench arg)
 - [x] Implement config filtering (--config key=value,key=value)
@@ -170,13 +170,13 @@
 - [x] Add progress output
 - [x] Add --force-update-stable flag
 
-### 7.2 `sample` Command
+### 7.2 `run` Command
 
-- [ ] Implement selection of (bench, config) pairs to re-run
-- [ ] Prioritize configs without results
-- [ ] Prioritize configs with oldest last_series_timestamp
-- [ ] Add limit flag for number of samples to run
-- [ ] Integrate with run logic
+- [X] Implement selection of (bench, config) pairs to re-run
+- [X] Prioritize configs without results
+- [X] Prioritize configs with oldest last_series_timestamp
+- [X] Add limit flag for number of samples to run
+- [X] Integrate with run logic
 
 ### 7.3 `export` Command
 

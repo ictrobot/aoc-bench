@@ -610,20 +610,20 @@ impl Default for StatsAccumulator {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum StatsError {
-    #[error("Too many outliers detected: {outlier_count}/{samples} ({:.1}% > {:.1}%)", (*.outlier_count as f64 / *.samples as f64) * 100.0, OUTLIER_MAX_FRACTION * 100.0)]
+    #[error("too many outliers detected: {outlier_count}/{samples} ({:.1}% > {:.1}%)", (*.outlier_count as f64 / *.samples as f64) * 100.0, OUTLIER_MAX_FRACTION * 100.0)]
     TooManyOutliers {
         samples: usize,
         outlier_count: usize,
     },
-    #[error("Failed to converge after {samples} samples: relative CI half-width {:.1}% > target {:.1}%", *.relative_ci_half_width * 100.0, TARGET_REL_CI * 100.0)]
+    #[error("failed to converge after {samples} samples: relative CI half-width {:.1}% > target {:.1}%", *.relative_ci_half_width * 100.0, TARGET_REL_CI * 100.0)]
     FailedToConverge {
         samples: usize,
         relative_ci_half_width: f64,
     },
     #[error("{}", if *.trend_correlation > 0.0 {
-        format!("Increasing trend in per-iteration run time detected ({trend_correlation:.2})")
+        format!("increasing trend in per-iteration run time detected ({trend_correlation:.2})")
     } else {
-        format!("Decreasing trend in per-iteration run time detected ({trend_correlation:.2})")
+        format!("decreasing trend in per-iteration run time detected ({trend_correlation:.2})")
     })]
     TrendDetected { trend_correlation: f64 },
 }

@@ -1,16 +1,23 @@
-use crate::config::{BenchmarkId, Config, ConfigFile, KeyValue};
+use crate::config::{
+    Benchmark, BenchmarkId, Config, ConfigError, ConfigFile, ConfigProductIter, KeyValue,
+};
 use crate::run::{RunSeries, RunSeriesDef};
 use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage};
 use jiff::Timestamp;
-use rusqlite::types::Type;
-use rusqlite::{params, Connection, Error, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
+use rusqlite::types::{Type, ValueRef};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, ToSql, Transaction,
+    TransactionBehavior,
+};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::fs::{File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use thiserror::Error;
+use tracing::trace;
 
 const RESULTS_DIR: &str = "results";
 const RUNS_DIR: &str = "runs";
@@ -18,6 +25,7 @@ const LOCK_FILE: &str = ".lock";
 const DB_FILE: &str = "metadata.db";
 const SCHEMA_SQL: &str = include_str!("../../schema.sql");
 const EMPTY_CONFIG_DIR: &str = "__default__";
+const CONFIG_GENERATED_COLUMNS: &[&str] = &["commit"];
 
 /// Hybrid storage backend that stores individual run series in immutable JSON files and metadata
 /// in an SQLite database.
@@ -148,10 +156,98 @@ impl HybridDiskStorage {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
+
+        if tracing::enabled!(tracing::Level::TRACE) {
+            conn.trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|event| {
+                    if let TraceEvent::Stmt(stmt, sql) = event {
+                        let expanded_sql = stmt.expanded_sql();
+                        let sql = expanded_sql.as_ref().map_or(sql, |sql| sql.as_str());
+                        let sql = sql.split('\n').fold(
+                            String::with_capacity(sql.len()),
+                            |mut acc, line| {
+                                acc.push_str(line.trim_ascii());
+                                acc.push(' ');
+                                acc
+                            },
+                        );
+                        trace!(sql = sql.trim_ascii(), "running query");
+                    }
+                }),
+            );
+        }
+
         if !conn.table_exists(Some("main"), "results")? {
             conn.execute_batch(SCHEMA_SQL)?;
         }
+
         Ok(conn)
+    }
+
+    fn sql_to_ts(value: ValueRef<'_>) -> rusqlite::Result<Timestamp> {
+        Timestamp::from_second(value.as_i64()?)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, Type::Integer, e.into()))
+    }
+
+    fn sql_to_results_row(
+        &self,
+        bench: ValueRef<'_>,
+        config: ValueRef<'_>,
+        stable_series_timestamp: ValueRef<'_>,
+        last_series_timestamp: ValueRef<'_>,
+        suspicious_series_count: ValueRef<'_>,
+    ) -> Result<ResultsRow, HybridDiskError> {
+        let bench_str = bench.as_str()?;
+        let bench = BenchmarkId::new(bench_str)
+            .map_err(|_| HybridDiskError::UnknownBenchmark(bench_str.to_string()))?;
+
+        let config_json = config.as_str()?;
+        let config_map: BTreeMap<String, String> = serde_json::from_str(config_json)?;
+        let config = self
+            .config_file
+            .config_from_map(&config_map)?
+            .with(self.host.clone());
+
+        Ok(ResultsRow {
+            bench,
+            config,
+            stable_series_timestamp: Self::sql_to_ts(stable_series_timestamp)?,
+            last_series_timestamp: Self::sql_to_ts(last_series_timestamp)?,
+            suspicious_series_count: suspicious_series_count.as_i64()?,
+        })
+    }
+
+    fn sql_bench_config_filter<'a>(
+        benchmark_filter: Option<&'a BenchmarkId>,
+        config_filter: &'a Config,
+    ) -> (String, Vec<&'a dyn ToSql>) {
+        let mut condition = String::new();
+        let mut binds = Vec::new();
+
+        condition.push_str("(1=1");
+
+        if let Some(benchmark_filter) = benchmark_filter {
+            condition.push_str(" AND bench = ?");
+            binds.push(benchmark_filter.as_arc() as &dyn ToSql);
+        }
+
+        for kv in config_filter.iter() {
+            if CONFIG_GENERATED_COLUMNS.contains(&kv.key().name()) {
+                condition.push_str(" AND config_");
+                condition.push_str(kv.key().name());
+                condition.push_str(" = ?");
+                binds.push(kv.value_name_arc() as &dyn ToSql);
+            } else {
+                condition.push_str(" AND config ->> ? = ?");
+                binds.push(kv.key().name_arc() as &dyn ToSql);
+                binds.push(kv.value_name_arc() as &dyn ToSql);
+            }
+        }
+
+        condition.push(')');
+
+        (condition, binds)
     }
 }
 
@@ -334,17 +430,12 @@ impl Storage for HybridDiskStorage {
 
         Ok(stmt
             .query_row(params![bench.as_str(), config_json], |row| {
-                let stable_ts = Timestamp::from_second(row.get_ref(0)?.as_i64()?)
-                    .map_err(|e| Error::FromSqlConversionFailure(0, Type::Integer, e.into()))?;
-                let last_ts = Timestamp::from_second(row.get_ref(1)?.as_i64()?)
-                    .map_err(|e| Error::FromSqlConversionFailure(1, Type::Integer, e.into()))?;
-
                 Ok(ResultsRowWithStats {
                     row: ResultsRow {
                         bench: bench.clone(),
                         config: config.clone(),
-                        stable_series_timestamp: stable_ts,
-                        last_series_timestamp: last_ts,
+                        stable_series_timestamp: Self::sql_to_ts(row.get_ref(0)?)?,
+                        last_series_timestamp: Self::sql_to_ts(row.get_ref(1)?)?,
                         suspicious_series_count: row.get(2)?,
                     },
                     stable_stats: RunSeriesStats {
@@ -358,6 +449,97 @@ impl Storage for HybridDiskStorage {
                 })
             })
             .optional()?)
+    }
+
+    fn oldest_results(
+        &self,
+        tx: &Transaction<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        limit: usize,
+    ) -> Result<Vec<ResultsRow>, HybridDiskError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let (condition, params) = Self::sql_bench_config_filter(benchmark_filter, config_filter);
+
+        // Don't pass limit to query as there is extra filtering below to check the benchmarks and
+        // configs still exist in the current config file
+        let mut stmt = tx.prepare_cached(&format!(
+            "SELECT bench, config, stable_series_timestamp, last_series_timestamp, suspicious_series_count
+             FROM results
+             WHERE {condition}
+             ORDER BY last_series_timestamp ASC",
+        ))?;
+
+        let mut rows = Vec::new();
+        let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
+        while let Some(row) = rows_iter.next()? {
+            let row = self.sql_to_results_row(
+                row.get_ref(0)?,
+                row.get_ref(1)?,
+                row.get_ref(2)?,
+                row.get_ref(3)?,
+                row.get_ref(4)?,
+            )?;
+
+            if let Some(benchmark) = self.config_file.benchmark_by_id(&row.bench)
+                && benchmark.valid_config(&row.config)
+            {
+                rows.push(row);
+
+                if rows.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+
+    fn missing_results(
+        &self,
+        tx: &Transaction<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        limit: usize,
+    ) -> Result<Vec<(BenchmarkId, Config)>, HybridDiskError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt =
+            tx.prepare_cached("SELECT 1 FROM results WHERE bench = ?1 AND config = ?2")?;
+
+        self.config_file
+            .benchmarks_filtered(benchmark_filter)
+            .iter()
+            .flat_map(Benchmark::variants)
+            .flat_map(|variant| {
+                match variant.config().filter(config_filter) {
+                    None => ConfigProductIter::empty(),
+                    Some(product) => product.into_iter(),
+                }
+                .map(|c| (variant.benchmark_id(), c))
+            })
+            .filter_map(|(bench, config)| {
+                let config_json = match serde_json::to_string(&config) {
+                    Ok(json) => json,
+                    Err(e) => return Some(Err(HybridDiskError::from(e))),
+                };
+
+                match stmt
+                    .query_row(params![bench.as_str(), config_json], |_| Ok(()))
+                    .optional()
+                {
+                    Ok(Some(())) => None,
+                    Ok(None) => Some(Ok((bench.clone(), config))),
+                    Err(e) => Some(Err(HybridDiskError::from(e))),
+                }
+            })
+            .take(limit)
+            .collect::<Result<Vec<_>, HybridDiskError>>()
     }
 }
 
@@ -385,7 +567,7 @@ impl FileLock {
 }
 
 /// [`HybridDiskStorage`] errors.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum HybridDiskError {
     #[error("host '{0}' not in loaded config file")]
     UnknownHost(String),
@@ -397,6 +579,8 @@ pub enum HybridDiskError {
     ConfigMissingHostKey(String),
     #[error("config host mismatch: expected '{expected}', found '{found}'")]
     HostMismatch { expected: String, found: String },
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     #[error("failed to lock '{path:?}'")]
     LockUnavailable { path: PathBuf },
     #[error("I/O error at '{path:?}': {source}")]
@@ -413,10 +597,12 @@ pub enum HybridDiskError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("JSON file at '{path:?}' does not contain expected key '{key:?}'")]
+    #[error("json file at '{path:?}' does not contain expected key '{key:?}'")]
     JsonContentsMismatch { path: PathBuf, key: &'static str },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    SqlConversionFailure(#[from] rusqlite::types::FromSqlError),
 }
 
 fn io_error(path: impl AsRef<Path>, source: io::Error) -> HybridDiskError {
@@ -429,7 +615,7 @@ fn io_error(path: impl AsRef<Path>, source: io::Error) -> HybridDiskError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ConfigFile};
+    use crate::config::{BenchmarkId, Config, ConfigFile};
     use crate::run::Run;
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use tempfile::TempDir;
@@ -492,6 +678,16 @@ mod tests {
             median_ci95_half_width_ns: 300.0,
             checksum: None,
         }
+    }
+
+    fn run_series_for_bench(bench: BenchmarkId, config: Config, timestamp: Timestamp) -> RunSeries {
+        let mut series = sample_series(config);
+        series.bench = bench;
+        series.timestamp = timestamp;
+        for run in &mut series.runs {
+            run.timestamp = Timestamp::from_second(timestamp.as_second() + 1).unwrap();
+        }
+        series
     }
 
     #[test]
@@ -875,5 +1071,177 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn missing_results_lists_all_unseen_configs() {
+        let (_dir, storage) = temp_storage("pi3");
+
+        let missing = storage
+            .read_transaction(|tx| storage.missing_results(tx, None, &Config::new(), 10))
+            .unwrap();
+
+        // 2015-04 has 2 (build) x 2 (commit) configs, empty-config has 1.
+        assert_eq!(missing.len(), 5);
+    }
+
+    #[test]
+    fn missing_results_respects_limit() {
+        let (_dir, storage) = temp_storage("pi3");
+
+        let missing = storage
+            .read_transaction(|tx| storage.missing_results(tx, None, &Config::new(), 1))
+            .unwrap();
+
+        assert_eq!(missing.len(), 1);
+    }
+
+    #[test]
+    fn oldest_results_orders_and_limits() {
+        let (_dir, storage) = temp_storage("pi3");
+        let bench: BenchmarkId = "2015-04".try_into().unwrap();
+
+        let older_config = storage
+            .config_file()
+            .config_from_string("build=generic,commit=abc1234,host=pi3")
+            .unwrap();
+        let newer_config = storage
+            .config_file()
+            .config_from_string("build=native,commit=abc1234,host=pi3")
+            .unwrap();
+
+        let older = ResultsRow {
+            bench: bench.clone(),
+            config: older_config,
+            stable_series_timestamp: Timestamp::from_second(10).unwrap(),
+            last_series_timestamp: Timestamp::from_second(10).unwrap(),
+            suspicious_series_count: 0,
+        };
+
+        let newer = ResultsRow {
+            bench,
+            config: newer_config,
+            stable_series_timestamp: Timestamp::from_second(20).unwrap(),
+            last_series_timestamp: Timestamp::from_second(20).unwrap(),
+            suspicious_series_count: 0,
+        };
+
+        storage
+            .write_transaction(|tx| {
+                let mut series_newer = sample_series(newer.config.clone());
+                series_newer.timestamp = newer.last_series_timestamp;
+                storage.insert_run_series(tx, &series_newer)?;
+
+                let mut series_older = sample_series(older.config.clone());
+                series_older.timestamp = older.last_series_timestamp;
+                storage.insert_run_series(tx, &series_older)?;
+
+                storage.upsert_results(tx, &newer)?;
+                storage.upsert_results(tx, &older)
+            })
+            .unwrap();
+
+        let results = storage
+            .read_transaction(|tx| storage.oldest_results(tx, None, &Config::new(), 1))
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].last_series_timestamp.as_second(), 10);
+    }
+
+    #[test]
+    fn oldest_results_skips_removed_benchmarks() {
+        let (dir, storage) = temp_storage("pi3");
+        let bench_keep: BenchmarkId = "2015-04".try_into().unwrap();
+        let bench_drop: BenchmarkId = "empty-config".try_into().unwrap();
+
+        let config_keep = storage
+            .config_file()
+            .config_from_string("build=generic,commit=abc1234,host=pi3")
+            .unwrap();
+        let config_drop = storage
+            .config_file()
+            .config_from_string("host=pi3")
+            .unwrap();
+
+        storage
+            .write_transaction(|tx| {
+                storage.insert_run_series(
+                    tx,
+                    &run_series_for_bench(
+                        bench_keep.clone(),
+                        config_keep.clone(),
+                        Timestamp::from_second(20).unwrap(),
+                    ),
+                )?;
+                storage.insert_run_series(
+                    tx,
+                    &run_series_for_bench(
+                        bench_drop.clone(),
+                        config_drop.clone(),
+                        Timestamp::from_second(10).unwrap(),
+                    ),
+                )?;
+
+                storage.upsert_results(
+                    tx,
+                    &ResultsRow {
+                        bench: bench_keep.clone(),
+                        config: config_keep.clone(),
+                        stable_series_timestamp: Timestamp::from_second(20).unwrap(),
+                        last_series_timestamp: Timestamp::from_second(20).unwrap(),
+                        suspicious_series_count: 0,
+                    },
+                )?;
+                storage.upsert_results(
+                    tx,
+                    &ResultsRow {
+                        bench: bench_drop.clone(),
+                        config: config_drop.clone(),
+                        stable_series_timestamp: Timestamp::from_second(10).unwrap(),
+                        last_series_timestamp: Timestamp::from_second(10).unwrap(),
+                        suspicious_series_count: 0,
+                    },
+                )?;
+
+                Ok(())
+            })
+            .unwrap();
+
+        let results = storage
+            .read_transaction(|tx| storage.oldest_results(tx, None, &Config::new(), 10))
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].bench, bench_drop);
+        assert_eq!(results[1].bench, bench_keep);
+
+        drop(storage);
+
+        let json = r#"{
+            "config_keys": {
+                "build": {"values": ["generic", "native"]},
+                "commit": {"values": ["abc1234", "def4567"]},
+                "opt": {"values": ["x"]}
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "2015-04",
+                    "command": ["run", "{build}", "{commit}"],
+                    "config": {
+                        "build": ["generic", "native"],
+                        "commit": ["abc1234", "def4567"]
+                    }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(dir.path(), Some("pi3"), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file, "pi3").unwrap();
+
+        let results = storage
+            .read_transaction(|tx| storage.oldest_results(tx, None, &Config::new(), 10))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].bench, bench_keep);
     }
 }
