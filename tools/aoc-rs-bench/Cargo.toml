@@ -11,11 +11,14 @@ rust-version = "1.75.0"
 # Required to stop Cargo trying to parse the manifest at the root of the repo, which will fail for older version
 
 [dependencies]
-aoc = { git = "https://github.com/ictrobot/aoc-rs" }
-# Direct dependencies needed for glue v0-v2 which don't re-export the utils and year crates
-utils = { git = "https://github.com/ictrobot/aoc-rs", optional = true }
-year2015 = { git = "https://github.com/ictrobot/aoc-rs", optional = true }
-# rev required so that Cargo still has a compatible manifest to parse when building glue v0-v2 without a year2016 dep
+# Default to ab1e77c27919360630046d825583af16a1423d16, the first revision where all 4 crates are present.
+# This is required so that Cargo still has a compatible manifest to parse when building commits that don't have a
+# year2016 crate, and also prevents errors about unsupported manifest features on the first run without a preexisting
+# Cargo.lock file.
+aoc = { git = "https://github.com/ictrobot/aoc-rs", rev = "ab1e77c27919360630046d825583af16a1423d16" }
+# Direct dependencies needed for glue v0-v4 which don't re-export the utils and year crates
+utils = { git = "https://github.com/ictrobot/aoc-rs", rev = "ab1e77c27919360630046d825583af16a1423d16", optional = true }
+year2015 = { git = "https://github.com/ictrobot/aoc-rs", rev = "ab1e77c27919360630046d825583af16a1423d16", optional = true }
 year2016 = { git = "https://github.com/ictrobot/aoc-rs", rev = "ab1e77c27919360630046d825583af16a1423d16", optional = true }
 
 [features]
