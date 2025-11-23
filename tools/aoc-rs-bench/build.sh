@@ -75,10 +75,9 @@ check_checksum() {
 }
 
 build_binary() {
-    git -C "$tmp_clone" checkout "$commit" -q
-
     rust_version="$(
-        sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([0-9]\+\.[0-9]\+\).*/\1/p' "$tmp_clone/Cargo.toml" \
+        git -C "$tmp_clone" show "$commit:Cargo.toml" \
+          | sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([0-9]\+\.[0-9]\+\).*/\1/p' \
           | head -n1
     )"
     rust_version="${rust_version:-1.75}"
@@ -112,8 +111,34 @@ build_binary() {
         patch_crates+=("year2016")
     fi
 
+    # Patching to a git dependency is better than a path dependency to a temporary local checkout as it gives the
+    # dependency a stable Cargo `SourceId` for a given commit, which stabilizes the crate's metadata hash and the
+    # disambiguator used in symbol names. Without this symbol ordering and code layout can differ between rebuilds of
+    # the same commit, which causes measurable performance differences.
+    #
+    # This problem can be reproduced manually by setting RUSTFLAGS='-C metadata=$x' when building the runner, which
+    # changes the crate's metadata hash similar to changing the SourceId.
+    #
+    # For example, when benchmarking 2025-01 with the following config:
+    #     build=generic,commit=ec46015ca70754859e23d853113ef8682a1b0c92,multiversion=default,threads=1
+    # building eight executables with metadata=0 to metadata=7 produces mean runtimes ranging from ~24,000ns and
+    # ~28,000ns on an i5-13500 test system (running on isolated P cores). This is significantly more than the variance
+    # when rerunning or rebuilding the binary with the same metadata value, which is ~500-1000ns at most.
+    #
+    # perf shows that all binaries retire almost identical number of instructions (<0.1% different) but have large
+    # differences in bad speculation (ranging between ~20-40%) and frontend bound (~20-35%) metrics. cachegrind reports
+    # identical instructions across all the binaries.
+    #
+    # Disassembling the binaries confirms the hot functions are identical apart from differences in relative and
+    # absolute addresses and the function ordering. These small layout shifts therefore seem sufficient to cause large
+    # knock-on effects at a microarchitecture level.
     for crate in "${patch_crates[@]}"; do
-        args+=("--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\"")
+        # "https://www.github.com/ictrobot/aoc-rs.git" is a workaround for https://github.com/rust-lang/cargo/issues/5478
+        args+=(
+            "--config" "patch.\"$repo\".$crate.git = \"https://www.github.com/ictrobot/aoc-rs.git\""
+            "--config" "patch.\"$repo\".$crate.rev = \"$commit\""
+        )
+        # args+=("--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\"")
     done
 
     # rustup run --install "$rust_version" cargo tree "${args[@]}"
@@ -140,7 +165,7 @@ check_checksum
 
 tmp_clone="$(mktemp -d)"
 trap 'rm -rf "$tmp_clone"' EXIT
-git -C "$tmp_clone" clone "$repo" . -q
+git -C "$tmp_clone" clone --bare "$repo" . -q
 
 git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
 mv "$builds_commit_list.tmp" "$builds_commit_list"
