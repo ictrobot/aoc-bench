@@ -39,8 +39,9 @@ profiles=(
 # Changes to these files will rebuild all the binaries
 checksum_files=(
     "src/main.rs"
-    "build.sh"
     "Cargo.toml"
+    "build.sh"
+    "rustc-wrapper-strip-metadata.sh"
 )
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
@@ -141,7 +142,15 @@ build_binary() {
         # args+=("--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\"")
     done
 
-    # rustup run --install "$rust_version" cargo tree "${args[@]}"
+    # Inject a wrapper around cargo's rustc calls to strip all "-C metadata=" arguments.
+    #
+    # This seems to prevent similar issues to above but across multiple commits, helping to avoid cases where 2 adjacent
+    # commits without any rust code changes can still have a measurable performance difference.
+    #
+    # This isn't safe in general, but seems to work fine here where the set of dependencies is known and there's no
+    # duplicates with e.g. different versions.
+    export RUSTC_WRAPPER='./rustc-wrapper-strip-metadata.sh'
+
     if [[ "$profile" == "native" ]]; then
         export RUSTFLAGS='-C target_cpu=native'
     else
@@ -156,6 +165,9 @@ build_binary() {
         echo "No such binary $executable after building $commit" >&2
         exit 1
     fi
+
+    unset RUSTFLAGS
+    unset RUSTC_WRAPPER
 
     mv "$executable" "$build"
 }
@@ -186,4 +198,4 @@ for profile in "${profiles[@]}"; do
     done 3< "$builds_commit_list"
 done
 
-# TODO add lto profile with lto and cgu=1
+# TODO add lto profile
