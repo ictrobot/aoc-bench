@@ -29,3 +29,7 @@ glue-v3 = ["utils", "year2015"]
 glue-v4 = ["utils", "year2015", "year2016"]
 glue-v5 = []
 glue-v6 = []
+
+[profile.release]
+incremental = false
+codegen-units = 1
