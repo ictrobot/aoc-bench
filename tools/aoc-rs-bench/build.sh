@@ -31,9 +31,12 @@ framework_revisions=(
     "421df7084cf3de9e7279ca9b841fed222c6b33fa" # glue-v6 One DATE constant instead of YEAR and DAY
 )
 
+# Skip native without LTO to reduce the total number of configurations.
+# It also means the profiles follow a logical progression where subsequent profiles only enable more features
 profiles=(
     "generic"
-    "native"
+    "generic_lto"
+    "native_lto"
 )
 
 # Changes to these files will rebuild all the binaries
@@ -151,10 +154,16 @@ build_binary() {
     # duplicates with e.g. different versions.
     export RUSTC_WRAPPER='./rustc-wrapper-strip-metadata.sh'
 
-    if [[ "$profile" == "native" ]]; then
+    if [[ "$profile" == "native"* ]]; then
         export RUSTFLAGS='-C target_cpu=native'
     else
         export RUSTFLAGS=''
+    fi
+
+    if [[ "$profile" == *"_lto" ]]; then
+        export CARGO_PROFILE_RELEASE_LTO="fat"
+    else
+        export CARGO_PROFILE_RELEASE_LTO="false"
     fi
 
     executable="$(
@@ -166,6 +175,7 @@ build_binary() {
         exit 1
     fi
 
+    unset CARGO_PROFILE_RELEASE_LTO
     unset RUSTFLAGS
     unset RUSTC_WRAPPER
 
@@ -189,7 +199,6 @@ export CARGO_TARGET_DIR="$tmp_target_dir"
 for profile in "${profiles[@]}"; do
     mkdir -p "$builds_dir/$profile"
 
-    # Inner loop over commit instead of profile to make better use of incremental builds
     while read -r commit <&3; do
         build="$builds_dir/$profile/$commit"
         if [[ ! -f "$build" || ! -x "$build" ]]; then
@@ -197,5 +206,3 @@ for profile in "${profiles[@]}"; do
         fi
     done 3< "$builds_commit_list"
 done
-
-# TODO add lto profile

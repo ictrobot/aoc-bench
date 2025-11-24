@@ -19,7 +19,7 @@ class BuildPuzzleDetails(TypedDict):
 
 
 class MatrixBuilder:
-    BUILDS = ["generic", "native"]
+    BUILDS = ["generic", "generic_lto", "native_lto"]
 
     def __init__(self, data_dir: Path, inputs_dir: Path):
         self.data_dir = data_dir
