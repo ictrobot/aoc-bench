@@ -63,7 +63,7 @@
 
 ### 3.1 Run Series Execution
 
-- [x] Implement 7-run loop (RUN_SERIES_COUNT)
+- [x] Implement fixed 3-run loop (RUN_SERIES_COUNT)
 - [x] Store individual run results (timestamp, mean, CI, mode, intercept, outlier_count, samples)
 - [x] Sort runs by mean_ns_per_iter
 - [x] Calculate median run statistics

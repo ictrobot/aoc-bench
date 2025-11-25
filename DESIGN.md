@@ -612,7 +612,7 @@ const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
 
 const MIN_SAMPLES: usize = 32;
 const CHECK_EVERY: usize = 32;
-const RUN_SERIES_COUNT: usize = 7;  // Number of runs in a series
+const RUN_SERIES_COUNT: usize = 3;  // Number of runs in a series
 ```
 
 Process:
@@ -625,7 +625,7 @@ Process:
     * Append `(N_i, T_i)` to accumulated data
     * When we have at least `MIN_SAMPLES`, check CI every `CHECK_EVERY` samples to determine if we can stop
 
-* **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (default 7) to collect multiple independent runs
+* **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (fixed 3) to collect multiple independent runs
 
   For each run a new instance of the benchmark command is run, and the process is repeated (including warmup).
 
