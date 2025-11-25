@@ -604,7 +604,12 @@ T = [T_1, T_2, ..., T_n]
 Constants:
 
 ```rust
-const WARMUP_SAMPLES: usize = 32;
+const MIN_WARMUP_SAMPLES: usize = 4;
+const MIN_WARMUP_TIME_NS: u64 = 200_000_000; // 200 ms
+const MAX_WARMUP_TIME_NS: u64 = 15_000_000_000; // 15 s
+const STABILITY_WINDOW: usize = 8;
+const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
+
 const MIN_SAMPLES: usize = 32;
 const CHECK_EVERY: usize = 32;
 const RUN_SERIES_COUNT: usize = 7;  // Number of runs in a series
@@ -612,7 +617,9 @@ const RUN_SERIES_COUNT: usize = 7;  // Number of runs in a series
 
 Process:
 
-* **Warmup**: ignore the first `WARMUP_SAMPLES` samples
+* **Warmup**: collect samples until both minima are met (≥4 samples and ≥200ms total),
+  then stop when either (a) the last 8 warmup samples are all within ±5% of their mean,
+  or (b) cumulative warmup time reaches 15s. All warmup samples are ignored for stats.
 
 * After warmup, for each new sample:
     * Append `(N_i, T_i)` to accumulated data

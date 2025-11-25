@@ -53,7 +53,7 @@
 
 ### 2.3 Warmup and Sampling Logic
 
-- [x] Implement warmup (skip first 16 samples)
+- [x] Implement warmup (dynamic: ≥4 samples and ≥200ms, then stop when last 8 samples are within 5% or at 15s cap)
 - [x] Implement MIN_SAMPLES check (32)
 - [x] Implement CHECK_EVERY interval (32)
 - [x] Integrate CI check and outlier check at intervals

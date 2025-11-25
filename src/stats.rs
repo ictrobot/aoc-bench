@@ -9,20 +9,6 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 
-const WARMUP_SAMPLES: usize = 32;
-const MIN_SAMPLES: usize = 32;
-const CHECK_EVERY: usize = 32;
-const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;
-const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;
-const TARGET_REL_CI: f64 = 0.01; // 1%
-const MAX_SAMPLES: usize = 1024;
-const OUTLIER_MAD_NORMALIZATION: f64 = 1.482_602_218_505_602;
-const OUTLIER_MAD_THRESHOLD: f64 = 3.5;
-const OUTLIER_MAX_FRACTION: f64 = 0.10;
-const OUTLIER_MIN_ITERATIONS: usize = 256;
-const TREND_CORRELATION_THRESHOLD: f64 = 0.5;
-const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;
-
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[must_use]
@@ -48,7 +34,7 @@ pub struct Sample {
 #[derive(Debug, Clone)]
 pub struct StatsAccumulator {
     samples: Vec<Sample>,
-    warmup_remaining: usize,
+    warmup: WarmupTracker,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,28 +72,50 @@ pub struct StatsResult {
 }
 
 impl StatsAccumulator {
+    // Sampling behavior
+    const MIN_SAMPLES: usize = 32;
+    const CHECK_EVERY: usize = 32;
+    const MAX_SAMPLES: usize = 1024;
+
+    // Bootstrap
+    const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;
+    const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;
+    const TARGET_REL_CI: f64 = 0.01; // 1%
+
+    // Outlier detection
+    const OUTLIER_MAD_NORMALIZATION: f64 = 1.482_602_218_505_602;
+    const OUTLIER_MAD_THRESHOLD: f64 = 3.5;
+    const OUTLIER_MAX_FRACTION: f64 = 0.10;
+    const OUTLIER_MIN_ITERATIONS: usize = 256;
+
+    // Trend detection
+    const TREND_CORRELATION_THRESHOLD: f64 = 0.5;
+    const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;
+
     #[must_use]
     pub fn new(with_warmup: bool) -> Self {
         StatsAccumulator {
             samples: Vec::new(),
-            warmup_remaining: if with_warmup { WARMUP_SAMPLES } else { 0 },
+            warmup: if with_warmup {
+                WarmupTracker::enabled()
+            } else {
+                WarmupTracker::disabled()
+            },
         }
     }
 
-    /// Add a sample, handling warmup by skipping the first `WARMUP_SAMPLES`
+    /// Add a sample, handling warmup until stability/time thresholds are met
     ///
     /// Returns the current state, see [`StatsAccumulator::state`].
     pub fn add_sample(&mut self, iters: u64, total_ns: u64) -> StatsState {
         trace!(iters, total_ns, "new sample");
-        if self.warmup_remaining > 0 {
-            self.warmup_remaining -= 1;
-            if self.warmup_remaining == 0 {
-                trace!("warmup complete");
-            }
-        } else {
+        if self.warmup.is_done() {
             self.samples.push(Sample { iters, total_ns });
+            self.state()
+        } else {
+            self.warmup.push(iters, total_ns);
+            StatsState::MoreSamplesNeeded
         }
-        self.state()
     }
 
     /// Returns the number of samples collected (excluding warmup samples)
@@ -129,12 +137,12 @@ impl StatsAccumulator {
     /// - `Done` if confidence interval has converged within target relative width
     /// - `Abort` if too many outliers detected or failed to converge after maximum samples
     pub fn state(&self) -> StatsState {
-        if self.samples.len() < MIN_SAMPLES {
+        if self.samples.len() < Self::MIN_SAMPLES {
             return StatsState::MoreSamplesNeeded;
         }
 
         // Check every CHECK_EVERY samples after MIN_SAMPLES
-        if !(self.samples.len() - MIN_SAMPLES).is_multiple_of(CHECK_EVERY) {
+        if !(self.samples.len() - Self::MIN_SAMPLES).is_multiple_of(Self::CHECK_EVERY) {
             return StatsState::MoreSamplesNeeded;
         }
 
@@ -151,8 +159,8 @@ impl StatsAccumulator {
 
         // Check for trend in residuals
         let trend_correlation = Self::compute_residual_trend_correlation(&residuals);
-        if trend_correlation.abs() > TREND_CORRELATION_THRESHOLD {
-            return if self.samples.len() < TREND_CORRELATION_MIN_ITERATIONS {
+        if trend_correlation.abs() > Self::TREND_CORRELATION_THRESHOLD {
+            return if self.samples.len() < Self::TREND_CORRELATION_MIN_ITERATIONS {
                 debug!(
                     samples = self.samples.len(),
                     trend_correlation,
@@ -167,9 +175,10 @@ impl StatsAccumulator {
         // Check for too many outliers
         let outlier_count = Self::count_outliers(residuals);
         let outlier_fraction = outlier_count as f64 / self.samples.len() as f64;
-        if outlier_fraction > OUTLIER_MAX_FRACTION {
-            return if self.samples.len() < OUTLIER_MIN_ITERATIONS
-                && (outlier_count as f64 / OUTLIER_MIN_ITERATIONS as f64) < OUTLIER_MAX_FRACTION
+        if outlier_fraction > Self::OUTLIER_MAX_FRACTION {
+            return if self.samples.len() < Self::OUTLIER_MIN_ITERATIONS
+                && (outlier_count as f64 / Self::OUTLIER_MIN_ITERATIONS as f64)
+                    < Self::OUTLIER_MAX_FRACTION
             {
                 debug!(
                     samples = self.samples.len(),
@@ -189,9 +198,9 @@ impl StatsAccumulator {
         // Check for CI convergence
         let ci = self.bootstrap_ci(mode, false);
         let relative_ci_half_width = ci.half_width / mean;
-        if relative_ci_half_width <= TARGET_REL_CI {
+        if relative_ci_half_width <= Self::TARGET_REL_CI {
             StatsState::Done
-        } else if self.samples.len() < MAX_SAMPLES {
+        } else if self.samples.len() < Self::MAX_SAMPLES {
             debug!(
                 samples = self.samples.len(),
                 relative_ci_half_width, "ci too wide, waiting for more samples"
@@ -380,9 +389,9 @@ impl StatsAccumulator {
     /// Returns the lower and upper CI bounds and half-width of the interval.
     pub fn bootstrap_ci(&self, mode: EstimationMode, is_final: bool) -> BootstrapResult {
         let n_bootstrap = if is_final {
-            FINAL_BOOTSTRAP_SAMPLES
+            Self::FINAL_BOOTSTRAP_SAMPLES
         } else {
-            QUICK_BOOTSTRAP_SAMPLES
+            Self::QUICK_BOOTSTRAP_SAMPLES
         };
 
         if self.samples.is_empty() {
@@ -493,12 +502,12 @@ impl StatsAccumulator {
         let mad = abs_devs[Self::percentile_index(abs_devs.len(), 0.5)];
 
         // Modified Z-scores, using consistency constant for normal distribution
-        let mad_scaled = mad * OUTLIER_MAD_NORMALIZATION;
+        let mad_scaled = mad * Self::OUTLIER_MAD_NORMALIZATION;
 
         // Count outliers
         residuals
             .iter()
-            .filter(|&&r| ((r - median) / mad_scaled).abs() > OUTLIER_MAD_THRESHOLD)
+            .filter(|&&r| ((r - median) / mad_scaled).abs() > Self::OUTLIER_MAD_THRESHOLD)
             .count()
     }
 
@@ -608,14 +617,131 @@ impl Default for StatsAccumulator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct WarmupTracker {
+    done: bool,
+    total_samples: usize,
+    total_time_ns: u64,
+    last_per_iter: [f64; WarmupTracker::STABILITY_WINDOW],
+}
+
+impl WarmupTracker {
+    const MIN_SAMPLES: usize = 4;
+    const MIN_TIME_NS: u64 = 200_000_000; // 200 ms
+    const MAX_TIME_NS: u64 = 15_000_000_000; // 15 s
+    const STABILITY_WINDOW: usize = 8;
+    const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
+
+    fn enabled() -> Self {
+        Self {
+            done: false,
+            total_samples: 0,
+            total_time_ns: 0,
+            last_per_iter: [0.0; _],
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            done: true,
+            total_samples: 0,
+            total_time_ns: 0,
+            last_per_iter: [0.0; _],
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// Add a warmup sample.
+    ///
+    /// Returns true if warmup is done.
+    fn push(&mut self, iters: u64, total_ns: u64) -> bool {
+        if self.is_done() {
+            return true;
+        }
+        if iters == 0 {
+            return false;
+        }
+
+        let per_iter = total_ns as f64 / iters as f64;
+        self.last_per_iter[self.total_samples % Self::STABILITY_WINDOW] = per_iter;
+        self.total_samples += 1;
+        self.total_time_ns += total_ns;
+
+        let total_seconds = self.total_time_ns as f64 / 1_000_000_000.0;
+
+        // Cannot finish before minimum sample/time requirements.
+        if self.total_samples < Self::MIN_SAMPLES || self.total_time_ns < Self::MIN_TIME_NS {
+            return false;
+        }
+
+        // Hard cap on time.
+        if self.total_time_ns >= Self::MAX_TIME_NS {
+            debug!(
+                reason = "maximum time limit",
+                samples = self.total_samples,
+                seconds = total_seconds,
+                "warmup complete"
+            );
+
+            self.done = true;
+            return true;
+        }
+
+        // Need a full window to assess stability.
+        if self.total_samples < Self::STABILITY_WINDOW {
+            return false;
+        }
+
+        let min = self
+            .last_per_iter
+            .iter()
+            .fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = self
+            .last_per_iter
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let mean: f64 = self.last_per_iter.iter().sum::<f64>() / Self::STABILITY_WINDOW as f64;
+
+        if mean == 0.0 {
+            return false;
+        }
+
+        let rel_range = (max - min) / mean;
+        if rel_range <= Self::STABILITY_TOLERANCE {
+            debug!(
+                reason = "within stability target",
+                samples = self.total_samples,
+                seconds = total_seconds,
+                "warmup complete"
+            );
+
+            self.done = true;
+            return true;
+        }
+
+        false
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum StatsError {
-    #[error("too many outliers detected: {outlier_count}/{samples} ({:.1}% > {:.1}%)", (*.outlier_count as f64 / *.samples as f64) * 100.0, OUTLIER_MAX_FRACTION * 100.0)]
+    #[error(
+        "too many outliers detected: {outlier_count}/{samples} ({:.1}% > {:.1}%)",
+        (*.outlier_count as f64 / *.samples as f64) * 100.0,
+        StatsAccumulator::OUTLIER_MAX_FRACTION * 100.0
+    )]
     TooManyOutliers {
         samples: usize,
         outlier_count: usize,
     },
-    #[error("failed to converge after {samples} samples: relative CI half-width {:.1}% > target {:.1}%", *.relative_ci_half_width * 100.0, TARGET_REL_CI * 100.0)]
+    #[error(
+        "failed to converge after {samples} samples: relative CI half-width {:.1}% > target {:.1}%",
+        *.relative_ci_half_width * 100.0,
+        StatsAccumulator::TARGET_REL_CI * 100.0
+    )]
     FailedToConverge {
         samples: usize,
         relative_ci_half_width: f64,
@@ -770,39 +896,79 @@ mod tests {
 
     // Phase 2 tests: Warmup and sampling logic
     #[test]
-    fn test_warmup_samples_excluded() {
+    fn test_warmup_stops_on_stability_after_minimums() {
         let mut acc = StatsAccumulator::new(true);
 
-        // Add WARMUP_SAMPLES (16) with high noise - these are skipped
-        for _ in 0..WARMUP_SAMPLES {
-            let _ = acc.add_sample(100, 100_000); // 1000 ns/iter (wrong - discarded)
+        // 8 stable samples, 30ms each => 240ms total (meets min time) and window full
+        for i in 0..8 {
+            let state = acc.add_sample(100, 30_000_000); // 300_000 ns/iter
+            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            // Warmup should finish after 8th sample
+            if i == 7 {
+                assert_eq!(acc.sample_count(), 0);
+            }
         }
 
-        // Add good samples after warmup
-        for _ in 0..20 {
-            let _ = acc.add_sample(100, 5000); // 50 ns/iter (correct - used)
+        // First post-warmup sample is recorded
+        let state = acc.add_sample(100, 30_000_000);
+        assert_eq!(acc.sample_count(), 1);
+        assert!(matches!(state, StatsState::MoreSamplesNeeded));
+    }
+
+    #[test]
+    fn test_warmup_respects_min_time_before_stability() {
+        let mut acc = StatsAccumulator::new(true);
+
+        // 7 samples of 25ms each => 175ms (below 200ms minimum)
+        for _ in 0..7 {
+            let state = acc.add_sample(100, 25_000_000);
+            assert!(matches!(state, StatsState::MoreSamplesNeeded));
         }
 
-        // Should only use post-warmup samples
-        let mean = acc.compute_weighted_mean();
-        assert!(
-            (mean - 50.0).abs() < 0.001,
-            "Mean should be ~50, got {mean}"
-        );
+        // 8th sample crosses 200ms but only now can evaluate stability; still warmup
+        let state = acc.add_sample(100, 25_000_000);
+        assert!(matches!(state, StatsState::MoreSamplesNeeded));
+        assert_eq!(acc.sample_count(), 0);
+
+        // 9th sample should be the first recorded if stable window satisfied
+        let _ = acc.add_sample(100, 25_000_000);
+        assert_eq!(acc.sample_count(), 1);
+    }
+
+    #[test]
+    fn test_warmup_caps_at_max_time() {
+        let mut acc = StatsAccumulator::new(true);
+
+        // Alternate fast/slow to avoid stability; totals reach cap exactly at 15th sample
+        for i in 0..15 {
+            let total_ns = if i % 2 == 0 {
+                1_000_000_000
+            } else {
+                1_100_000_000
+            };
+            let state = acc.add_sample(100, total_ns);
+            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+        }
+
+        assert_eq!(acc.sample_count(), 0, "Warmup samples should be skipped");
+
+        // Next sample should be recorded because cap reached on previous sample
+        let _ = acc.add_sample(100, 1_000_000_000);
+        assert_eq!(acc.sample_count(), 1);
     }
 
     #[test]
     fn test_state_transitions() {
         let mut acc = StatsAccumulator::new(true);
 
-        // First 16 are warmup (automatically skipped)
-        for _ in 0..WARMUP_SAMPLES {
-            let state = acc.add_sample(100, 5000);
+        // Warmup: 8 stable samples, 30ms each
+        for _ in 0..8 {
+            let state = acc.add_sample(100, 30_000_000);
             assert!(matches!(state, StatsState::MoreSamplesNeeded));
         }
 
         // Add samples until MIN_SAMPLES
-        for _ in 0..MIN_SAMPLES - 1 {
+        for _ in 0..StatsAccumulator::MIN_SAMPLES - 1 {
             let state = acc.add_sample(100, 5000);
             assert!(matches!(state, StatsState::MoreSamplesNeeded));
         }
@@ -817,16 +983,16 @@ mod tests {
     fn test_max_samples_abort() {
         let mut acc = StatsAccumulator::new(false);
 
-        for i in 0..MAX_SAMPLES - 1 {
+        for i in 0..StatsAccumulator::MAX_SAMPLES - 1 {
             assert_eq!(
                 acc.add_sample(
                     100,
                     if i.is_multiple_of(16) {
                         0
                     } else if i.is_multiple_of(2) {
-                        (MAX_SAMPLES + i) as u64
+                        (StatsAccumulator::MAX_SAMPLES + i) as u64
                     } else {
-                        (MAX_SAMPLES - i) as u64
+                        (StatsAccumulator::MAX_SAMPLES - i) as u64
                     }
                 ),
                 StatsState::MoreSamplesNeeded
@@ -836,7 +1002,7 @@ mod tests {
         assert!(matches!(
             acc.add_sample(100, 0),
             StatsState::Abort(StatsError::FailedToConverge {
-                samples: MAX_SAMPLES,
+                samples: StatsAccumulator::MAX_SAMPLES,
                 relative_ci_half_width: _,
             })
         ));
@@ -847,8 +1013,13 @@ mod tests {
     fn test_bootstrap_ci_per_iter_mode() {
         let mut acc = StatsAccumulator::new(true);
 
+        // Warmup: 8 stable samples
+        for _ in 0..8 {
+            let _ = acc.add_sample(100, 30_000_000);
+        }
+
         // Add consistent samples (low variance)
-        for _ in 0..100 + WARMUP_SAMPLES {
+        for _ in 0..100 {
             let _ = acc.add_sample(100, 5000); // Exactly 50 ns/iter
         }
 

@@ -3,7 +3,7 @@
 use crate::config::{BenchmarkId, BenchmarkVariant, Config};
 use crate::host_config::{CpuAffinity, HostConfig};
 use crate::protocol::{
-    ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
+    parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
 };
 use crate::run::{Run, RunSeries};
 use crate::stats::{StatsAccumulator, StatsError, StatsState};
@@ -14,7 +14,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 use tempfile::TempDir;
-use tracing::{Span, info, info_span, trace, trace_span, warn};
+use tracing::{info, info_span, trace, trace_span, warn, Span};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -516,7 +516,12 @@ mod tests {
 
         let mut tmp_file = NamedTempFile::new().unwrap();
         tmp_file
-            .write_all("SAMPLE\t1000\t50000\n".to_string().repeat(100).as_bytes())
+            .write_all(
+                "SAMPLE\t1000\t50000000\n"
+                    .to_string()
+                    .repeat(100)
+                    .as_bytes(),
+            )
             .unwrap();
 
         let benchmark = create_benchmark(Some(tmp_file.path().to_owned()));
@@ -529,7 +534,7 @@ mod tests {
         )
         .unwrap();
         let result = runner.run_single().unwrap();
-        assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert!((result.stats.mean_ns_per_iter - 50000.0).abs() < 0.001);
     }
 
     #[test]
