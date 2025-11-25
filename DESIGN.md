@@ -24,7 +24,7 @@ The `aoc-bench` tool provides the following subcommands:
     * Reads benchmark definitions and command templates from config file
     * Substitutes `{key}` placeholders with config values
     * Spawns child processes and collects SAMPLE output
-    * Performs run series (default: 7 runs) and stores results
+    * Performs run series and stores results
 
 * **`run`** - Periodically re-run benchmarks for drift detection
     * Automatically selects (bench, config) pairs to re-run
@@ -610,8 +610,11 @@ const MAX_WARMUP_TIME_NS: u64 = 15_000_000_000; // 15 s
 const STABILITY_WINDOW: usize = 8;
 const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
 
-const MIN_SAMPLES: usize = 32;
-const CHECK_EVERY: usize = 32;
+const MIN_SAMPLES: usize = 16;
+const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds of measured (post-warmup) samples
+const CHECK_EVERY: usize = 16;
+const MAX_SAMPLES: usize = 1024;
+
 const RUN_SERIES_COUNT: usize = 3;  // Number of runs in a series
 ```
 
@@ -623,7 +626,9 @@ Process:
 
 * After warmup, for each new sample:
     * Append `(N_i, T_i)` to accumulated data
-    * When we have at least `MIN_SAMPLES`, check CI every `CHECK_EVERY` samples to determine if we can stop
+    * When we have at least `MIN_SAMPLES` and total measured sample time reaches `MIN_TOTAL_TIME_NS`, check CI every
+      `CHECK_EVERY` samples
+    * Stop when CI target is met or `MAX_SAMPLES` is hit
 
 * **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (fixed 3) to collect multiple independent runs
 
@@ -777,8 +782,9 @@ Algorithm:
 The higher threshold (3.5 vs 3.0) and tolerance (10% vs 5%) account for the stricter detection method. The delayed
 abort logic prevents premature failure when outliers are present early but may dilute with more samples.
 
-The outlier detection runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`), alongside the CI
-width check, allowing early termination (as noisy systems take far longer to converge).
+The outlier detection runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`/
+`MIN_TOTAL_TIME_NS`), alongside the CI width check, allowing early termination (as noisy systems take far
+longer to converge).
 
 ## 7.6 Temporal correlation detection (drift analysis)
 
@@ -825,8 +831,8 @@ Spearman rank correlation is used as it's robust to outliers and detects monoton
 
 A strong temporal correlation indicates the benchmark environment is non-stationary, making results unreliable.
 
-The temporal correlation check runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`),
-alongside outlier and CI checks, allowing early termination when drift is detected.
+The temporal correlation check runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`/
+`MIN_TOTAL_TIME_NS`), alongside outlier and CI checks, allowing early termination when drift is detected.
 
 ## 7.7 Output fields (per individual run)
 

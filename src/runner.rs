@@ -439,7 +439,7 @@ mod tests {
         let benchmark = Benchmark::new(
             "yes".try_into().unwrap(),
             ConfigProduct::default(),
-            vec!["yes".into(), "SAMPLE\t1000\t50000".into()],
+            vec!["yes".into(), "SAMPLE\t1000\t20000000".into()],
             None,
             None,
         )
@@ -458,7 +458,7 @@ mod tests {
 
         // Verify all fields are properly populated
         let mut result = result.unwrap();
-        assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert!((result.stats.mean_ns_per_iter - 20_000.0).abs() < 0.001);
         assert!((result.stats.ci95_half_width_ns - 0.0).abs() < 0.001); // Can be 0 for identical samples
         assert_eq!(result.stats.mode, EstimationMode::PerIter);
         assert!(result.stats.intercept_ns.is_none());
@@ -466,16 +466,16 @@ mod tests {
             s,
             Sample {
                 iters: 1000,
-                total_ns: 50000
+                total_ns: 20_000_000
             }
         )));
-        assert!((result.stats.mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert!((result.stats.mean_ns_per_iter - 20_000.0).abs() < 0.001);
 
         // Check series result
         let mut series_result = runner.run_series().unwrap();
         assert_eq!(series_result.schema, 1);
         assert_eq!(series_result.bench, "yes".try_into().unwrap());
-        assert!((series_result.median_mean_ns_per_iter - 50.0).abs() < 0.001);
+        assert!((series_result.median_mean_ns_per_iter - 20_000.0).abs() < 0.001);
         assert!((series_result.median_ci95_half_width_ns - 0.0).abs() < 0.001);
 
         // Check runs match, ignoring timestamp

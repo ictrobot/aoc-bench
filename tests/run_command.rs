@@ -17,7 +17,7 @@ fn write_config(dir: &Path) {
   "benchmarks": [
     {
       "benchmark": "bench",
-      "command": ["yes", "SAMPLE\t1000\t50000\tdata={build}"],
+      "command": ["yes", "SAMPLE\t123\t34000000\tdata={build}"],
       "config": { "build": ["opt"] }
     }
   ]
@@ -68,7 +68,7 @@ fn run_command_stores_run_series() {
 
     assert_eq!(v["bench"], "bench");
     assert_eq!(v["config"]["build"], "opt");
-    assert_eq!(v["median_mean_ns_per_iter"], 50.0);
+    assert!((v["median_mean_ns_per_iter"].as_f64().unwrap() - 276_422.764).abs() < 0.001);
 }
 
 #[test]
