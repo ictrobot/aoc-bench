@@ -19,7 +19,7 @@ use tracing::{info, info_span, trace, trace_span, warn, Span};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 
-const TIMEOUT_SECS: u64 = 120; // 2 minutes
+const TIMEOUT_SECS: u64 = 600; // 10 minutes
 const RUN_SERIES_COUNT: usize = 3; // Number of runs in a series
 const MAX_RETRIES: usize = 5; // Maximum retries on failure
 
@@ -70,7 +70,7 @@ impl Runner {
         })
     }
 
-    /// Execute a complete run series (fixed 3 runs) with retry logic
+    /// Execute a complete run series (fixed 3 runs) with no retries on timeout
     ///
     /// Returns a `RunSeries` containing all runs sorted by mean, with median statistics.
     #[tracing::instrument(skip(self))]
@@ -93,6 +93,10 @@ impl Runner {
                         );
                         runs.push(run_result);
                         break;
+                    }
+                    Err(e @ RunError::Timeout) => {
+                        warn!(error = %e, "run timed out, not retrying");
+                        return Err(e);
                     }
                     Err(e) if retry < MAX_RETRIES - 1 => {
                         warn!(

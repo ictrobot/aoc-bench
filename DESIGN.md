@@ -736,7 +736,7 @@ Algorithm (depends on mode):
    ```text
    stop if relative_half_width <= TARGET_REL_CI (default: 0.01 = 1%)
    or n_samples >= MAX_SAMPLES (default: 1024)
-   or run_time >= TIMEOUT (default: 120s)
+  or run_time >= TIMEOUT (default: 600s)
    ```
 
 ## 7.5 Outlier detection and noisy system warnings
@@ -1175,7 +1175,7 @@ The system must handle errors gracefully and fail safely. Here are the specified
 ## 10.2 Process errors
 
 * **Child process crashes**: Fail the run, do not store partial results.
-* **Child process hangs**: After `TIMEOUT` (default 120s), kill process and fail, do not store the partial results.
+* **Child process hangs**: After `TIMEOUT` (default 600s), kill process and fail, do not store the partial results.
 * **Premature EOF**: Fail the run, do not store partial results.
 
 ## 10.3 Storage errors
