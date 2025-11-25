@@ -104,7 +104,13 @@ impl Runner {
                             "run failed, retrying"
                         );
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "run failed, no retries left"
+                        );
+                        return Err(e);
+                    }
                 }
             }
         }
