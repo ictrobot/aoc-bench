@@ -166,7 +166,16 @@ impl Runner {
             }
 
             let Some(Ok(line)) = lines.next() else {
-                return if let Ok(Some(code)) = child.child.try_wait()
+                let mut result = child.child.try_wait();
+
+                if let Ok(None) = result {
+                    // Try to wait for the child to finish so its error code can be included in the
+                    // error message
+                    std::thread::sleep(Duration::from_millis(250));
+                    result = child.child.try_wait();
+                }
+
+                return if let Ok(Some(code)) = result
                     && !code.success()
                 {
                     Err(RunError::ProcessCrashed(code.code()))
