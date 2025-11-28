@@ -17,10 +17,11 @@ pub enum EstimationMode {
     PerIter,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[must_use]
 pub enum StatsState {
-    MoreSamplesNeeded,
+    MoreSamplesRequired,
+    MoreSamplesOptional,
     Abort(StatsError),
     Done,
 }
@@ -36,6 +37,8 @@ pub struct StatsAccumulator {
     samples: Vec<Sample>,
     warmup: WarmupTracker,
     total_time_ns: u64,
+    last_state_check_ns: u64,
+    last_state: StatsState,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +79,7 @@ impl StatsAccumulator {
     // Sampling behavior
     const MIN_SAMPLES: usize = 16;
     const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds
-    const CHECK_EVERY: usize = 16;
+    const CHECK_EVERY_NS: u64 = 200_000_000; // 200 ms
     const MAX_SAMPLES: usize = 1024;
 
     // Bootstrap
@@ -102,21 +105,40 @@ impl StatsAccumulator {
                 WarmupTracker::disabled()
             },
             total_time_ns: 0,
+            last_state_check_ns: 0,
+            last_state: StatsState::MoreSamplesRequired,
         }
     }
 
     /// Add a sample, handling warmup until stability/time thresholds are met
     ///
-    /// Returns the current state, see [`StatsAccumulator::state`].
+    /// Returns the cached accumulator's state (see [`StatsAccumulator::state`]) which should be
+    /// used to determine if the sampling process should continue. For performance reasons the state
+    /// is not recomputed for every sample.
     pub fn add_sample(&mut self, iters: u64, total_ns: u64) -> StatsState {
         trace!(iters, total_ns, "new sample");
         if self.warmup.is_done() {
             self.samples.push(Sample { iters, total_ns });
             self.total_time_ns = self.total_time_ns.saturating_add(total_ns);
-            self.state()
+
+            // Update the state:
+            //  - every CHECK_EVERY_NS of total sample time
+            //  - if the total time has saturated (to ensure the state is still refreshed)
+            //  - if the sample count has reached the maximum
+            let since_last_check_ns = self.total_time_ns.saturating_sub(self.last_state_check_ns);
+            if since_last_check_ns >= Self::CHECK_EVERY_NS
+                || self.total_time_ns == u64::MAX
+                || self.samples.len() >= Self::MAX_SAMPLES
+            {
+                self.last_state_check_ns = self.total_time_ns;
+                self.last_state = self.state();
+            }
+
+            self.last_state
         } else {
             self.warmup.push(iters, total_ns);
-            StatsState::MoreSamplesNeeded
+
+            StatsState::MoreSamplesRequired
         }
     }
 
@@ -141,16 +163,11 @@ impl StatsAccumulator {
     /// - `Abort` if a strong temporal trend is detected
     pub fn state(&self) -> StatsState {
         if self.samples.len() < Self::MIN_SAMPLES {
-            return StatsState::MoreSamplesNeeded;
+            return StatsState::MoreSamplesRequired;
         }
 
         if self.total_time_ns < Self::MIN_TOTAL_TIME_NS && self.samples.len() < Self::MAX_SAMPLES {
-            return StatsState::MoreSamplesNeeded;
-        }
-
-        // Check every CHECK_EVERY samples after MIN_SAMPLES
-        if !(self.samples.len() - Self::MIN_SAMPLES).is_multiple_of(Self::CHECK_EVERY) {
-            return StatsState::MoreSamplesNeeded;
+            return StatsState::MoreSamplesRequired;
         }
 
         let mode = self.detect_mode();
@@ -173,7 +190,7 @@ impl StatsAccumulator {
                     trend_correlation,
                     "trend correlation but small sample size, waiting for more samples"
                 );
-                StatsState::MoreSamplesNeeded
+                StatsState::MoreSamplesRequired
             } else {
                 StatsState::Abort(StatsError::TrendDetected { trend_correlation })
             };
@@ -197,11 +214,14 @@ impl StatsAccumulator {
                 samples = self.samples.len(),
                 relative_ci_half_width, "ci too wide, waiting for more samples"
             );
-            StatsState::MoreSamplesNeeded
+            StatsState::MoreSamplesOptional
         }
     }
 
     /// Finalizes sampling and computes the final statistics result
+    ///
+    /// This only returns meaningful results after [`Self::state()`] returns
+    /// [`StatsState::Done`] or [`StatsState::MoreSamplesOptional`].
     pub fn finish(self) -> StatsResult {
         let mode = self.detect_mode();
         let (mean_ns_per_iter, regression) = match mode {
@@ -713,7 +733,7 @@ impl WarmupTracker {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Copy, Clone, PartialEq, thiserror::Error)]
 pub enum StatsError {
     #[error("{}", if *.trend_correlation > 0.0 {
         format!("increasing trend in per-iteration run time detected ({trend_correlation:.2})")
@@ -871,7 +891,7 @@ mod tests {
         // 8 stable samples, 30ms each => 240ms total (meets min time) and window full
         for i in 0..8 {
             let state = acc.add_sample(100, 30_000_000); // 300_000 ns/iter
-            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            assert!(matches!(state, StatsState::MoreSamplesRequired));
             // Warmup should finish after 8th sample
             if i == 7 {
                 assert_eq!(acc.sample_count(), 0);
@@ -881,7 +901,7 @@ mod tests {
         // First post-warmup sample is recorded
         let state = acc.add_sample(100, 30_000_000);
         assert_eq!(acc.sample_count(), 1);
-        assert!(matches!(state, StatsState::MoreSamplesNeeded));
+        assert!(matches!(state, StatsState::MoreSamplesRequired));
     }
 
     #[test]
@@ -891,12 +911,12 @@ mod tests {
         // 7 samples of 25ms each => 175ms (below 200ms minimum)
         for _ in 0..7 {
             let state = acc.add_sample(100, 25_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
         // 8th sample crosses 200ms but only now can evaluate stability; still warmup
         let state = acc.add_sample(100, 25_000_000);
-        assert!(matches!(state, StatsState::MoreSamplesNeeded));
+        assert!(matches!(state, StatsState::MoreSamplesRequired));
         assert_eq!(acc.sample_count(), 0);
 
         // 9th sample should be the first recorded if stable window satisfied
@@ -916,7 +936,7 @@ mod tests {
                 1_100_000_000
             };
             let state = acc.add_sample(100, total_ns);
-            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
         assert_eq!(acc.sample_count(), 0, "Warmup samples should be skipped");
@@ -933,15 +953,14 @@ mod tests {
         // Warmup: 8 stable samples, 30ms each
         for _ in 0..8 {
             let state = acc.add_sample(100, 30_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
-        // Add samples to satisfy both time gate (>=2s) and sample gate (>=MIN_SAMPLES)
-        // 32 samples * 100ms = 3.2s total time, 32 samples > MIN_SAMPLES and is multiple of CHECK_EVERY
-        for _ in 1..32 {
+        // Add samples to satisfy the time gate
+        for _ in 1..20 {
             assert!(matches!(
                 acc.add_sample(100, 100_000_000),
-                StatsState::MoreSamplesNeeded
+                StatsState::MoreSamplesRequired
             ));
         }
         assert!(matches!(acc.add_sample(100, 100_000_000), StatsState::Done));
@@ -954,12 +973,12 @@ mod tests {
         // Warmup: 8 stable samples, 150ms each
         for _ in 0..8 {
             let state = acc.add_sample(1000, 150_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
         for _ in 0..StatsAccumulator::MIN_SAMPLES - 1 {
             let state = acc.add_sample(100, 150_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesNeeded));
+            assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
         // At exactly MIN_SAMPLES, state checks stopping
@@ -978,7 +997,10 @@ mod tests {
                 1 => 20_000_000,
                 _ => 30_000_000,
             }; // moderate variance, keeps CI wide without triggering outliers
-            assert_eq!(acc.add_sample(100, total_ns), StatsState::MoreSamplesNeeded);
+            assert!(matches!(
+                acc.add_sample(100, total_ns),
+                StatsState::MoreSamplesRequired | StatsState::MoreSamplesOptional
+            ));
         }
 
         // Hitting MAX_SAMPLES should finish without aborting even if CI is still wide
@@ -990,10 +1012,10 @@ mod tests {
         let mut acc = StatsAccumulator::new(false);
 
         // 200 samples * 10ms = 2s
-        for _ in 1..200usize.next_multiple_of(StatsAccumulator::CHECK_EVERY) {
+        for _ in 1..200 {
             assert!(matches!(
                 acc.add_sample(100, 10_000_000),
-                StatsState::MoreSamplesNeeded
+                StatsState::MoreSamplesRequired
             ));
         }
 
@@ -1008,7 +1030,7 @@ mod tests {
         for _ in 1..StatsAccumulator::MAX_SAMPLES {
             assert!(matches!(
                 acc.add_sample(100, 1_000), // 1µs per sample
-                StatsState::MoreSamplesNeeded
+                StatsState::MoreSamplesRequired
             ));
         }
 

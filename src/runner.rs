@@ -162,6 +162,11 @@ impl Runner {
         loop {
             // Check timeout
             if start_instant.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
+                // Return the existing data if the accumulator has sufficient samples
+                if let StatsState::MoreSamplesOptional = stats.state() {
+                    break;
+                }
+
                 return Err(RunError::Timeout);
             }
 
@@ -208,7 +213,7 @@ impl Runner {
 
                     // Add sample to accumulator
                     match stats.add_sample(sample.iters, sample.total_ns) {
-                        StatsState::MoreSamplesNeeded => {}
+                        StatsState::MoreSamplesRequired | StatsState::MoreSamplesOptional => {}
                         StatsState::Abort(err) => {
                             return Err(RunError::StatsFailed(err));
                         }
