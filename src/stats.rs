@@ -7,7 +7,7 @@
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,8 +87,6 @@ impl StatsAccumulator {
     // Outlier detection
     const OUTLIER_MAD_NORMALIZATION: f64 = 1.482_602_218_505_602;
     const OUTLIER_MAD_THRESHOLD: f64 = 3.5;
-    const OUTLIER_MAX_FRACTION: f64 = 0.10;
-    const OUTLIER_MIN_ITERATIONS: usize = 256;
 
     // Trend detection
     const TREND_CORRELATION_THRESHOLD: f64 = 0.5;
@@ -138,8 +136,9 @@ impl StatsAccumulator {
     ///
     /// Returns:
     /// - `MoreSamplesNeeded` if below minimum samples or convergence criteria not met
-    /// - `Done` if confidence interval has converged within target relative width
-    /// - `Abort` if too many outliers detected or failed to converge after maximum samples
+    /// - `Done` if the confidence interval has converged, or the maximum number of samples has been
+    ///   reached
+    /// - `Abort` if a strong temporal trend is detected
     pub fn state(&self) -> StatsState {
         if self.samples.len() < Self::MIN_SAMPLES {
             return StatsState::MoreSamplesNeeded;
@@ -180,45 +179,25 @@ impl StatsAccumulator {
             };
         }
 
-        // Check for too many outliers
-        let outlier_count = Self::count_outliers(residuals);
-        let outlier_fraction = outlier_count as f64 / self.samples.len() as f64;
-        if outlier_fraction > Self::OUTLIER_MAX_FRACTION {
-            return if self.samples.len() < Self::OUTLIER_MIN_ITERATIONS
-                && (outlier_count as f64 / Self::OUTLIER_MIN_ITERATIONS as f64)
-                    < Self::OUTLIER_MAX_FRACTION
-            {
-                debug!(
-                    samples = self.samples.len(),
-                    outlier_count,
-                    outlier_fraction,
-                    "too many outliers but small sample size, waiting for more samples"
-                );
-                StatsState::MoreSamplesNeeded
-            } else {
-                StatsState::Abort(StatsError::TooManyOutliers {
-                    samples: self.samples.len(),
-                    outlier_count,
-                })
-            };
-        }
-
         // Check for CI convergence
         let ci = self.bootstrap_ci(mode, false);
         let relative_ci_half_width = ci.half_width / mean;
         if relative_ci_half_width <= Self::TARGET_REL_CI {
             StatsState::Done
-        } else if self.samples.len() < Self::MAX_SAMPLES {
+        } else if self.samples.len() >= Self::MAX_SAMPLES {
+            warn!(
+                samples = self.samples.len(),
+                relative_ci_half_width,
+                target_ci = Self::TARGET_REL_CI,
+                "max samples reached before hitting target ci"
+            );
+            StatsState::Done
+        } else {
             debug!(
                 samples = self.samples.len(),
                 relative_ci_half_width, "ci too wide, waiting for more samples"
             );
             StatsState::MoreSamplesNeeded
-        } else {
-            StatsState::Abort(StatsError::FailedToConverge {
-                samples: self.samples.len(),
-                relative_ci_half_width,
-            })
         }
     }
 
@@ -736,24 +715,6 @@ impl WarmupTracker {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum StatsError {
-    #[error(
-        "too many outliers detected: {outlier_count}/{samples} ({:.1}% > {:.1}%)",
-        (*.outlier_count as f64 / *.samples as f64) * 100.0,
-        StatsAccumulator::OUTLIER_MAX_FRACTION * 100.0
-    )]
-    TooManyOutliers {
-        samples: usize,
-        outlier_count: usize,
-    },
-    #[error(
-        "failed to converge after {samples} samples: relative CI half-width {:.1}% > target {:.1}%",
-        *.relative_ci_half_width * 100.0,
-        StatsAccumulator::TARGET_REL_CI * 100.0
-    )]
-    FailedToConverge {
-        samples: usize,
-        relative_ci_half_width: f64,
-    },
     #[error("{}", if *.trend_correlation > 0.0 {
         format!("increasing trend in per-iteration run time detected ({trend_correlation:.2})")
     } else {
@@ -1008,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_samples_abort() {
+    fn test_max_samples_finishes() {
         let mut acc = StatsAccumulator::new(false);
 
         for i in 0..StatsAccumulator::MAX_SAMPLES - 1 {
@@ -1020,13 +981,8 @@ mod tests {
             assert_eq!(acc.add_sample(100, total_ns), StatsState::MoreSamplesNeeded);
         }
 
-        assert!(matches!(
-            acc.add_sample(100, 30_000_000),
-            StatsState::Abort(StatsError::FailedToConverge {
-                samples: StatsAccumulator::MAX_SAMPLES,
-                relative_ci_half_width: _,
-            })
-        ));
+        // Hitting MAX_SAMPLES should finish without aborting even if CI is still wide
+        assert!(matches!(acc.add_sample(100, 30_000_000), StatsState::Done));
     }
 
     #[test]

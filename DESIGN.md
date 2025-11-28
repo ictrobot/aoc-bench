@@ -117,7 +117,7 @@ All benchmark data and configuration is stored in a single `data/` directory wit
   One full benchmark execution producing a mean + CI using sample-based estimation.
 
 * **Run Series**
-  A set of repeated runs for the same `(bench, config)` executed back-to-back (normally **7 runs**).
+  A set of repeated runs for the same `(bench, config)` executed back-to-back (normally **3 runs**).
   Each run series is uniquely identified by `(bench, config, timestamp)` and produces a representative
   result via median-of-means. You can re-run the same (bench, config) combination multiple times
   (e.g., to check variance or after environment changes).
@@ -153,7 +153,7 @@ The system is composed of:
         * mode detection (regression vs per-iter mean),
         * bootstrap CI,
         * stop when CI is small enough.
-    * Performs **7 runs back-to-back** to form a run series.
+    * Performs **3 runs back-to-back** to form a run series.
     * Produces **one run series JSON** containing all runs and the median result.
 
 3. **Store / Stable Result Manager**
@@ -734,23 +734,20 @@ Algorithm (depends on mode):
 ### Stop condition (both modes):
 
    ```text
-   stop if relative_half_width <= TARGET_REL_CI (default: 0.01 = 1%)
-   or n_samples >= MAX_SAMPLES (default: 1024)
-  or run_time >= TIMEOUT (default: 600s)
+   stop early if relative_half_width <= TARGET_REL_CI (default: 0.01 = 1%)
+   otherwise keep sampling until n_samples >= MAX_SAMPLES (default: 1024)
+   or run_time >= TIMEOUT (default: 600s)
    ```
 
-## 7.5 Outlier detection and noisy system warnings
+## 7.5 Outlier detection
 
-To detect unstable measurement environments (thermal throttling, background load, etc.), we use **MAD-based outlier
-detection** (Median Absolute Deviation) on the residuals.
+**MAD-based outlier detection** (Median Absolute Deviation) is used on the residuals.
 
 Constants:
 
 ```rust
 const OUTLIER_MAD_NORMALIZATION: f64 = 1.482602218505602;  // Consistency constant for normal distribution
 const OUTLIER_MAD_THRESHOLD: f64 = 3.5;                     // Modified Z-score threshold
-const OUTLIER_MAX_FRACTION: f64 = 0.10;                     // abort if >10% of samples are outliers
-const OUTLIER_MIN_ITERATIONS: usize = 128;                  // wait for this many samples before aborting on outliers
 ```
 
 Algorithm:
@@ -771,20 +768,7 @@ Algorithm:
 
 4. Compute outlier fraction: `outlier_count / total_samples`
 
-5. Check abort conditions during stopping checks:
-    * If `outlier_fraction > OUTLIER_MAX_FRACTION`:
-        * If `samples < OUTLIER_MIN_ITERATIONS` and projected outlier count
-          `< OUTLIER_MIN_ITERATIONS × OUTLIER_MAX_FRACTION`:
-          Wait for more samples (may stabilize)
-        * Otherwise: abort the benchmark run and do not store results (system is too noisy)
-
-**Rationale**: MAD is more robust to outliers than IQR, making it better suited for detecting measurement instability.
-The higher threshold (3.5 vs 3.0) and tolerance (10% vs 5%) account for the stricter detection method. The delayed
-abort logic prevents premature failure when outliers are present early but may dilute with more samples.
-
-The outlier detection runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`/
-`MIN_TOTAL_TIME_NS`), alongside the CI width check, allowing early termination (as noisy systems take far
-longer to converge).
+Outlier counts are recorded and displayed for diagnostics.
 
 ## 7.6 Temporal correlation detection (drift analysis)
 
@@ -832,7 +816,7 @@ Spearman rank correlation is used as it's robust to outliers and detects monoton
 A strong temporal correlation indicates the benchmark environment is non-stationary, making results unreliable.
 
 The temporal correlation check runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`/
-`MIN_TOTAL_TIME_NS`), alongside outlier and CI checks, allowing early termination when drift is detected.
+`MIN_TOTAL_TIME_NS`), alongside CI checks, allowing early termination when drift is detected.
 
 ## 7.7 Output fields (per individual run)
 
@@ -868,8 +852,8 @@ The median run's estimates become the **representative values** for:
 Raw run and samples are stored to allow later re-analysis if required.
 
 **Note**: The outlier and temporal correlation statistics are computed after collection completes and stored for
-diagnostic purposes. During collection, if the outlier fraction exceeds `OUTLIER_MAX_FRACTION` or if
-`|temporal_correlation| > TREND_CORRELATION_THRESHOLD`, the benchmark is aborted and no results are stored.
+diagnostic purposes. During collection, we abort only on strong temporal correlation (`|temporal_correlation| >
+TREND_CORRELATION_THRESHOLD`). Outlier counts are recorded but no longer trigger an abort.
 
 ---
 
@@ -913,7 +897,7 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
       ]
     },
     ...
-    // 7 runs total, sorted by mean_ns_per_iter
+    // 3 runs total, sorted by mean_ns_per_iter
   ],
   "median_mean_ns_per_iter": 30930000,
   "median_ci95_half_width_ns": 30000,
