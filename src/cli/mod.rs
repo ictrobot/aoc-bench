@@ -1,5 +1,6 @@
 mod args;
 mod commands;
+pub mod logging;
 
 use crate::cli::commands::Commands;
 use aoc_bench::config::{BenchmarkId, ConfigError};

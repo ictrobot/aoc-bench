@@ -37,7 +37,7 @@ fn run_command_stores_run_series() {
         .arg("--data-dir")
         .arg(&data_dir)
         .env("BENCH_HOST", "testhost")
-        .env("RUST_LOG_FORMAT", "json")
+        .env("LOG_FORMAT", "json")
         .output()
         .expect("spawn run command");
 
