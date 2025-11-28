@@ -1,7 +1,7 @@
 use crate::config::{BenchmarkVariant, Config, ConfigFile, KeyValue};
 use crate::host_config::{HostConfig, HostConfigError};
 use crate::runner::{RunError, Runner};
-use crate::stable::{RecordOptions, RecordOutcome, preview_run_series, record_run_series};
+use crate::stable::{preview_run_series, record_run_series, RecordOptions, RecordOutcome};
 use crate::storage::{FileLock, HybridDiskError, HybridDiskStorage, Storage};
 use tracing::{info, warn};
 
@@ -95,7 +95,7 @@ impl RunEngine {
                 info!("would have recorded new run series");
             }
             RecordOutcome::Initial => {
-                info!("new run series");
+                info!("recorded new run series");
             }
             RecordOutcome::Matched => {
                 info!("matched existing stable result");

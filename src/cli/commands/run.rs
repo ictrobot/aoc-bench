@@ -1,9 +1,10 @@
-use crate::cli::CliError;
 use crate::cli::args::{CommonFilterArgs, CommonRunArgs};
+use crate::cli::CliError;
 use aoc_bench::config::Benchmark;
 use aoc_bench::engine::RunEngine;
 use aoc_bench::storage::Storage;
 use clap::Args;
+use rand::prelude::*;
 use tracing::{error, info, info_span};
 
 #[derive(Args, Debug)]
@@ -30,7 +31,7 @@ pub fn execute(args: RunArgs) -> Result<(), CliError> {
     let (benchmark, config_filter) = args.filter.get_filter(&engine.config_file)?;
     let benchmark_filter = benchmark.map(Benchmark::id);
 
-    let (missing, oldest) = storage
+    let (mut missing, mut oldest) = storage
         .read_transaction(|tx| {
             Ok((
                 storage.missing_results(tx, benchmark_filter, &config_filter, args.new_limit)?,
@@ -48,6 +49,10 @@ pub fn execute(args: RunArgs) -> Result<(), CliError> {
         existing_selected = oldest.len(),
         "sampling benchmarks"
     );
+
+    // Shuffle the list of candidates within each group
+    missing.shuffle(&mut rand::rng());
+    oldest.shuffle(&mut rand::rng());
 
     // Run missing first, then oldest existing
     let candidates = missing
