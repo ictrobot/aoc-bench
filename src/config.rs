@@ -207,6 +207,10 @@ impl Key {
         "host",      // Cannot be configured by the user
         "timestamp", // Could be confused with the run series timestamp
     ];
+    /// Maximum allowed length for a config key name.
+    pub const MAX_KEY_LEN: usize = 64;
+    /// Maximum allowed length for a config value name.
+    pub const MAX_VALUE_LEN: usize = 128;
 
     /// Create a new configuration key with the given name and valid values.
     ///
@@ -359,6 +363,9 @@ impl Key {
         if key.is_empty() {
             return Err(ConfigError::InvalidKeyName(key.to_string()));
         }
+        if key.len() > Self::MAX_KEY_LEN {
+            return Err(ConfigError::InvalidKeyName(key.to_string()));
+        }
 
         let mut chars = key.chars();
         let first = chars.next().unwrap();
@@ -383,6 +390,9 @@ impl Key {
     /// Validates a config value
     pub(crate) fn validate_value(value: &str) -> Result<(), ConfigError> {
         if value.is_empty() {
+            return Err(ConfigError::InvalidValue(value.to_string()));
+        }
+        if value.len() > Self::MAX_VALUE_LEN {
             return Err(ConfigError::InvalidValue(value.to_string()));
         }
 
@@ -1198,11 +1208,20 @@ pub enum ConfigError {
     },
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("Invalid key name '{0}': must match [a-z][a-z0-9_]+")]
+    #[error(
+        "Invalid key name '{0}': must match [a-z][a-z0-9_]{{1,{max_len}}}",
+        max_len = Key::MAX_KEY_LEN - 1
+    )]
     InvalidKeyName(String),
-    #[error("Invalid value '{0}': must match [a-zA-Z0-9_-]+")]
+    #[error(
+        "Invalid value '{0}': must match [a-zA-Z0-9_-]{{1,{max_len}}}",
+        max_len = Key::MAX_VALUE_LEN
+    )]
     InvalidValue(String),
-    #[error("Invalid benchmark id '{0}': must match [a-zA-Z0-9_-]+")]
+    #[error(
+        "Invalid benchmark id '{0}': must match [a-zA-Z0-9_-]{{1,{max_len}}}",
+        max_len = Key::MAX_VALUE_LEN
+    )]
     InvalidBenchmarkId(String),
     #[error("Duplicate value '{value}' in values array for '{key}': values must be unique")]
     DuplicateValue { key: String, value: String },
@@ -1264,6 +1283,7 @@ mod tests {
         assert!(Key::new("commit", vec!["a"]).is_ok());
         assert!(Key::new("build_type", vec!["a"]).is_ok());
         assert!(Key::new("t123", vec!["a"]).is_ok());
+        assert!(Key::new(&"k".repeat(Key::MAX_KEY_LEN), vec!["a"]).is_ok());
 
         // Invalid key names
         assert!(Key::new("", vec!["a"]).is_err());
@@ -1275,6 +1295,7 @@ mod tests {
         assert!(Key::new("bench", vec!["a"]).is_err());
         assert!(Key::new("benchmark", vec!["a"]).is_err());
         assert!(Key::new("timestamp", vec!["a"]).is_err());
+        assert!(Key::new(&"k".repeat(Key::MAX_KEY_LEN + 1), vec!["a"]).is_err());
     }
 
     #[test]
@@ -1284,11 +1305,13 @@ mod tests {
         assert!(Key::new("test", vec!["build_type"]).is_ok());
         assert!(Key::new("test", vec!["build-type"]).is_ok());
         assert!(Key::new("test", vec!["ABC123"]).is_ok());
+        assert!(Key::new("test", vec![&"v".repeat(Key::MAX_VALUE_LEN)]).is_ok());
 
         // Invalid values
         assert!(Key::new("test", vec![""]).is_err());
         assert!(Key::new("test", vec!["build type"]).is_err());
         assert!(Key::new("test", vec!["build/type"]).is_err());
+        assert!(Key::new("test", vec![&"v".repeat(Key::MAX_VALUE_LEN + 1)]).is_err());
     }
 
     #[test]
@@ -1882,6 +1905,23 @@ mod tests {
     fn test_invalid_configs() {
         let tmp_dir = TempDir::new().unwrap();
 
+        // Invalid benchmark name
+        let json = r#"{
+            "config_keys": {},
+            "benchmarks": [
+                {
+                    "benchmark": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "command": ["bin/test"]
+                }
+            ]
+        }"#;
+        let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBenchmarkId(_)));
+        assert_eq!(
+            err.to_string(),
+            "Invalid benchmark id 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': must match [a-zA-Z0-9_-]{1,128}"
+        );
+
         // Invalid key name
         let json = r#"{
             "config_keys": {
@@ -1893,7 +1933,7 @@ mod tests {
         assert!(matches!(err, ConfigError::InvalidKeyName(_)));
         assert_eq!(
             err.to_string(),
-            "Invalid key name 'Build': must match [a-z][a-z0-9_]+"
+            "Invalid key name 'Build': must match [a-z][a-z0-9_]{1,63}"
         );
 
         // Invalid value
@@ -1907,7 +1947,7 @@ mod tests {
         assert!(matches!(err, ConfigError::InvalidValue(_)));
         assert_eq!(
             err.to_string(),
-            "Invalid value 'debug release': must match [a-zA-Z0-9_-]+"
+            "Invalid value 'debug release': must match [a-zA-Z0-9_-]{1,128}"
         );
 
         // Unknown preset
@@ -2487,6 +2527,7 @@ mod tests {
 
         assert!(BenchmarkId::try_from("compile_test").is_ok());
         assert!(BenchmarkId::try_from("ABC123").is_ok());
+        assert!(BenchmarkId::try_from("a".repeat(Key::MAX_VALUE_LEN)).is_ok());
 
         // Invalid IDs
         let empty_err = BenchmarkId::try_from(String::new()).unwrap_err();
@@ -2500,6 +2541,9 @@ mod tests {
 
         let special_err = BenchmarkId::try_from("test@bench").unwrap_err();
         assert!(matches!(special_err, ConfigError::InvalidBenchmarkId(_)));
+
+        let length_err = BenchmarkId::try_from("a".repeat(Key::MAX_VALUE_LEN + 1)).unwrap_err();
+        assert!(matches!(length_err, ConfigError::InvalidBenchmarkId(_)));
     }
 
     #[test]

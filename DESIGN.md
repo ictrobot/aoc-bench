@@ -91,6 +91,7 @@ All benchmark data and configuration is stored in a single `data/` directory wit
   **Character constraints**: To ensure filesystem safety and portability:
     - Keys: Must match regex `[a-z][a-z0-9_]+` (lowercase alphanumeric + underscores, must start with letter)
     - Values and benchmark names: Must match regex `[a-zA-Z0-9_-]+` (alphanumeric + underscores + hyphens)
+    - Length limits: keys ≤ 64 bytes; values/benchmark names ≤ 128 bytes
     - These constraints ensure config strings can be used directly in file paths on all platforms
 
   **Well-known keys** (by convention, not required):
