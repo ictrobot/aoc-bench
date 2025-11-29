@@ -614,9 +614,9 @@ const MAX_WARMUP_TIME_NS: u64 = 15_000_000_000; // 15 s
 const STABILITY_WINDOW: usize = 8;
 const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
 
-const MIN_SAMPLES: usize = 16;
+const MIN_SAMPLES: usize = 32;
 const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds of measured (post-warmup) samples
-const CHECK_EVERY: usize = 16;
+const CHECK_EVERY_NS: u64 = 200_000_000; // Re-evaluate convergence every ~200ms of post-warmup sample time
 const MAX_SAMPLES: usize = 1024;
 const RUN_SERIES_COUNT: usize = 3;  // Default runs_per_series; must stay odd for median selection
 const RUN_TIMEOUT_NS: u64 = 600_000_000_000; // Default per-run timeout; override via stats.run_timeout_ns
@@ -624,14 +624,14 @@ const RUN_TIMEOUT_NS: u64 = 600_000_000_000; // Default per-run timeout; overrid
 
 Process:
 
-* **Warmup**: collect samples until both minima are met (≥4 samples and ≥200ms total),
+* **Warmup**: collect samples until both minima are met (≥4 samples and ≥1s total),
   then stop when either (a) the last 8 warmup samples are all within ±5% of their mean,
   or (b) cumulative warmup time reaches 15s. All warmup samples are ignored for stats.
 
 * After warmup, for each new sample:
     * Append `(N_i, T_i)` to accumulated data
-    * When we have at least `MIN_SAMPLES` and total measured sample time reaches `MIN_TOTAL_TIME_NS`, check CI every
-      `CHECK_EVERY` samples
+    * Once both `MIN_SAMPLES` and `MIN_TOTAL_TIME_NS` are satisfied, recompute convergence every
+      `CHECK_EVERY_NS` (200ms) of additional measured sample time, or sooner if we hit `MAX_SAMPLES`
     * Stop when CI target is met or `MAX_SAMPLES` is hit
 
 * **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (default 3, configurable via
@@ -717,7 +717,7 @@ Algorithm (depends on mode):
 
 #### For regression mode:
 
-1. During sampling (every `CHECK_EVERY` samples):
+1. During sampling (every `CHECK_EVERY_NS` of accumulated sample time):
     * Perform `QUICK_BOOTSTRAP_SAMPLES` resamples of sample indices with replacement
     * For each resample: recompute WLS slope `β` using the resampled data
     * Sort the bootstrap estimates and take 2.5th & 97.5th percentiles → `[β_lo, β_hi]`
@@ -728,7 +728,7 @@ Algorithm (depends on mode):
 
 #### For per-iter mean mode:
 
-1. During sampling (every `CHECK_EVERY` samples):
+1. During sampling (every `CHECK_EVERY_NS` of accumulated sample time):
     * Perform `QUICK_BOOTSTRAP_SAMPLES` resamples of sample indices with replacement
     * For each resample: compute weighted mean `Σ(T_i) / Σ(N_i)` using the resampled data
     * Sort the bootstrap estimates and take 2.5th & 97.5th percentiles → `[μ_lo, μ_hi]`
@@ -821,7 +821,7 @@ Spearman rank correlation is used as it's robust to outliers and detects monoton
 
 A strong temporal correlation indicates the benchmark environment is non-stationary, making results unreliable.
 
-The temporal correlation check runs during the stopping check (every `CHECK_EVERY` samples after `MIN_SAMPLES`/
+The temporal correlation check runs during the stopping check (every `CHECK_EVERY_NS` after `MIN_SAMPLES`/
 `MIN_TOTAL_TIME_NS`), alongside CI checks, allowing early termination when drift is detected.
 
 ## 7.7 Output fields (per individual run)

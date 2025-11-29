@@ -32,11 +32,11 @@ pub struct StatsOptions {
 }
 
 impl StatsOptions {
-    pub const DEFAULT_MIN_SAMPLES: usize = 16;
+    pub const DEFAULT_MIN_SAMPLES: usize = 32;
     pub const DEFAULT_MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds
     pub const DEFAULT_TARGET_REL_CI: f64 = 0.01; // 1%
     pub const DEFAULT_MIN_WARMUP_SAMPLES: usize = 4;
-    pub const DEFAULT_MIN_WARMUP_TIME_NS: u64 = 200_000_000; // 200 ms
+    pub const DEFAULT_MIN_WARMUP_TIME_NS: u64 = 1_000_000_000; // 1 second
     pub const DEFAULT_RUNS_PER_SERIES: usize = 3;
     pub const DEFAULT_RUN_TIMEOUT_NS: u64 = 600_000_000_000; // 600 s
 
@@ -951,14 +951,11 @@ mod tests {
     fn test_warmup_stops_on_stability_after_minimums() {
         let mut acc = StatsAccumulator::new();
 
-        // 8 stable samples, 30ms each => 240ms total (meets min time) and window full
-        for i in 0..8 {
-            let state = acc.add_sample(100, 30_000_000); // 300_000 ns/iter
+        // 8 stable samples, 150ms each => 1.2s total (meets min time) and window full
+        for _ in 0..8 {
+            let state = acc.add_sample(100, 150_000_000); // 1.5e6 ns/iter
             assert!(matches!(state, StatsState::MoreSamplesRequired));
-            // Warmup should finish after 8th sample
-            if i == 7 {
-                assert_eq!(acc.sample_count(), 0);
-            }
+            assert_eq!(acc.sample_count(), 0);
         }
 
         // First post-warmup sample is recorded
@@ -971,18 +968,18 @@ mod tests {
     fn test_warmup_respects_min_time_before_stability() {
         let mut acc = StatsAccumulator::new();
 
-        // 7 samples of 25ms each => 175ms (below 200ms minimum)
+        // 7 samples of 125ms each => 875ms (below 1s minimum)
         for _ in 0..7 {
-            let state = acc.add_sample(100, 25_000_000);
+            let state = acc.add_sample(100, 125_000_000);
             assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
-        // 8th sample crosses 200ms but only now can evaluate stability; still warmup
-        let state = acc.add_sample(100, 25_000_000);
+        // 8th sample crosses 1s
+        let state = acc.add_sample(100, 125_000_000);
         assert!(matches!(state, StatsState::MoreSamplesRequired));
         assert_eq!(acc.sample_count(), 0);
 
-        // 9th sample should be the first recorded if stable window satisfied
+        // 9th sample should be the first recorded
         let _ = acc.add_sample(100, 25_000_000);
         assert_eq!(acc.sample_count(), 1);
     }
@@ -1038,17 +1035,18 @@ mod tests {
         let mut acc = StatsAccumulator::new();
 
         // Warmup: 8 stable samples, 30ms each
-        for _ in 0..8 {
+        for _ in 0..34 {
             let state = acc.add_sample(100, 30_000_000);
             assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
-        // Add samples to satisfy the time gate
-        for _ in 1..20 {
+        // Add samples to satisfy the time and samples gates
+        for i in 1..32 {
             assert!(matches!(
                 acc.add_sample(100, 100_000_000),
                 StatsState::MoreSamplesRequired
             ));
+            assert_eq!(acc.sample_count(), i);
         }
         assert!(matches!(acc.add_sample(100, 100_000_000), StatsState::Done));
     }
@@ -1151,9 +1149,9 @@ mod tests {
     fn test_bootstrap_ci_per_iter_mode() {
         let mut acc = StatsAccumulator::new();
 
-        // Warmup: 8 stable samples
+        // Warmup: 8 stable samples (>=1s total)
         for _ in 0..8 {
-            let _ = acc.add_sample(100, 30_000_000);
+            let _ = acc.add_sample(100, 150_000_000);
         }
 
         // Add consistent samples (low variance)
