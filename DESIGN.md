@@ -153,7 +153,7 @@ The system is composed of:
         * mode detection (regression vs per-iter mean),
         * bootstrap CI,
         * stop when CI is small enough.
-    * Performs **3 runs back-to-back** to form a run series.
+    * Performs **multiple runs back-to-back** to form a run series.
     * Produces **one run series JSON** containing all runs and the median result.
 
 3. **Store / Stable Result Manager**
@@ -302,6 +302,10 @@ Common fields:
   variant’s config.
 - **`input`** *(optional)*: Input filename in `data/inputs/`. If provided the runner streams the file to stdin.
 - **`checksum`** *(optional)*: Expected checksum emitted by the benchmark.
+- **`stats`** *(optional)*: Overrides for stats defaults. Supported fields: `min_samples`, `min_time_ns`,
+  `target_rel_ci`, `min_warmup_samples`, `min_warmup_time_ns`, and `runs_per_series`. When variants are
+  present, each variant may have its own `stats` block; for each field the lookup order is variant → benchmark → system
+  default.
 
 ### Single-variant entries
 
@@ -601,7 +605,7 @@ T = [T_1, T_2, ..., T_n]
 
 ## 7.2 Warmup and sampling
 
-Constants:
+Defaults (overrideable per-benchmark/variant via the optional `stats` block):
 
 ```rust
 const MIN_WARMUP_SAMPLES: usize = 4;
@@ -614,8 +618,7 @@ const MIN_SAMPLES: usize = 16;
 const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds of measured (post-warmup) samples
 const CHECK_EVERY: usize = 16;
 const MAX_SAMPLES: usize = 1024;
-
-const RUN_SERIES_COUNT: usize = 3;  // Number of runs in a series
+const RUN_SERIES_COUNT: usize = 3;  // Default runs_per_series; must stay odd for median selection
 ```
 
 Process:
@@ -630,7 +633,9 @@ Process:
       `CHECK_EVERY` samples
     * Stop when CI target is met or `MAX_SAMPLES` is hit
 
-* **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (fixed 3) to collect multiple independent runs
+* **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (default 3, configurable via
+  `stats.runs_per_series`)
+  to collect multiple independent runs. The value must be odd so a median run can be selected.
 
   For each run a new instance of the benchmark command is run, and the process is repeated (including warmup).
 
@@ -897,7 +902,7 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
       ]
     },
     ...
-    // 3 runs total, sorted by mean_ns_per_iter
+    // N runs total, sorted by mean_ns_per_iter
   ],
   "median_mean_ns_per_iter": 30930000,
   "median_ci95_half_width_ns": 30000,

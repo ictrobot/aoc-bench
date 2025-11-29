@@ -2,6 +2,7 @@ use crate::cli::CliError;
 use crate::cli::args::HostConfigArgs;
 use aoc_bench::config::{Benchmark, Config, ConfigProduct};
 use aoc_bench::runner;
+use aoc_bench::stats::StatsOptions;
 use clap::Args;
 use runner::Runner;
 use std::path::Path;
@@ -31,6 +32,7 @@ pub fn execute(args: DebugArgs) -> Result<(), CliError> {
         args.command,
         args.input,
         args.checksum,
+        StatsOptions::default(),
     )
     .map_err(CliError::BenchmarkConstructionError)?;
     let variant = &benchmark.variants()[0];

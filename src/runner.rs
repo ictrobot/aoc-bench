@@ -3,10 +3,10 @@
 use crate::config::{BenchmarkId, BenchmarkVariant, Config};
 use crate::host_config::{CpuAffinity, HostConfig};
 use crate::protocol::{
-    parse_line, validate_checksum, validate_meta_version, ParseError, ProtocolLine,
+    ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
 };
 use crate::run::{Run, RunSeries};
-use crate::stats::{StatsAccumulator, StatsError, StatsState};
+use crate::stats::{StatsAccumulator, StatsError, StatsOptions, StatsState};
 use jiff::Timestamp;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,13 +14,12 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 use tempfile::TempDir;
-use tracing::{info, info_span, trace, trace_span, warn, Span};
+use tracing::{Span, info, info_span, trace, trace_span, warn};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 
 const TIMEOUT_SECS: u64 = 600; // 10 minutes
-const RUN_SERIES_COUNT: usize = 3; // Number of runs in a series
 const MAX_RETRIES: usize = 5; // Maximum retries on failure
 
 #[derive(Debug, Clone)]
@@ -32,6 +31,7 @@ pub struct Runner {
     benchmark_id: BenchmarkId,
     benchmark_config: Config,
     host_config: HostConfig,
+    stats: StatsOptions,
 }
 
 impl Runner {
@@ -67,6 +67,7 @@ impl Runner {
             benchmark_id: benchmark.benchmark_id().clone(),
             benchmark_config: config,
             host_config,
+            stats: benchmark.stats_options(),
         })
     }
 
@@ -77,8 +78,11 @@ impl Runner {
     pub fn run_series(&self) -> Result<RunSeries, RunError> {
         let series_start = Timestamp::now();
 
-        let mut runs = Vec::with_capacity(RUN_SERIES_COUNT);
-        for run in 0..RUN_SERIES_COUNT {
+        let run_count = self.stats.runs_per_series.get();
+        assert!(!run_count.is_multiple_of(2));
+
+        let mut runs = Vec::with_capacity(run_count);
+        for run in 0..run_count {
             let _span = info_span!("run", run).entered();
 
             for retry in 0..MAX_RETRIES {
@@ -131,6 +135,7 @@ impl Runner {
         info!(
             median_mean_ns = median_mean_ns_per_iter,
             median_ci95_ns = median_ci95_half_width_ns,
+            runs = run_count,
             "completed run series"
         );
 
@@ -156,7 +161,7 @@ impl Runner {
         let (mut child, stdout) = self.spawn_child()?;
 
         // Collect samples from stdout
-        let mut stats = StatsAccumulator::default();
+        let mut stats = StatsAccumulator::with_options(self.stats);
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         loop {
@@ -452,7 +457,8 @@ fn disable_aslr(_: &mut Command) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::config::{Benchmark, ConfigProduct};
-    use crate::stats::{EstimationMode, Sample};
+    use crate::stats::{EstimationMode, Sample, StatsOptions};
+    use std::num::NonZeroUsize;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -466,6 +472,7 @@ mod tests {
             vec!["yes".into(), "SAMPLE\t1000\t20000000".into()],
             None,
             None,
+            StatsOptions::default(),
         )
         .unwrap();
         let variant = &benchmark.variants()[0];
@@ -502,13 +509,48 @@ mod tests {
         assert!((series_result.median_mean_ns_per_iter - 20_000.0).abs() < 0.001);
         assert!((series_result.median_ci95_half_width_ns - 0.0).abs() < 0.001);
 
+        let run_count = variant.stats_options().runs_per_series.get();
+
         // Check runs match, ignoring timestamp
         result.timestamp = Timestamp::now();
         series_result
             .runs
             .iter_mut()
             .for_each(|r| r.timestamp = result.timestamp);
-        assert_eq!(series_result.runs, vec![result; RUN_SERIES_COUNT]);
+        assert_eq!(series_result.runs, vec![result; run_count]);
+    }
+
+    #[test]
+    fn test_runner_respects_runs_per_series_override() {
+        for runs in [1, 5, 9] {
+            let tmp_dir = TempDir::new().unwrap();
+            let stats = StatsOptions {
+                runs_per_series: NonZeroUsize::new(runs).unwrap(),
+                ..StatsOptions::default()
+            };
+
+            let benchmark = Benchmark::new(
+                "yes-5".try_into().unwrap(),
+                ConfigProduct::default(),
+                vec!["yes".into(), "SAMPLE\t1\t1000000000".into()],
+                None,
+                None,
+                stats,
+            )
+            .unwrap();
+            let variant = &benchmark.variants()[0];
+
+            let runner = Runner::new(
+                tmp_dir.path(),
+                variant,
+                Config::default(),
+                HostConfig::default(),
+            )
+            .unwrap();
+
+            let series = runner.run_series().unwrap();
+            assert_eq!(series.runs.len(), runs);
+        }
     }
 
     #[test]
@@ -522,6 +564,7 @@ mod tests {
                 vec!["cat".into()],
                 input,
                 None,
+                StatsOptions::default(),
             )
             .unwrap()
         };
@@ -570,6 +613,7 @@ mod tests {
             vec!["false".into()],
             None,
             None,
+            StatsOptions::default(),
         )
         .unwrap();
         let variant = &benchmark.variants()[0];

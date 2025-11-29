@@ -7,8 +7,8 @@ use jiff::Timestamp;
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::types::{Type, ValueRef};
 use rusqlite::{
-    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, Transaction,
-    TransactionBehavior,
+    Connection, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
+    params_from_iter,
 };
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};

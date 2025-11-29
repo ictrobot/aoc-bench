@@ -7,7 +7,68 @@
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, trace, warn};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use]
+pub struct StatsOptions {
+    /// Minimum post-warmup samples required before convergence checks
+    pub min_samples: NonZeroUsize,
+    /// Minimum total post-warmup sample time (nanoseconds)
+    pub min_total_time_ns: NonZeroU64,
+    /// Target relative CI half-width (e.g. 0.01 = 1%)
+    pub target_rel_ci: f64,
+    /// Skip warmup (for tests only)
+    pub skip_warmup: bool,
+    /// Warmup minimum samples before stability checks
+    pub min_warmup_samples: NonZeroUsize,
+    /// Warmup minimum total time (nanoseconds)
+    pub min_warmup_time_ns: NonZeroU64,
+    /// Number of runs per series (must be odd)
+    pub runs_per_series: NonZeroUsize,
+}
+
+impl StatsOptions {
+    pub const DEFAULT_MIN_SAMPLES: usize = 16;
+    pub const DEFAULT_MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds
+    pub const DEFAULT_TARGET_REL_CI: f64 = 0.01; // 1%
+    pub const DEFAULT_MIN_WARMUP_SAMPLES: usize = 4;
+    pub const DEFAULT_MIN_WARMUP_TIME_NS: u64 = 200_000_000; // 200 ms
+    pub const DEFAULT_RUNS_PER_SERIES: usize = 3;
+
+    #[cfg(test)]
+    pub fn new_skip_warmup() -> Self {
+        Self {
+            skip_warmup: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), (&'static str, &'static str)> {
+        if self.target_rel_ci <= 0.0 || self.target_rel_ci >= 1.0 {
+            return Err(("target_rel_ci", "must be between 0 and 1"));
+        }
+        if self.runs_per_series.get().is_multiple_of(2) {
+            return Err(("runs_per_series", "must be odd"));
+        }
+        Ok(())
+    }
+}
+
+impl Default for StatsOptions {
+    fn default() -> Self {
+        Self {
+            min_samples: NonZeroUsize::new(Self::DEFAULT_MIN_SAMPLES).unwrap(),
+            min_total_time_ns: NonZeroU64::new(Self::DEFAULT_MIN_TOTAL_TIME_NS).unwrap(),
+            target_rel_ci: Self::DEFAULT_TARGET_REL_CI,
+            skip_warmup: false,
+            min_warmup_samples: NonZeroUsize::new(Self::DEFAULT_MIN_WARMUP_SAMPLES).unwrap(),
+            min_warmup_time_ns: NonZeroU64::new(Self::DEFAULT_MIN_WARMUP_TIME_NS).unwrap(),
+            runs_per_series: NonZeroUsize::new(Self::DEFAULT_RUNS_PER_SERIES).unwrap(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +95,7 @@ pub struct Sample {
 
 #[derive(Debug, Clone)]
 pub struct StatsAccumulator {
+    options: StatsOptions,
     samples: Vec<Sample>,
     warmup: WarmupTracker,
     total_time_ns: u64,
@@ -77,15 +139,12 @@ pub struct StatsResult {
 
 impl StatsAccumulator {
     // Sampling behavior
-    const MIN_SAMPLES: usize = 16;
-    const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds
     const CHECK_EVERY_NS: u64 = 200_000_000; // 200 ms
     const MAX_SAMPLES: usize = 1024;
 
     // Bootstrap
     const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;
     const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;
-    const TARGET_REL_CI: f64 = 0.01; // 1%
 
     // Outlier detection
     const OUTLIER_MAD_NORMALIZATION: f64 = 1.482_602_218_505_602;
@@ -96,14 +155,16 @@ impl StatsAccumulator {
     const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;
 
     #[must_use]
-    pub fn new(with_warmup: bool) -> Self {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_options(options: StatsOptions) -> Self {
         StatsAccumulator {
+            options,
             samples: Vec::new(),
-            warmup: if with_warmup {
-                WarmupTracker::enabled()
-            } else {
-                WarmupTracker::disabled()
-            },
+            warmup: WarmupTracker::new(options),
             total_time_ns: 0,
             last_state_check_ns: 0,
             last_state: StatsState::MoreSamplesRequired,
@@ -162,11 +223,13 @@ impl StatsAccumulator {
     ///   reached
     /// - `Abort` if a strong temporal trend is detected
     pub fn state(&self) -> StatsState {
-        if self.samples.len() < Self::MIN_SAMPLES {
+        if self.samples.len() < self.options.min_samples.get() {
             return StatsState::MoreSamplesRequired;
         }
 
-        if self.total_time_ns < Self::MIN_TOTAL_TIME_NS && self.samples.len() < Self::MAX_SAMPLES {
+        if self.total_time_ns < self.options.min_total_time_ns.get()
+            && self.samples.len() < Self::MAX_SAMPLES
+        {
             return StatsState::MoreSamplesRequired;
         }
 
@@ -199,13 +262,13 @@ impl StatsAccumulator {
         // Check for CI convergence
         let ci = self.bootstrap_ci(mode, false);
         let relative_ci_half_width = ci.half_width / mean;
-        if relative_ci_half_width <= Self::TARGET_REL_CI {
+        if relative_ci_half_width <= self.options.target_rel_ci {
             StatsState::Done
         } else if self.samples.len() >= Self::MAX_SAMPLES {
             warn!(
                 samples = self.samples.len(),
                 relative_ci_half_width,
-                target_ci = Self::TARGET_REL_CI,
+                target_ci = self.options.target_rel_ci,
                 "max samples reached before hitting target ci"
             );
             StatsState::Done
@@ -620,7 +683,7 @@ impl StatsAccumulator {
 
 impl Default for StatsAccumulator {
     fn default() -> Self {
-        Self::new(true)
+        Self::with_options(StatsOptions::default())
     }
 }
 
@@ -629,30 +692,23 @@ struct WarmupTracker {
     done: bool,
     total_samples: usize,
     total_time_ns: u64,
+    min_samples: NonZeroUsize,
+    min_time_ns: NonZeroU64,
     last_per_iter: [f64; WarmupTracker::STABILITY_WINDOW],
 }
 
 impl WarmupTracker {
-    const MIN_SAMPLES: usize = 4;
-    const MIN_TIME_NS: u64 = 200_000_000; // 200 ms
     const MAX_TIME_NS: u64 = 15_000_000_000; // 15 s
     const STABILITY_WINDOW: usize = 8;
     const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
 
-    fn enabled() -> Self {
+    fn new(options: StatsOptions) -> Self {
         Self {
-            done: false,
+            done: options.skip_warmup,
             total_samples: 0,
             total_time_ns: 0,
-            last_per_iter: [0.0; _],
-        }
-    }
-
-    fn disabled() -> Self {
-        Self {
-            done: true,
-            total_samples: 0,
-            total_time_ns: 0,
+            min_samples: options.min_warmup_samples,
+            min_time_ns: options.min_warmup_time_ns,
             last_per_iter: [0.0; _],
         }
     }
@@ -680,7 +736,9 @@ impl WarmupTracker {
         let total_seconds = self.total_time_ns as f64 / 1_000_000_000.0;
 
         // Cannot finish before minimum sample/time requirements.
-        if self.total_samples < Self::MIN_SAMPLES || self.total_time_ns < Self::MIN_TIME_NS {
+        if self.total_samples < self.min_samples.get()
+            || self.total_time_ns < self.min_time_ns.get()
+        {
             return false;
         }
 
@@ -746,10 +804,11 @@ pub enum StatsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::{NonZeroU64, NonZeroUsize};
 
     #[test]
     fn test_mode_detection_per_iter() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         for _ in 0..10 {
             let _ = acc.add_sample(1000, 50000);
         }
@@ -758,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_mode_detection_regression() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         // Varying iteration counts with range >= 2.0
         let _ = acc.add_sample(100, 5000);
         let _ = acc.add_sample(200, 10000);
@@ -770,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_weighted_mean() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         // 1000 iters @ 50ns/iter = 50_000ns total
         let _ = acc.add_sample(1000, 50_000);
         // 2000 iters @ 50ns/iter = 100_000ns total
@@ -783,7 +842,7 @@ mod tests {
 
     #[test]
     fn test_wls_perfect_fit() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         // Perfect linear relationship: T = 10 + 50*N (10ns overhead, 50ns/iter)
         let _ = acc.add_sample(100, 5010);
         let _ = acc.add_sample(200, 10010);
@@ -798,7 +857,7 @@ mod tests {
 
     #[test]
     fn test_empty_accumulator() {
-        let acc = StatsAccumulator::new(false);
+        let acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         assert_eq!(acc.sample_count(), 0);
         assert_eq!(acc.detect_mode(), EstimationMode::PerIter);
         assert!((acc.compute_weighted_mean() - 0.0).abs() < 0.001);
@@ -807,7 +866,7 @@ mod tests {
 
     #[test]
     fn test_single_sample() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         let _ = acc.add_sample(1000, 50_000);
 
         assert_eq!(acc.detect_mode(), EstimationMode::PerIter);
@@ -816,7 +875,7 @@ mod tests {
 
     #[test]
     fn test_mode_detection_boundary_two_distinct() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         // Only 2 distinct values - should be per_iter
         let _ = acc.add_sample(100, 5000);
         let _ = acc.add_sample(200, 10000);
@@ -828,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_mode_detection_cv_threshold() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         let _ = acc.add_sample(100, 5000);
         let _ = acc.add_sample(120, 6000);
         let _ = acc.add_sample(150, 7500);
@@ -838,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_weighted_mean_zero_iters() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         let _ = acc.add_sample(0, 0);
 
         // Should return 0 and not panic
@@ -847,7 +906,7 @@ mod tests {
 
     #[test]
     fn test_wls_with_zero_iters() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add sample with zero iterations (should be handled gracefully)
         let _ = acc.add_sample(0, 0);
@@ -861,7 +920,7 @@ mod tests {
 
     #[test]
     fn test_wls_with_zero_variance() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         // All samples with same iters count
         let _ = acc.add_sample(100, 5000);
         let _ = acc.add_sample(100, 5010);
@@ -874,7 +933,7 @@ mod tests {
 
     #[test]
     fn test_mode_detection_exactly_three_distinct() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
         // Exactly 3 distinct with range >= 2.0
         let _ = acc.add_sample(100, 5000);
         let _ = acc.add_sample(150, 7500);
@@ -886,7 +945,7 @@ mod tests {
     // Phase 2 tests: Warmup and sampling logic
     #[test]
     fn test_warmup_stops_on_stability_after_minimums() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // 8 stable samples, 30ms each => 240ms total (meets min time) and window full
         for i in 0..8 {
@@ -906,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_warmup_respects_min_time_before_stability() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // 7 samples of 25ms each => 175ms (below 200ms minimum)
         for _ in 0..7 {
@@ -926,7 +985,7 @@ mod tests {
 
     #[test]
     fn test_warmup_caps_at_max_time() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // Alternate fast/slow to avoid stability; totals reach cap exactly at 15th sample
         for i in 0..15 {
@@ -947,8 +1006,32 @@ mod tests {
     }
 
     #[test]
+    fn test_warmup_min_time_can_exceed_max_cap() {
+        // If the user sets an extremely high warmup time, the tracker keeps going past
+        // the nominal MAX_TIME_NS (15s) until the configured minimum is met.
+        let opts = StatsOptions {
+            min_warmup_samples: NonZeroUsize::new(1).unwrap(),
+            min_warmup_time_ns: NonZeroU64::new(60_000_000_000).unwrap(), // 60s
+            ..StatsOptions::default()
+        };
+
+        let mut acc = StatsAccumulator::with_options(opts);
+
+        for _ in 1..=12 {
+            assert!(matches!(
+                acc.add_sample(1, 5_000_000_000),
+                StatsState::MoreSamplesRequired
+            ));
+            assert_eq!(acc.sample_count(), 0);
+        }
+
+        let _ = acc.add_sample(1, 5_000_000_000);
+        assert_eq!(acc.sample_count(), 1);
+    }
+
+    #[test]
     fn test_state_transitions() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // Warmup: 8 stable samples, 30ms each
         for _ in 0..8 {
@@ -968,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_min_samples_transitions() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // Warmup: 8 stable samples, 150ms each
         for _ in 0..8 {
@@ -976,7 +1059,7 @@ mod tests {
             assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
 
-        for _ in 0..StatsAccumulator::MIN_SAMPLES - 1 {
+        for _ in 0..StatsOptions::DEFAULT_MIN_SAMPLES - 1 {
             let state = acc.add_sample(100, 150_000_000);
             assert!(matches!(state, StatsState::MoreSamplesRequired));
         }
@@ -988,8 +1071,30 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_min_samples_and_time_are_honored() {
+        let opts = StatsOptions {
+            min_samples: NonZeroUsize::new(2).unwrap(),
+            min_total_time_ns: NonZeroU64::new(1).unwrap(),
+            skip_warmup: true,
+            ..StatsOptions::default()
+        };
+
+        let mut acc = StatsAccumulator::with_options(opts);
+        assert!(matches!(
+            acc.add_sample(100, 10_000_000),
+            StatsState::MoreSamplesRequired
+        ));
+        let _ = acc.add_sample(100, 10_000_000);
+        let state = acc.state();
+        assert!(matches!(
+            state,
+            StatsState::Done | StatsState::MoreSamplesOptional
+        ));
+    }
+
+    #[test]
     fn test_max_samples_finishes() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         for i in 0..StatsAccumulator::MAX_SAMPLES - 1 {
             let total_ns = match i % 3 {
@@ -1009,7 +1114,7 @@ mod tests {
 
     #[test]
     fn test_time_gate_blocks_early_completion() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // 200 samples * 10ms = 2s
         for _ in 1..200 {
@@ -1024,7 +1129,7 @@ mod tests {
 
     #[test]
     fn test_time_gate_unblocked_by_sample_count() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Very fast samples: total time stays well under 2s, but count will reach MAX_SAMPLES
         for _ in 1..StatsAccumulator::MAX_SAMPLES {
@@ -1040,7 +1145,7 @@ mod tests {
     // Phase 2 tests: Bootstrap CI
     #[test]
     fn test_bootstrap_ci_per_iter_mode() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // Warmup: 8 stable samples
         for _ in 0..8 {
@@ -1066,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_ci_regression_mode() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         let _ = acc.add_sample(100, 5010); // 50 ns/iter + 10 ns overhead
         let _ = acc.add_sample(200, 10010);
@@ -1086,7 +1191,7 @@ mod tests {
     // Phase 2 tests: Outlier detection
     #[test]
     fn test_outlier_detection_no_outliers() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add consistent samples (no outliers)
         for _ in 0..100 {
@@ -1101,7 +1206,7 @@ mod tests {
 
     #[test]
     fn test_outlier_detection_with_outliers() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add mostly good samples
         for _ in 0..90 {
@@ -1123,7 +1228,7 @@ mod tests {
 
     #[test]
     fn test_outlier_detection_regression_mode() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add samples following linear relationship: T = 10 + 50*N
         for _ in 0..40 {
@@ -1148,7 +1253,7 @@ mod tests {
 
     #[test]
     fn test_outlier_threshold_boundary() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add 100 good samples
         for _ in 0..100 {
@@ -1170,7 +1275,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_with_empty_samples() {
-        let acc = StatsAccumulator::new(true);
+        let acc = StatsAccumulator::new();
 
         let result = acc.bootstrap_ci(EstimationMode::PerIter, false);
 
@@ -1181,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_outliers_with_insufficient_samples() {
-        let mut acc = StatsAccumulator::new(true);
+        let mut acc = StatsAccumulator::new();
 
         // Only add warmup samples (which are skipped)
         for _ in 0..16 {
@@ -1214,7 +1319,7 @@ mod tests {
 
     #[test]
     fn test_residual_trend_no_correlation() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add samples with consistent time per iteration - no trend in residuals
         for _ in 0..100 {
@@ -1231,7 +1336,7 @@ mod tests {
 
     #[test]
     fn test_residual_trend_positive_correlation() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add samples with increasing time per iteration (warmup/throttling)
         // This creates a positive trend in residuals
@@ -1250,7 +1355,7 @@ mod tests {
 
     #[test]
     fn test_residual_trend_negative_correlation() {
-        let mut acc = StatsAccumulator::new(false);
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
 
         // Add samples with decreasing time per iteration (caching/optimization)
         // This creates a negative trend in residuals

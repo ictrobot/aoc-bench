@@ -8,6 +8,8 @@ use super::{
     Benchmark, BenchmarkId, BenchmarkVariant, ConfigError, ConfigFile, ConfigProduct, Key,
     KeyValuesSubset,
 };
+use crate::stats::StatsOptions;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 pub(super) struct ParsedConfigFile {
     pub config_keys: Vec<Key>,
@@ -68,6 +70,8 @@ struct BenchmarkDef<'a> {
     input: Option<&'a str>,
     #[serde(borrow, default)]
     checksum: Option<&'a str>,
+    #[serde(default)]
+    stats: Option<StatsOverrideDef>,
     #[serde(borrow, default)]
     config: Option<HashMap<&'a str, ConfigSpec<'a>>>,
     #[serde(borrow, default)]
@@ -83,8 +87,21 @@ struct BenchmarkVariantDef<'a> {
     input: Option<&'a str>,
     #[serde(borrow, default)]
     checksum: Option<&'a str>,
+    #[serde(default)]
+    stats: Option<StatsOverrideDef>,
     #[serde(borrow)]
     config: HashMap<&'a str, ConfigSpec<'a>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatsOverrideDef {
+    min_samples: Option<NonZeroUsize>,
+    min_time_ns: Option<NonZeroU64>,
+    target_rel_ci: Option<f64>,
+    min_warmup_samples: Option<NonZeroUsize>,
+    min_warmup_time_ns: Option<NonZeroU64>,
+    runs_per_series: Option<NonZeroUsize>,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +169,8 @@ fn parse_benchmarks<'a>(
             return Err(ConfigError::DuplicateBenchmark(benchmark_id.to_string()));
         }
 
+        let bench_stats = apply_stats_overrides(StatsOptions::default(), bench_def.stats)?;
+
         let base_input = bench_def
             .input
             .map(|name| resolve_input_path(data_dir, name))
@@ -165,6 +184,7 @@ fn parse_benchmarks<'a>(
                 command.into_iter().map(Cow::into_owned).collect::<Vec<_>>(),
                 base_input,
                 bench_def.checksum.map(str::to_string),
+                bench_stats,
             )?,
             // Multi benchmark
             (None, base_command, Some(variants)) => Benchmark::new_with_variants(
@@ -181,6 +201,7 @@ fn parse_benchmarks<'a>(
                             Some(name) => Some(resolve_input_path(data_dir, name)?),
                             None => base_input.clone(),
                         };
+                        let stats = apply_stats_overrides(bench_stats, variant.stats)?;
 
                         BenchmarkVariant::new(
                             benchmark_id.clone(),
@@ -188,6 +209,7 @@ fn parse_benchmarks<'a>(
                             command,
                             input,
                             variant.checksum.or(bench_def.checksum).map(str::to_string),
+                            stats,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?,
@@ -239,4 +261,39 @@ fn build_config_product<'a>(
     }
 
     Ok(ConfigProduct::new(subsets))
+}
+
+fn apply_stats_overrides(
+    base: StatsOptions,
+    overrides: Option<StatsOverrideDef>,
+) -> Result<StatsOptions, ConfigError> {
+    let mut options = base;
+    let Some(overrides) = overrides else {
+        return Ok(options);
+    };
+
+    if let Some(min_samples) = overrides.min_samples {
+        options.min_samples = min_samples;
+    }
+    if let Some(min_time_ns) = overrides.min_time_ns {
+        options.min_total_time_ns = min_time_ns;
+    }
+    if let Some(target_rel_ci) = overrides.target_rel_ci {
+        options.target_rel_ci = target_rel_ci;
+    }
+    if let Some(min_warmup_samples) = overrides.min_warmup_samples {
+        options.min_warmup_samples = min_warmup_samples;
+    }
+    if let Some(min_warmup_time_ns) = overrides.min_warmup_time_ns {
+        options.min_warmup_time_ns = min_warmup_time_ns;
+    }
+    if let Some(runs_per_series) = overrides.runs_per_series {
+        options.runs_per_series = runs_per_series;
+    }
+
+    if let Err((field, reason)) = options.validate() {
+        return Err(ConfigError::InvalidStatsOverride { field, reason });
+    }
+
+    Ok(options)
 }

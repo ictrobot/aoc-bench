@@ -2,6 +2,7 @@
 
 mod parse;
 
+use crate::stats::StatsOptions;
 use ahash::{HashMap, HashMapExt as _, HashSet};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -924,6 +925,7 @@ impl Benchmark {
         command_template: Vec<String>,
         input: Option<PathBuf>,
         checksum: Option<String>,
+        stats: StatsOptions,
     ) -> Result<Self, ConfigError> {
         let id_clone = id.clone();
         Self::new_with_variants(
@@ -934,6 +936,7 @@ impl Benchmark {
                 command_template,
                 input,
                 checksum,
+                stats,
             )?],
         )
     }
@@ -996,6 +999,7 @@ pub struct BenchmarkVariant {
     command_template: Vec<String>,
     input: Option<PathBuf>,
     checksum: Option<String>,
+    stats: StatsOptions,
 }
 
 impl BenchmarkVariant {
@@ -1005,6 +1009,7 @@ impl BenchmarkVariant {
         command_template: Vec<String>,
         input: Option<PathBuf>,
         checksum: Option<String>,
+        stats: StatsOptions,
     ) -> Result<Self, ConfigError> {
         if command_template.is_empty() {
             return Err(ConfigError::MissingBenchmarkCommand(
@@ -1037,6 +1042,7 @@ impl BenchmarkVariant {
             command_template,
             input,
             checksum,
+            stats,
         })
     }
 
@@ -1068,6 +1074,11 @@ impl BenchmarkVariant {
     #[must_use]
     pub fn checksum(&self) -> Option<&str> {
         self.checksum.as_deref()
+    }
+
+    /// Statistics options (already resolved with benchmark-level defaults)
+    pub fn stats_options(&self) -> StatsOptions {
+        self.stats
     }
 
     /// Check whether `config` exactly matches one of the variant's config combinations.
@@ -1230,6 +1241,11 @@ pub enum ConfigError {
         #[source]
         error: io::Error,
     },
+    #[error("Invalid stats override for {field}: {reason}")]
+    InvalidStatsOverride {
+        field: &'static str,
+        reason: &'static str,
+    },
     #[error("Invalid host '{0}': must match the format for config values [a-zA-Z0-9_-]+")]
     InvalidHost(String),
     #[error("Invalid host '{host}' in data directory at '{path:?}'")]
@@ -1239,6 +1255,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::StatsOptions;
     use tempfile::TempDir;
 
     #[test]
@@ -1472,6 +1489,141 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
         assert_eq!(config.benchmarks()[0].variants().len(), 2);
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp)]
+    fn test_stats_overrides_single_variant() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["opt"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["cmd", "{build}"],
+                    "config": { "build": ["opt"] },
+                    "stats": {
+                        "min_samples": 8,
+                        "min_time_ns": 1000000,
+                        "runs_per_series": 5
+                    }
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
+        let stats = config.benchmarks()[0].variants()[0].stats_options();
+
+        assert_eq!(stats.min_samples.get(), 8);
+        assert_eq!(stats.min_total_time_ns.get(), 1_000_000);
+        assert_eq!(stats.runs_per_series.get(), 5);
+        assert_eq!(stats.target_rel_ci, StatsOptions::DEFAULT_TARGET_REL_CI);
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp)]
+    fn test_stats_overrides_variant_inherits_benchmark() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release", "native"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["cmd", "{build}"],
+                    "stats": { "target_rel_ci": 0.02 },
+                    "variants": [
+                        {
+                            "config": { "build": ["debug"] },
+                            "stats": { "min_samples": 5 }
+                        },
+                        {
+                            "config": { "build": ["release"] },
+                            "stats": { "target_rel_ci": 0.01 }
+                        },
+                        {
+                            "config": { "build": ["native"] }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
+        let variants = config.benchmarks()[0].variants();
+
+        let debug_stats = variants[0].stats_options();
+        assert_eq!(debug_stats.min_samples.get(), 5);
+        assert_eq!(debug_stats.target_rel_ci, 0.02);
+
+        let release_stats = variants[1].stats_options();
+        assert_eq!(
+            release_stats.min_samples.get(),
+            StatsOptions::DEFAULT_MIN_SAMPLES
+        );
+        assert_eq!(release_stats.target_rel_ci, 0.01);
+
+        let native_stats = variants[2].stats_options();
+        assert_eq!(
+            native_stats.min_samples.get(),
+            StatsOptions::DEFAULT_MIN_SAMPLES
+        );
+        assert_eq!(native_stats.target_rel_ci, 0.02);
+    }
+
+    #[test]
+    fn test_invalid_stats_runs_per_series_rejected() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["opt"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["cmd", "{build}"],
+                    "config": { "build": ["opt"] },
+                    "stats": { "runs_per_series": 4 }
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidStatsOverride {
+                field: "runs_per_series",
+                reason: "must be odd"
+            }
+        ));
+    }
+
+    #[test]
+    fn test_invalid_target_rel_ci_rejected() {
+        let json = r#"{
+            "config_keys": { "build": { "values": ["opt"] } },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["cmd", "{build}"],
+                    "config": { "build": ["opt"] },
+                    "stats": { "target_rel_ci": 1.2 }
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidStatsOverride {
+                field: "target_rel_ci",
+                reason: "must be between 0 and 1"
+            }
+        ));
     }
 
     #[test]

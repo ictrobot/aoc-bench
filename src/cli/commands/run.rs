@@ -1,5 +1,5 @@
-use crate::cli::args::{CommonFilterArgs, CommonRunArgs};
 use crate::cli::CliError;
+use crate::cli::args::{CommonFilterArgs, CommonRunArgs};
 use aoc_bench::config::Benchmark;
 use aoc_bench::engine::RunEngine;
 use aoc_bench::storage::Storage;

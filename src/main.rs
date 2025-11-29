@@ -1,6 +1,6 @@
 mod cli;
 
-use crate::cli::{logging, Cli};
+use crate::cli::{Cli, logging};
 use clap::Parser;
 use std::process::ExitCode;
 
