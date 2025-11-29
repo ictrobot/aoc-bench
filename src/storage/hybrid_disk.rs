@@ -100,7 +100,9 @@ impl HybridDiskStorage {
         Ok(if config.is_empty() {
             bench_dir.join(EMPTY_CONFIG_DIR)
         } else {
-            bench_dir.join(config.to_string())
+            config
+                .iter()
+                .fold(bench_dir, |dir, kv| dir.join(kv.to_string()))
         })
     }
 
@@ -973,7 +975,7 @@ mod tests {
         let series = sample_series(config.clone());
         let path = storage.write_run_series_json(series.clone()).unwrap();
         assert!(path.to_string_lossy().ends_with(
-            "results/pi5/runs/2015-04/build=native,commit=abc1234/2023-11-14T22-13-20.json"
+            "results/pi5/runs/2015-04/build=native/commit=abc1234/2023-11-14T22-13-20.json"
         ));
     }
 

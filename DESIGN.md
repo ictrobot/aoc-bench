@@ -963,14 +963,18 @@ data/
       metadata.db                   # SQLite database for this host
       runs/                         # Immutable JSON files
         2015-04/                    # Benchmark name (top-level organization)
-          commit=abc1234,profile=release,threads=1/
-            2025-11-12T18-53-21.json  # Timestamped run series files
-            2025-11-12T19-05-33.json
-          commit=abc1234,profile=release,threads=32/
-            2025-11-13T09-22-10.json
+          commit=abc1234/
+            profile=release/
+              threads=1/
+                2025-11-12T18-53-21.json  # Timestamped run series files
+                2025-11-12T19-05-33.json
+              threads=32/
+                2025-11-13T09-22-10.json
         2015-05/
-          commit=def5678,profile=debug,threads=1/
-            2025-11-13T10-15-00.json
+          commit=def5678/
+            profile=debug/
+              threads=1/
+                2025-11-13T10-15-00.json
 ```
 
 **Path encoding rules:**
@@ -979,14 +983,17 @@ data/
     - Example: `{"bench":"2015-04", ...}` → `runs/2015-04/`
     - Organizes samples by benchmark first, making it easy to find all configs for a given benchmark
     - Character constraints (documented in section 2) ensure filesystem safety
-* Config subdirectory: Canonical config string in `key=value,key=value` format (without the `bench` key and `host` key)
+* Config subdirectories: One directory per `key=value` pair (without the `bench` key and `host` key), nested in
+  canonical key order
     - Keys are sorted alphabetically (same as canonical JSON ordering)
-    - Format: `key1=value1,key2=value2,...` where keys and values follow the character constraints
-    - The `host` key is excluded from this string since it's represented by the top-level host directory
+    - Format: `runs/{bench}/key1=value1/key2=value2/.../{timestamp}.json`
+    - The `host` key is excluded since it's represented by the top-level host directory
     - Example: `{"bench":"2015-04","commit":"abc1234","host":"silicon","profile":"release","threads":"1"}` →
-      `runs/2015-04/commit=abc1234,profile=release,threads=1/`
-    - Human-readable: can grep/glob for specific configs with shell patterns
-    - Character constraints (documented in section 2) ensure filesystem safety across all platforms
+      `runs/2015-04/commit=abc1234/profile=release/threads=1/{timestamp}.json`
+    - Human-readable and easy to glob for specific dimensions (`runs/*/commit=abc1234/**`)
+    - Using per-key directories allows more key-value pairs to be stored compared to packing the config into a single
+      directory name, as most filesystems limit a single name to ~255 bytes, while the limit for total path length is
+      typically higher.
 
 * Timestamps in filenames: ISO 8601 compact format with hyphens (e.g., `2025-11-12T18-53-21`) for human readability
 * Timestamps in database/JSON: Unix timestamps (64-bit integer seconds since epoch) for efficiency
@@ -1007,7 +1014,7 @@ Each host has its own `metadata.db` with two core tables:
 - Stores: bench, config (JSON), timestamp, mean_ns_per_iter, ci95_half_width_ns
     - All statistical values are from the **median run** of the series
 - Immutable: rows are never updated after insertion
-- Links to: JSON file at `runs/{bench}/{config_string}/{timestamp}.json` where config_string is the canonical
+- Links to: JSON file at `runs/{bench}/{key1=val1/...}/{timestamp}.json` where keys/values follow canonical order
   key=value format (excluding `bench` and `host`)
 - `WITHOUT ROWID` table for efficiency
 
