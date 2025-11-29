@@ -164,15 +164,33 @@ class MatrixBuilder:
                 config_keys["commit"]["presets"][preset_name] = chunk_commits
                 chunk_commits = preset_name
 
-            variants.append({
-                "checksum": chunk_metadata["checksum"],
-                "config": {
-                    "commit": chunk_commits,
-                    "build": "all",
-                    "threads": ("multi" if chunk_metadata["uses_threads"] else ["1"]),
-                    "multiversion": chunk_metadata["multiversion"],
-                }
-            })
+            multiversion_values = chunk_metadata["multiversion"]
+            remaining_multiversion = [v for v in multiversion_values if v != "default"]
+
+            if "default" in multiversion_values:
+                variants.append({
+                    "checksum": chunk_metadata["checksum"],
+                    "config": {
+                        "commit": chunk_commits,
+                        "build": "all",
+                        "threads": ("multi" if chunk_metadata["uses_threads"] else ["1"]),
+                        "multiversion": "default",
+                    }
+                })
+
+            if remaining_multiversion:
+                # 1 run per series isn't ideal but is a trade-off to keep all the multiversion thread combinations while
+                # speeding up how long benchmarks for each commit take
+                variants.append({
+                    "checksum": chunk_metadata["checksum"],
+                    "config": {
+                        "commit": chunk_commits,
+                        "build": "all",
+                        "threads": ("multi" if chunk_metadata["uses_threads"] else ["1"]),
+                        "multiversion": remaining_multiversion,
+                    },
+                    "stats": {"runs_per_series": 1},
+                })
 
         return {
             "benchmark": name,
