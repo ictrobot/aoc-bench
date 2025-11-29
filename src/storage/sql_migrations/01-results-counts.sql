@@ -45,3 +45,4 @@ CREATE INDEX IF NOT EXISTS idx_results_bench_commit ON results (bench, config_co
 CREATE INDEX IF NOT EXISTS idx_results_last_series ON results (last_series_timestamp);
 
 PRAGMA foreign_keys = ON;
+PRAGMA foreign_key_check;

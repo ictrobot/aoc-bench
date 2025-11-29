@@ -845,8 +845,6 @@ Per run series (collection of runs), the system produces:
 * `config`: configuration JSON
 * `timestamp`: when the run series was performed (start time)
 * `runs`: array of individual run results (sorted by mean)
-* `median_mean_ns_per_iter`: mean from the median run (representative value)
-* `median_ci95_half_width_ns`: CI from the median run
 * `checksum`: output validation
 
 The median run's estimates become the **representative values** for:
@@ -905,8 +903,6 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
     ...
     // N runs total, sorted by mean_ns_per_iter
   ],
-  "median_mean_ns_per_iter": 30930000,
-  "median_ci95_half_width_ns": 30000,
   "checksum": "8f024a8e..."
 }
 ```
@@ -920,8 +916,6 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
 * `runs`: array of individual run results, **sorted by mean_ns_per_iter**
     * Each run contains: `timestamp`, `mean_ns_per_iter`, `ci95_half_width_ns`, `mode`, `intercept_ns`, `outlier_count`,
       `temporal_correlation`, `samples`
-* `median_mean_ns_per_iter`: mean from the median run (representative value, integer nanoseconds)
-* `median_ci95_half_width_ns`: CI from the median run (integer nanoseconds)
 * `checksum`: output correctness validation
 
 **Display format:**
@@ -1061,10 +1055,10 @@ When a new run series arrives for a `config`:
 3. Otherwise, load the stable result from the `results` table and compare using **median run values**:
 
    ```text
-   μ_stable = stable_run.mean_ns_per_iter  (median mean from stable series)
-   h_stable = stable_run.ci95_half_width_ns  (CI from median run of stable series)
-   μ_new = new_series.median_mean_ns_per_iter  (median mean from new series)
-   h_new = new_series.median_ci95_half_width_ns  (CI from median run of new series)
+   μ_stable = stable_run.median_run_mean_ns   (median mean from stable series)
+   h_stable = stable_run.median_run_ci95_half_ns  (CI from median run of stable series)
+   μ_new = new_series.median_run_mean_ns      (median mean from new series)
+   h_new = new_series.median_run_ci95_half_ns (CI from median run of new series)
 
    CI_stable = [μ_stable - h_stable, μ_stable + h_stable]
    CI_new = [μ_new - h_new, μ_new + h_new]
@@ -1279,7 +1273,7 @@ aoc-bench export --host silicon --config bench=2015-04,commit=abc1234,profile=re
 The `export` command outputs TSV suitable for plotting:
 
 ```text
-host    bench   cfg_commit  cfg_profile cfg_threads     stable_timestamp  mean_ns_per_iter  ci95_half_width_ns
+host    bench   cfg_commit  cfg_profile cfg_threads     stable_timestamp  median_run_mean_ns  median_run_ci95_half_ns
 abc1234 2015-04 abc1234     release     1               1731437601        30930000          30000
 ...
 ```

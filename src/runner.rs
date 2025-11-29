@@ -130,10 +130,14 @@ impl Runner {
         let median_idx = runs.len() / 2;
         let median_mean_ns_per_iter = runs[median_idx].stats.mean_ns_per_iter;
         let median_ci95_half_width_ns = runs[median_idx].stats.ci95_half_width_ns;
+        let median_run_outlier_count = runs[median_idx].stats.outlier_count;
+        let median_run_sample_count = runs[median_idx].stats.samples.len();
 
         info!(
-            median_mean_ns = median_mean_ns_per_iter,
-            median_ci95_ns = median_ci95_half_width_ns,
+            median_run_mean_ns = median_mean_ns_per_iter,
+            median_run_ci95_ns = median_ci95_half_width_ns,
+            median_run_outliers = median_run_outlier_count,
+            median_run_samples = median_run_sample_count,
             runs = run_count,
             "completed run series"
         );
@@ -144,8 +148,6 @@ impl Runner {
             config: self.benchmark_config.clone(),
             timestamp: series_start,
             runs,
-            median_mean_ns_per_iter,
-            median_ci95_half_width_ns,
             checksum: self.expected_checksum.clone(),
         })
     }
@@ -507,8 +509,6 @@ mod tests {
         let mut series_result = runner.run_series().unwrap();
         assert_eq!(series_result.schema, 1);
         assert_eq!(series_result.bench, "yes".try_into().unwrap());
-        assert!((series_result.median_mean_ns_per_iter - 20_000.0).abs() < 0.001);
-        assert!((series_result.median_ci95_half_width_ns - 0.0).abs() < 0.001);
 
         let run_count = variant.stats_options().runs_per_series.get();
 

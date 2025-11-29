@@ -28,29 +28,37 @@ pub struct RunSeries {
     pub timestamp: Timestamp,
     /// Individual run results (sorted by `mean_ns_per_iter`)
     pub runs: Vec<Run>,
-    /// Mean from the median run (representative value)
-    pub median_mean_ns_per_iter: f64,
-    /// CI half-width from the median run
-    pub median_ci95_half_width_ns: f64,
     /// Output validation checksum (if provided)
     pub checksum: Option<String>,
 }
 
 impl RunSeries {
+    /// Returns the median run from the run series.
+    #[must_use]
+    pub fn median_run(&self) -> &Run {
+        &self.runs[self.runs.len() / 2]
+    }
+
+    /// Returns the stats for the median run.
+    pub fn median_stats(&self) -> &StatsResult {
+        &self.runs[self.runs.len() / 2].stats
+    }
+
     /// Format the run series result for display
     ///
     /// Returns a string like "30.92 µs/iter ±0.10% (median of 7 runs)"
     #[must_use]
     pub fn display_result(&self) -> String {
-        let mean_us = self.median_mean_ns_per_iter / 1000.0;
-        let ci_percent = (self.median_ci95_half_width_ns / self.median_mean_ns_per_iter) * 100.0;
+        let stats = &self.median_stats();
+        let mean_us = stats.mean_ns_per_iter / 1000.0;
+        let ci_percent = (stats.ci95_half_width_ns / stats.mean_ns_per_iter) * 100.0;
+        let run_count = self.runs.len();
 
-        format!(
-            "{:.2} µs/iter ±{:.2}% (median of {} runs)",
-            mean_us,
-            ci_percent,
-            self.runs.len()
-        )
+        if run_count == 1 {
+            format!("{mean_us:.2} µs/iter ±{ci_percent:.2}%")
+        } else {
+            format!("{mean_us:.2} µs/iter ±{ci_percent:.2}% (median of {run_count} runs)")
+        }
     }
 }
 
@@ -65,8 +73,6 @@ pub struct RunSeriesDef {
     #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
     pub timestamp: Timestamp,
     pub runs: Vec<Run>,
-    pub median_mean_ns_per_iter: f64,
-    pub median_ci95_half_width_ns: f64,
     pub checksum: Option<String>,
 }
 
@@ -78,8 +84,6 @@ impl RunSeriesDef {
             config: config_file.config_from_map(&self.config)?,
             timestamp: self.timestamp,
             runs: self.runs,
-            median_mean_ns_per_iter: self.median_mean_ns_per_iter,
-            median_ci95_half_width_ns: self.median_ci95_half_width_ns,
             checksum: self.checksum,
         })
     }
@@ -93,8 +97,6 @@ impl From<RunSeries> for RunSeriesDef {
             config: value.config.into(),
             timestamp: value.timestamp,
             runs: value.runs,
-            median_mean_ns_per_iter: value.median_mean_ns_per_iter,
-            median_ci95_half_width_ns: value.median_ci95_half_width_ns,
             checksum: value.checksum,
         }
     }
@@ -130,8 +132,6 @@ mod tests {
                 };
                 7
             ],
-            median_mean_ns_per_iter: 30920.0,
-            median_ci95_half_width_ns: 310.0,
             checksum: None,
         };
 
@@ -177,8 +177,6 @@ mod tests {
                     temporal_correlation: 0.0,
                 },
             }],
-            median_mean_ns_per_iter: 30_920_000.0,
-            median_ci95_half_width_ns: 31_000.0,
             checksum: Some("8f024a8e".to_string()),
         };
 
@@ -198,7 +196,6 @@ mod tests {
         assert_eq!(deserialized.config, BTreeMap::from(config));
         assert_eq!(deserialized.runs.len(), 1);
         assert_eq!(deserialized.runs[0].stats.mode, EstimationMode::PerIter);
-        assert!((deserialized.median_mean_ns_per_iter - 30_920_000.0).abs() < 0.001);
         assert_eq!(deserialized.checksum, Some("8f024a8e".to_string()));
 
         // Check that deserialized RunSeriesDef can be converted back to RunSeries

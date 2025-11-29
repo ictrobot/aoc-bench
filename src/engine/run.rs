@@ -106,31 +106,31 @@ impl RunEngine {
             } => {
                 warn!(
                     suspicious_count,
-                    stable_ns = current_stable.mean_ns_per_iter,
+                    stable_ns = current_stable.median_run_mean_ns,
                     "didn't match stable result, suspicious"
                 );
             }
             RecordOutcome::Replaced { old_stable } if self.dry_run => {
                 warn!(
-                    old_stable_ns = old_stable.mean_ns_per_iter,
+                    old_stable_ns = old_stable.median_run_mean_ns,
                     "didn't match stable result, would have replaced"
                 );
             }
             RecordOutcome::Replaced { old_stable } => {
                 warn!(
-                    old_stable_ns = old_stable.mean_ns_per_iter,
+                    old_stable_ns = old_stable.median_run_mean_ns,
                     "didn't match stable result, replaced"
                 );
             }
             RecordOutcome::Forced { old_stable } if self.dry_run => {
                 warn!(
-                    old_stable_ns = old_stable.mean_ns_per_iter,
+                    old_stable_ns = old_stable.median_run_mean_ns,
                     "would have forced replacement of stable result"
                 );
             }
             RecordOutcome::Forced { old_stable } => {
                 warn!(
-                    old_stable_ns = old_stable.mean_ns_per_iter,
+                    old_stable_ns = old_stable.median_run_mean_ns,
                     "forced replacement of stable result"
                 );
             }

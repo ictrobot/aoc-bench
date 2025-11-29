@@ -90,9 +90,9 @@ pub struct ResultsRow {
     pub config: Config,
     pub stable_series_timestamp: Timestamp,
     pub last_series_timestamp: Timestamp,
-    pub suspicious_count: i64,
-    pub matched_count: i64,
-    pub replaced_count: i64,
+    pub suspicious_count: u64,
+    pub matched_count: u64,
+    pub replaced_count: u64,
 }
 
 /// Results row bundled with median stats for both stable and last series.
@@ -106,15 +106,23 @@ pub struct ResultsRowWithStats {
 /// Stats for a run series, including confidence interval bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunSeriesStats {
-    pub mean_ns_per_iter: f64,
-    pub ci95_half_width_ns: f64,
+    pub run_count: usize,
+    pub median_run_mean_ns: f64,
+    pub median_run_ci95_half_ns: f64,
+    pub median_run_outlier_count: usize,
+    pub median_run_sample_count: usize,
 }
 
 impl From<&RunSeries> for RunSeriesStats {
     fn from(series: &RunSeries) -> Self {
+        let stats = series.median_stats();
+
         Self {
-            mean_ns_per_iter: series.median_mean_ns_per_iter,
-            ci95_half_width_ns: series.median_ci95_half_width_ns,
+            run_count: series.runs.len(),
+            median_run_mean_ns: stats.mean_ns_per_iter,
+            median_run_ci95_half_ns: stats.ci95_half_width_ns,
+            median_run_outlier_count: stats.outlier_count,
+            median_run_sample_count: stats.samples.len(),
         }
     }
 }
@@ -124,8 +132,8 @@ impl RunSeriesStats {
     #[must_use]
     pub fn bounds(&self) -> (f64, f64) {
         (
-            self.mean_ns_per_iter - self.ci95_half_width_ns,
-            self.mean_ns_per_iter + self.ci95_half_width_ns,
+            self.median_run_mean_ns - self.median_run_ci95_half_ns,
+            self.median_run_mean_ns + self.median_run_ci95_half_ns,
         )
     }
 }

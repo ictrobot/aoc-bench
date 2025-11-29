@@ -5,7 +5,7 @@ use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage};
 use std::path::PathBuf;
 
 const STABLE_RESULT_CHANGE_REL_THRESHOLD: f64 = 0.03; // 3%
-const STABLE_RESULT_CHANGE_REQUIRED_COUNT: i64 = 3;
+const STABLE_RESULT_CHANGE_REQUIRED_COUNT: u64 = 3;
 
 /// Write JSON, insert `run_series` row, and update results with drift detection.
 pub fn record_run_series<S: Storage>(
@@ -123,10 +123,10 @@ fn is_suspicious(stable: RunSeriesStats, new_stats: RunSeriesStats) -> bool {
     let (new_low, new_high) = new_stats.bounds();
     let overlap = !(stable_high < new_low || new_high < stable_low);
 
-    let rel_diff = if stable.mean_ns_per_iter == 0.0 {
+    let rel_diff = if stable.median_run_mean_ns == 0.0 {
         f64::INFINITY
     } else {
-        (new_stats.mean_ns_per_iter - stable.mean_ns_per_iter).abs() / stable.mean_ns_per_iter
+        (new_stats.median_run_mean_ns - stable.median_run_mean_ns).abs() / stable.median_run_mean_ns
     };
 
     !overlap && rel_diff >= STABLE_RESULT_CHANGE_REL_THRESHOLD
@@ -146,7 +146,7 @@ pub enum RecordOutcome {
     Matched,
     Suspicious {
         current_stable: RunSeriesStats,
-        suspicious_count: i64,
+        suspicious_count: u64,
     },
     Replaced {
         old_stable: RunSeriesStats,
@@ -210,8 +210,6 @@ mod tests {
                     temporal_correlation: 0.0,
                 },
             }],
-            median_mean_ns_per_iter: f64::from(mean),
-            median_ci95_half_width_ns: f64::from(half_width),
             checksum: None,
         }
     }
@@ -311,11 +309,11 @@ mod tests {
                     outcome,
                     RecordOutcome::Suspicious {
                         current_stable: RunSeriesStats::from(&stable),
-                        suspicious_count: i64::from(i),
+                        suspicious_count: u64::from(i),
                     }
                 );
                 assert_eq!(results_row.row.matched_count, 54);
-                assert_eq!(results_row.row.suspicious_count, i64::from(i));
+                assert_eq!(results_row.row.suspicious_count, u64::from(i));
                 assert_eq!(results_row.row.replaced_count, 2);
                 assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
             } else {

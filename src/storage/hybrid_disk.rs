@@ -27,8 +27,9 @@ const EMPTY_CONFIG_DIR: &str = "__default__";
 const CONFIG_GENERATED_COLUMNS: &[&str] = &["commit"];
 
 static MIGRATIONS: &[&str] = &[
-    include_str!("sql_migrations/00-schema.sql"),
+    include_str!("sql_migrations/00-initial-schema.sql"),
     include_str!("sql_migrations/01-results-counts.sql"),
+    include_str!("sql_migrations/02-run-series-metrics.sql"),
 ];
 
 /// Hybrid storage backend that stores individual run series in immutable JSON files and metadata
@@ -197,36 +198,39 @@ impl HybridDiskStorage {
             );",
         )?;
 
-        // None iff no migrations have been run yet
-        let current_version: Option<usize> =
-            conn.query_one("SELECT MAX(version) FROM schema_migrations", [], |row| {
-                row.get(0)
-            })?;
+        loop {
+            let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let complete_migrations = current_version.map_or(0, |v| v + 1);
+            // None iff no migrations have been run yet
+            // This needs to be done in the same transaction as running the migration
+            let current_version: Option<usize> =
+                txn.query_one("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })?;
 
-        for (version, migration) in MIGRATIONS.iter().enumerate().skip(complete_migrations) {
-            info!(migration = version, db = ?self.db_path, "apply database migration");
+            let next_version = current_version.map_or(0, |v| v + 1);
+            let Some(&migration) = MIGRATIONS.get(next_version) else {
+                return Ok(());
+            };
 
-            if let Err(err) = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .and_then(|tx| {
-                    tx.execute_batch(migration)?;
-                    tx.execute(
+            info!(migration = next_version, db = ?self.db_path, "apply database migration");
+
+            if let Err(err) = txn
+                .execute_batch(migration)
+                .and_then(|()| {
+                    txn.execute(
                         "INSERT INTO schema_migrations (version) VALUES (?1)",
-                        params![version],
-                    )?;
-                    tx.commit()
+                        params![next_version],
+                    )
                 })
+                .and_then(|_| txn.commit())
             {
                 return Err(HybridDiskError::MigrationError {
-                    version,
+                    version: next_version,
                     source: err,
                 });
             }
         }
-
-        Ok(())
     }
 
     fn sql_to_ts(value: ValueRef<'_>) -> rusqlite::Result<Timestamp> {
@@ -412,15 +416,25 @@ impl Storage for HybridDiskStorage {
         let config_json = serde_json::to_string(&series.config.without_host_key())?;
 
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO run_series (bench, config, timestamp, mean_ns_per_iter, ci95_half_width_ns)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO run_series (
+                 bench, config, timestamp,
+                 run_count,
+                 median_run_mean_ns,
+                 median_run_ci95_half_ns,
+                 median_run_outlier_count,
+                 median_run_sample_count
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         stmt.execute(params![
             &series.bench.as_str(),
             config_json,
             series.timestamp.as_second(),
-            series.median_mean_ns_per_iter,
-            series.median_ci95_half_width_ns
+            series.runs.len(),
+            series.median_stats().mean_ns_per_iter,
+            series.median_stats().ci95_half_width_ns,
+            series.median_stats().outlier_count,
+            series.median_stats().samples.len(),
         ])?;
 
         Ok(())
@@ -475,8 +489,12 @@ impl Storage for HybridDiskStorage {
                     r.suspicious_count,
                     r.matched_count,
                     r.replaced_count,
-                    s.mean_ns_per_iter, s.ci95_half_width_ns,
-                    l.mean_ns_per_iter, l.ci95_half_width_ns
+                    s.run_count,
+                    s.median_run_mean_ns, s.median_run_ci95_half_ns,
+                    s.median_run_outlier_count, s.median_run_sample_count,
+                    l.run_count,
+                    l.median_run_mean_ns, l.median_run_ci95_half_ns,
+                    l.median_run_outlier_count, l.median_run_sample_count
              FROM results r
              JOIN run_series s ON s.bench = r.bench AND s.config = r.config AND s.timestamp = r.stable_series_timestamp
              JOIN run_series l ON l.bench = r.bench AND l.config = r.config AND l.timestamp = r.last_series_timestamp
@@ -496,12 +514,18 @@ impl Storage for HybridDiskStorage {
                         replaced_count: row.get(4)?,
                     },
                     stable_stats: RunSeriesStats {
-                        mean_ns_per_iter: row.get(5)?,
-                        ci95_half_width_ns: row.get(6)?,
+                        run_count: row.get(5)?,
+                        median_run_mean_ns: row.get(6)?,
+                        median_run_ci95_half_ns: row.get(7)?,
+                        median_run_outlier_count: row.get(8)?,
+                        median_run_sample_count: row.get(9)?,
                     },
                     last_stats: RunSeriesStats {
-                        mean_ns_per_iter: row.get(7)?,
-                        ci95_half_width_ns: row.get(8)?,
+                        run_count: row.get(10)?,
+                        median_run_mean_ns: row.get(11)?,
+                        median_run_ci95_half_ns: row.get(12)?,
+                        median_run_outlier_count: row.get(13)?,
+                        median_run_sample_count: row.get(14)?,
                     },
                 })
             })
@@ -730,8 +754,6 @@ mod tests {
                     }],
                 },
             }],
-            median_mean_ns_per_iter: 30_000.0,
-            median_ci95_half_width_ns: 300.0,
             checksum: None,
         }
     }
@@ -822,8 +844,6 @@ mod tests {
       ]
     }
   ],
-  "median_mean_ns_per_iter": 30000.0,
-  "median_ci95_half_width_ns": 300.0,
   "checksum": null
 }"#
         );
@@ -1128,7 +1148,7 @@ mod tests {
         storage
             .read_transaction(|tx| {
                 let mut stmt = tx.prepare("SELECT COUNT(*) FROM run_series WHERE bench = ?1")?;
-                let count: i64 = stmt.query_row(params!["2015-04"], |row| row.get(0))?;
+                let count: usize = stmt.query_row(params!["2015-04"], |row| row.get(0))?;
                 assert_eq!(count, 5);
                 Ok(())
             })

@@ -68,7 +68,10 @@ fn run_command_stores_run_series() {
 
     assert_eq!(v["bench"], "bench");
     assert_eq!(v["config"]["build"], "opt");
-    assert!((v["median_mean_ns_per_iter"].as_f64().unwrap() - 276_422.764).abs() < 0.001);
+
+    for run in v["runs"].as_array().unwrap() {
+        assert!((run["mean_ns_per_iter"].as_f64().unwrap() - 276_422.764).abs() < 0.001);
+    }
 }
 
 #[test]
@@ -112,7 +115,7 @@ fn run_command_dry_run_does_not_persist() {
         .join("metadata.db");
     if db_path.exists() {
         let conn = Connection::open(db_path).unwrap();
-        let count: i64 = conn
+        let count: u64 = conn
             .query_row("SELECT COUNT(*) FROM run_series", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "dry-run inserted rows into run_series table");
