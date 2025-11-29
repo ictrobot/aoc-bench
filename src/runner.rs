@@ -19,7 +19,6 @@ use tracing::{Span, info, info_span, trace, trace_span, warn};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 
-const TIMEOUT_SECS: u64 = 600; // 10 minutes
 const MAX_RETRIES: usize = 5; // Maximum retries on failure
 
 #[derive(Debug, Clone)]
@@ -98,7 +97,7 @@ impl Runner {
                         runs.push(run_result);
                         break;
                     }
-                    Err(e @ RunError::Timeout) => {
+                    Err(e @ RunError::Timeout { .. }) => {
                         warn!(error = %e, "run timed out, not retrying");
                         return Err(e);
                     }
@@ -166,13 +165,15 @@ impl Runner {
         let mut lines = reader.lines();
         loop {
             // Check timeout
-            if start_instant.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
+            if start_instant.elapsed() > Duration::from_nanos(self.stats.run_timeout_ns.get()) {
                 // Return the existing data if the accumulator has sufficient samples
                 if let StatsState::MoreSamplesOptional = stats.state() {
                     break;
                 }
 
-                return Err(RunError::Timeout);
+                return Err(RunError::Timeout {
+                    timeout: Duration::from_nanos(self.stats.run_timeout_ns.get()),
+                });
             }
 
             let Some(Ok(line)) = lines.next() else {
@@ -346,8 +347,8 @@ pub enum RunError {
     SpawnFailed(#[from] io::Error),
     #[error("process crashed with exit code: {0:?}")]
     ProcessCrashed(Option<i32>),
-    #[error("process timed out after {TIMEOUT_SECS} seconds")]
-    Timeout,
+    #[error("process timed out after {timeout:?}")]
+    Timeout { timeout: Duration },
     #[error("failed to parse protocol line: {0}")]
     ParseError(ParseError),
     #[error("process ended prematurely")]
@@ -458,7 +459,7 @@ mod tests {
     use super::*;
     use crate::config::{Benchmark, ConfigProduct};
     use crate::stats::{EstimationMode, Sample, StatsOptions};
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU64, NonZeroUsize};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -551,6 +552,38 @@ mod tests {
             let series = runner.run_series().unwrap();
             assert_eq!(series.runs.len(), runs);
         }
+    }
+
+    #[test]
+    fn test_runner_respects_run_timeout_override() {
+        // Use a tiny timeout so we hit it before sample minimums
+        let tmp_dir = TempDir::new().unwrap();
+        let stats = StatsOptions {
+            run_timeout_ns: NonZeroU64::new(100).unwrap(), // 100ns
+            ..StatsOptions::default()
+        };
+
+        let benchmark = Benchmark::new(
+            "yes".try_into().unwrap(),
+            ConfigProduct::default(),
+            vec!["yes".into(), "SAMPLE\t1000\t20000".into()],
+            None,
+            None,
+            stats,
+        )
+        .unwrap();
+
+        let variant = &benchmark.variants()[0];
+        let runner = Runner::new(
+            tmp_dir.path(),
+            variant,
+            Config::default(),
+            HostConfig::default(),
+        )
+        .unwrap();
+
+        let err = runner.run_single().unwrap_err();
+        assert!(matches!(err, RunError::Timeout { .. }));
     }
 
     #[test]

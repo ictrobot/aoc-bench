@@ -1504,12 +1504,13 @@ mod tests {
                     "command": ["cmd", "{build}"],
                     "config": { "build": ["opt"] },
                     "stats": {
-                        "min_samples": 8,
-                        "min_time_ns": 1000000,
-                        "runs_per_series": 5
-                    }
+                    "min_samples": 8,
+                    "min_time_ns": 1000000,
+                    "runs_per_series": 5,
+                    "run_timeout_ns": 120000000000
                 }
-            ]
+            }
+        ]
         }"#;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1519,6 +1520,7 @@ mod tests {
         assert_eq!(stats.min_samples.get(), 8);
         assert_eq!(stats.min_total_time_ns.get(), 1_000_000);
         assert_eq!(stats.runs_per_series.get(), 5);
+        assert_eq!(stats.run_timeout_ns.get(), 120_000_000_000);
         assert_eq!(stats.target_rel_ci, StatsOptions::DEFAULT_TARGET_REL_CI);
     }
 

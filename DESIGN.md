@@ -303,9 +303,9 @@ Common fields:
 - **`input`** *(optional)*: Input filename in `data/inputs/`. If provided the runner streams the file to stdin.
 - **`checksum`** *(optional)*: Expected checksum emitted by the benchmark.
 - **`stats`** *(optional)*: Overrides for stats defaults. Supported fields: `min_samples`, `min_time_ns`,
-  `target_rel_ci`, `min_warmup_samples`, `min_warmup_time_ns`, and `runs_per_series`. When variants are
-  present, each variant may have its own `stats` block; for each field the lookup order is variant → benchmark → system
-  default.
+  `target_rel_ci`, `min_warmup_samples`, `min_warmup_time_ns`, `runs_per_series`, and `run_timeout_ns`.
+  When variants are present, each variant may have its own `stats` block; for each field the lookup order is variant →
+  benchmark → system default.
 
 ### Single-variant entries
 
@@ -619,6 +619,7 @@ const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds of measured (post-war
 const CHECK_EVERY: usize = 16;
 const MAX_SAMPLES: usize = 1024;
 const RUN_SERIES_COUNT: usize = 3;  // Default runs_per_series; must stay odd for median selection
+const RUN_TIMEOUT_NS: u64 = 600_000_000_000; // Default per-run timeout; override via stats.run_timeout_ns
 ```
 
 Process:
@@ -740,8 +741,8 @@ Algorithm (depends on mode):
 
    ```text
    stop early if relative_half_width <= TARGET_REL_CI (default: 0.01 = 1%)
-   otherwise keep sampling until n_samples >= MAX_SAMPLES (default: 1024)
-   or run_time >= TIMEOUT (default: 600s)
+ otherwise keep sampling until n_samples >= MAX_SAMPLES (default: 1024)
+  or run_time >= TIMEOUT (default: 600s, configurable via stats.run_timeout_ns)
    ```
 
 ## 7.5 Outlier detection

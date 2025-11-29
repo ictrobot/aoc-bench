@@ -27,6 +27,8 @@ pub struct StatsOptions {
     pub min_warmup_time_ns: NonZeroU64,
     /// Number of runs per series (must be odd)
     pub runs_per_series: NonZeroUsize,
+    /// Wall-clock timeout for a single run (nanoseconds)
+    pub run_timeout_ns: NonZeroU64,
 }
 
 impl StatsOptions {
@@ -36,6 +38,7 @@ impl StatsOptions {
     pub const DEFAULT_MIN_WARMUP_SAMPLES: usize = 4;
     pub const DEFAULT_MIN_WARMUP_TIME_NS: u64 = 200_000_000; // 200 ms
     pub const DEFAULT_RUNS_PER_SERIES: usize = 3;
+    pub const DEFAULT_RUN_TIMEOUT_NS: u64 = 600_000_000_000; // 600 s
 
     #[cfg(test)]
     pub fn new_skip_warmup() -> Self {
@@ -66,6 +69,7 @@ impl Default for StatsOptions {
             min_warmup_samples: NonZeroUsize::new(Self::DEFAULT_MIN_WARMUP_SAMPLES).unwrap(),
             min_warmup_time_ns: NonZeroU64::new(Self::DEFAULT_MIN_WARMUP_TIME_NS).unwrap(),
             runs_per_series: NonZeroUsize::new(Self::DEFAULT_RUNS_PER_SERIES).unwrap(),
+            run_timeout_ns: NonZeroU64::new(Self::DEFAULT_RUN_TIMEOUT_NS).unwrap(),
         }
     }
 }

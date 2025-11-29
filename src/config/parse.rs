@@ -102,6 +102,7 @@ struct StatsOverrideDef {
     min_warmup_samples: Option<NonZeroUsize>,
     min_warmup_time_ns: Option<NonZeroU64>,
     runs_per_series: Option<NonZeroUsize>,
+    run_timeout_ns: Option<NonZeroU64>,
 }
 
 #[derive(Deserialize)]
@@ -289,6 +290,9 @@ fn apply_stats_overrides(
     }
     if let Some(runs_per_series) = overrides.runs_per_series {
         options.runs_per_series = runs_per_series;
+    }
+    if let Some(run_timeout_ns) = overrides.run_timeout_ns {
+        options.run_timeout_ns = run_timeout_ns;
     }
 
     if let Err((field, reason)) = options.validate() {
