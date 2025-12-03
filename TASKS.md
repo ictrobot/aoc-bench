@@ -180,19 +180,19 @@
 
 ### 7.3 `export` Command
 
-- [ ] Implement SQLite query for stable results
-- [ ] Implement config filtering (partial matching)
-- [ ] Implement TSV output format
-- [ ] Extract config keys into cfg_ columns
-- [ ] Add tests for TSV generation
+- [X] Implement SQLite query for stable results
+- [X] Implement config filtering (partial matching)
+- [X] Implement TSV output format
+- [X] Extract config keys into cfg_ columns
+- [X] Add tests for TSV generation
 
 ### 7.4 `timeline` Command
 
-- [ ] Implement benchmark + partial config query
-- [ ] Identify comparison key (single varying dimension)
-- [ ] Sort results by comparison key order (from config.json)
-- [ ] Compute deltas and detect regressions/improvements
-- [ ] Format output with highlights
+- [X] Implement benchmark + partial config query
+- [X] Identify comparison key (single varying dimension)
+- [X] Sort results by comparison key order (from config.json)
+- [X] Compute deltas and detect regressions/improvements
+- [X] Format output with highlights
 
 ### 7.5 `impact` Command
 

@@ -74,11 +74,15 @@ pub enum CliError {
     #[error("running {0} benchmarks failed")]
     BenchmarksFailed(NonZeroUsize),
 
-    // export command
+    // stats commands
     #[error("--host cannot be used with a --config filter that includes a host key")]
     HostFilterConflict,
     #[error("host '{0}' not found")]
     InvalidHostFilter(String),
+
+    // timeline command
+    #[error("benchmark argument is required")]
+    BenchmarkRequired,
 
     // debug command
     #[error("failed to construct benchmark: {0}")]

@@ -1308,28 +1308,33 @@ aoc-bench timeline --config host=silicon,profile=release,threads=1 2015-04
 ```
 
 ```text
-Bench: 2015-04
-Config: {"bench":"2015-04","host":"silicon","profile":"release","threads":"1"}
+Bench:      2015-04
+Config:     {"bench":"2015-04","host":"silicon","profile":"release","threads":"1"}
+Comparison: commit
 
-commit    date         mean_ns      CI        delta
-abc1234   2025-11-13   30.93ms    ±0.03ms     --         (baseline)
-ghi7890   2025-11-11   32.10ms    ±0.04ms   +3.78%      REGRESSION
-mno3456   2025-11-09   28.50ms    ±0.03ms  -11.23%      IMPROVEMENT
+commit          mean            CI            delta       
+abc1234         30.00 ms        ±0.03 ms      --        INITIAL
+def5678         34.80 ms        ±0.04 ms      +16.00%   REGRESSION
+ghi9012         24.00 ms        ±0.03 ms      -31.03%   IMPROVEMENT
 
-(2 entries with insignificant changes omitted)
+(1 entries with insignificant changes omitted)
 ```
 
 **Process:**
 
-- Finds all benchmark configs matching the specified benchmark name and `--config` argument
-- Identifies the comparison key: the key that varies across matched configs (usually `commit`)
-- Checks that exactly one key varies. If multiple keys vary or no keys vary, error with helpful message
-- Checks that all matched configs have the same set of keys (no optional keys that appear in some configs but not
-  others)
-- Uses the `results` table to find matching stable results
-- Sorts the stable results by the comparison key's value order from the config file
-- Compares the ordered stable results to determine if there was a regression, improvement, or no significant change
-- Outputs the initial result and any significant changes
+- Finds all benchmark configs matching the specified benchmark name and `--config` argument. If no benchmark argument
+  is provided and the config file defines exactly one benchmark, that single benchmark is used; otherwise an explicit
+  benchmark is required.
+- Identifies the comparison key: the single config key whose values differ across the matched configs. Errors if none
+  or more than one key varies.
+- Verifies that all matched configs share the same set of keys.
+- Builds the timeline from **stable results only**, ordered by the comparison key's value order from the config file
+  (not by timestamp).
+- A change is highlighted only when the 95% confidence intervals do not overlap **and** the relative difference in
+  means meets the `--threshold` percentage (default 15%). Points below the threshold are omitted but counted and the
+  omission count is shown at the bottom.
+- Outputs the initial point followed by each significant regression/improvement with its delta sign (+/-) and
+  direction label.
 
 ### 13.3.2 Impact view
 

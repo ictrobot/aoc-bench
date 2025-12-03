@@ -2,6 +2,7 @@
 
 use crate::run::RunSeries;
 use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage, StorageRead};
+use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 const STABLE_RESULT_CHANGE_REL_THRESHOLD: f64 = 0.03; // 3%
@@ -119,6 +120,29 @@ fn compute_outcome(
 }
 
 fn is_suspicious(stable: RunSeriesStats, new_stats: RunSeriesStats) -> bool {
+    significant_change(stable, new_stats).is_some()
+}
+
+/// Determine whether `new_stats` represents a significant change relative to `stable`.
+///
+/// A change is significant when the confidence intervals do not overlap and the relative
+/// difference in means is at least 3%. Returns the direction of the change if significant.
+#[must_use]
+pub fn significant_change(stable: RunSeriesStats, new_stats: RunSeriesStats) -> Option<Change> {
+    significant_change_with_threshold(stable, new_stats, STABLE_RESULT_CHANGE_REL_THRESHOLD)
+}
+
+/// Determine whether `new_stats` represents a significant change relative to `stable`,
+/// using a caller-provided relative threshold.
+///
+/// A change is significant when the confidence intervals do not overlap and the relative
+/// difference in means is at least `rel_threshold`.
+#[must_use]
+pub fn significant_change_with_threshold(
+    stable: RunSeriesStats,
+    new_stats: RunSeriesStats,
+    rel_threshold: f64,
+) -> Option<Change> {
     let (stable_low, stable_high) = stable.bounds();
     let (new_low, new_high) = new_stats.bounds();
     let overlap = !(stable_high < new_low || new_high < stable_low);
@@ -129,7 +153,45 @@ fn is_suspicious(stable: RunSeriesStats, new_stats: RunSeriesStats) -> bool {
         (new_stats.median_run_mean_ns - stable.median_run_mean_ns).abs() / stable.median_run_mean_ns
     };
 
-    !overlap && rel_diff >= STABLE_RESULT_CHANGE_REL_THRESHOLD
+    if overlap || rel_diff < rel_threshold {
+        None
+    } else if new_stats.median_run_mean_ns > stable.median_run_mean_ns {
+        Some(Change {
+            direction: ChangeDirection::Regression,
+            rel_change: rel_diff,
+        })
+    } else if new_stats.median_run_mean_ns < stable.median_run_mean_ns {
+        Some(Change {
+            direction: ChangeDirection::Improvement,
+            rel_change: rel_diff,
+        })
+    } else {
+        None
+    }
+}
+
+/// Direction of a statistically significant change between two stable results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeDirection {
+    Regression,
+    Improvement,
+}
+
+impl Display for ChangeDirection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChangeDirection::Regression => write!(f, "REGRESSION"),
+            ChangeDirection::Improvement => write!(f, "IMPROVEMENT"),
+        }
+    }
+}
+
+/// Description of a significant change, including its direction and magnitude.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Change {
+    pub direction: ChangeDirection,
+    /// Absolute relative change (e.g. 0.05 = 5%)
+    pub rel_change: f64,
 }
 
 /// Options that control how a run series is recorded.

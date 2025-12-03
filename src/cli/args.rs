@@ -3,15 +3,15 @@ use aoc_bench::config::{Benchmark, BenchmarkId, Config, ConfigError, ConfigFile}
 use aoc_bench::engine::{RunEngine, RunEngineConfig, StatsEngine};
 use aoc_bench::host_config::{CpuAffinity, HostConfig};
 use clap::Args;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const DEFAULT_DATA_DIR: &str = "data";
 
 #[derive(Clone, Debug, Args)]
 pub struct CommonRunArgs {
-    /// Path to the data directory (defaults to ./data)
-    #[arg(long, value_parser = clap::value_parser!(PathBuf))]
-    data_dir: Option<PathBuf>,
+    /// Path to the data directory
+    #[arg(long, value_parser = clap::value_parser!(PathBuf), default_value = DEFAULT_DATA_DIR)]
+    data_dir: PathBuf,
 
     /// Execute benchmarks but do not save the results
     #[arg(long)]
@@ -27,7 +27,7 @@ impl TryFrom<CommonRunArgs> for RunEngine {
 
     fn try_from(value: CommonRunArgs) -> Result<Self, Self::Error> {
         let host = get_host()?;
-        let config_file = get_config_file(value.data_dir.as_deref(), Some(&host))?;
+        let config_file = ConfigFile::new(&value.data_dir, Some(host.as_str()))?;
 
         let host_key = config_file.host_key().clone();
         let host_kv = host_key
@@ -72,17 +72,16 @@ impl CommonRunFilterArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct CommonStatsArgs {
-    /// Path to the data directory (defaults to ./data)
-    #[arg(long, value_parser = clap::value_parser!(PathBuf))]
-    data_dir: Option<PathBuf>,
+    /// Path to the data directory
+    #[arg(long, value_parser = clap::value_parser!(PathBuf), default_value = DEFAULT_DATA_DIR)]
+    data_dir: PathBuf,
 }
 
 impl TryFrom<CommonStatsArgs> for StatsEngine {
     type Error = CliError;
 
     fn try_from(value: CommonStatsArgs) -> Result<Self, Self::Error> {
-        let config_file = get_config_file(value.data_dir.as_deref(), None)?;
-
+        let config_file = ConfigFile::new(&value.data_dir, None)?;
         Ok(StatsEngine::new(config_file))
     }
 }
@@ -159,14 +158,6 @@ pub fn get_host() -> Result<String, CliError> {
             .map(|os| os.to_string_lossy().to_string())
             .map_err(CliError::CurrentHostError)
     })
-}
-
-pub fn get_config_file(
-    data_dir: Option<&Path>,
-    host: Option<&str>,
-) -> Result<ConfigFile, CliError> {
-    let data_dir = data_dir.unwrap_or(Path::new(DEFAULT_DATA_DIR));
-    ConfigFile::new(data_dir, host).map_err(CliError::ConfigFileError)
 }
 
 pub fn get_benchmark_filter<'a>(

@@ -1,7 +1,10 @@
-use crate::config::{BenchmarkId, Config, ConfigFile, Key};
+use crate::config::{BenchmarkId, Config, ConfigFile, Key, KeyValue};
+use crate::stable::{Change, significant_change_with_threshold};
 use crate::storage::{
-    HybridDiskStorage, MultiHostError, MultiHostStorage, ResultsRowWithStats, StorageRead,
+    HybridDiskStorage, MultiHostError, MultiHostStorage, ResultsRowWithStats, RunSeriesStats,
+    StorageRead,
 };
+use jiff::Timestamp;
 use std::io;
 use std::io::Write;
 use std::ops::ControlFlow;
@@ -92,6 +95,164 @@ impl StatsEngine {
 
         io_result.map_err(StatsEngineError::OutputError)
     }
+
+    /// Build a sorted timeline of stable results across a single varying config key.
+    pub fn timeline(
+        &self,
+        benchmark: &BenchmarkId,
+        config_filter: &Config,
+    ) -> Result<TimelineResult, StatsEngineError> {
+        let mut rows: Vec<ResultsRowWithStats> = Vec::new();
+
+        self.storage.read_transaction(|tx| {
+            self.storage
+                .for_each_result_with_stats(tx, Some(benchmark), config_filter, |batch| {
+                    rows.extend_from_slice(batch);
+                    ControlFlow::Continue(())
+                })
+        })?;
+
+        if rows.is_empty() {
+            return Err(TimelineError::NoResults.into());
+        }
+
+        let expected_keys: Vec<&Key> = rows[0].row.config.iter().map(KeyValue::key).collect();
+        for row in &rows[1..] {
+            let keys: Vec<&Key> = row.row.config.iter().map(KeyValue::key).collect();
+            if keys != expected_keys {
+                return Err(TimelineError::MismatchedKeys {
+                    expected: expected_keys.iter().map(|k| k.name().to_string()).collect(),
+                    found: keys.iter().map(|k| k.name().to_string()).collect(),
+                }
+                .into());
+            }
+        }
+
+        let mut varying_keys: Vec<Key> = Vec::new();
+        let base_config = &rows[0].row.config;
+        for base_kv in base_config.iter() {
+            let differs = rows.iter().skip(1).any(|row| {
+                row.row.config.get(base_kv.key()).map(KeyValue::value_index)
+                    != Some(base_kv.value_index())
+            });
+            if differs {
+                varying_keys.push(base_kv.key().clone());
+            }
+        }
+
+        let comparison_key = match varying_keys.len() {
+            0 => return Err(TimelineError::NoVaryingKey.into()),
+            1 => varying_keys.remove(0),
+            _ => {
+                let keys = varying_keys
+                    .iter()
+                    .map(|k| k.name().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(TimelineError::MultipleVaryingKeys(keys).into());
+            }
+        };
+
+        let shared_config = base_config.without_key(&comparison_key);
+
+        rows.sort_unstable_by_key(|row| {
+            row.row
+                .config
+                .get(&comparison_key)
+                .expect("comparison key present in config")
+                .value_index()
+        });
+
+        let points = rows
+            .into_iter()
+            .map(|row| {
+                let comparison_value = row
+                    .row
+                    .config
+                    .get(&comparison_key)
+                    .expect("comparison key present in config")
+                    .clone();
+
+                TimelinePoint {
+                    comparison_value,
+                    config: row.row.config,
+                    stats: row.stable_stats,
+                    stable_timestamp: row.row.stable_series_timestamp,
+                }
+            })
+            .collect();
+
+        Ok(TimelineResult {
+            benchmark: benchmark.clone(),
+            shared_config,
+            comparison_key,
+            points,
+        })
+    }
+
+    /// Build a timeline and classify significant changes using the provided relative threshold.
+    pub fn timeline_summary_with_threshold(
+        &self,
+        benchmark: &BenchmarkId,
+        config_filter: &Config,
+        rel_threshold: f64,
+    ) -> Result<TimelineSummary, StatsEngineError> {
+        let timeline = self.timeline(benchmark, config_filter)?;
+
+        let Some(initial) = timeline.points.first().cloned() else {
+            return Err(TimelineError::NoResults.into());
+        };
+
+        let mut omitted = 0usize;
+        let mut changes = Vec::new();
+        let mut previous: TimelinePoint = initial.clone();
+
+        for point in timeline.points.into_iter().skip(1) {
+            if let Some(change) =
+                significant_change_with_threshold(previous.stats, point.stats, rel_threshold)
+            {
+                previous = point.clone();
+                changes.push((point, change));
+            } else {
+                omitted += 1;
+            }
+        }
+
+        Ok(TimelineSummary {
+            benchmark: timeline.benchmark,
+            shared_config: timeline.shared_config,
+            comparison_key: timeline.comparison_key,
+            initial,
+            changes,
+            omitted,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelinePoint {
+    pub comparison_value: KeyValue,
+    pub config: Config,
+    pub stats: RunSeriesStats,
+    pub stable_timestamp: Timestamp,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineResult {
+    pub benchmark: BenchmarkId,
+    pub shared_config: Config,
+    pub comparison_key: Key,
+    pub points: Vec<TimelinePoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineSummary {
+    pub benchmark: BenchmarkId,
+    pub shared_config: Config,
+    pub comparison_key: Key,
+    pub initial: TimelinePoint,
+    pub changes: Vec<(TimelinePoint, Change)>,
+    pub omitted: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,12 +261,34 @@ pub enum StatsEngineError {
     StorageError(#[from] MultiHostError<HybridDiskStorage>),
     #[error("error writing output: {0}")]
     OutputError(#[source] io::Error),
+    #[error("timeline query failed: {0}")]
+    TimelineError(#[from] TimelineError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TimelineError {
+    #[error("no stable results found for the requested benchmark/config")]
+    NoResults,
+    #[error(
+        "matched configs do not share the same set of keys (expected: {expected:?}, found: {found:?})"
+    )]
+    MismatchedKeys {
+        expected: Vec<String>,
+        found: Vec<String>,
+    },
+    #[error("no varying config key found; loosen the --config filter so exactly one key can vary")]
+    NoVaryingKey,
+    #[error(
+        "multiple varying keys found ({0}); narrow the --config filter so only one key differs"
+    )]
+    MultipleVaryingKeys(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::run::Run;
+    use crate::stable::ChangeDirection;
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use crate::storage::{HybridDiskStorage, Storage};
     use tempfile::TempDir;
@@ -194,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn export_tsv_writes_header_and_rows() {
+    fn test_export_tsv_writes_header_and_rows() {
         let (_dir, engine) = setup_storage("h1");
 
         let mut buf = std::io::Cursor::new(Vec::new());
@@ -224,5 +407,223 @@ mod tests {
             Some("h1\tbench2\tx\t1700000200\t1700000210\t1")
         );
         assert_eq!(lines.next(), None);
+    }
+
+    #[test]
+    fn test_timeline_orders_by_comparison_key() {
+        let (_dir, engine) = setup_storage("h1");
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+
+        let timeline = engine
+            .timeline(&bench, &Config::new())
+            .expect("timeline succeeds");
+
+        assert_eq!(timeline.comparison_key.name(), "build");
+        let values: Vec<&str> = timeline
+            .points
+            .iter()
+            .map(|p| p.comparison_value.value_name())
+            .collect();
+        assert_eq!(values, vec!["x", "y"]);
+
+        let means: Vec<f64> = timeline
+            .points
+            .iter()
+            .map(|p| p.stats.median_run_mean_ns)
+            .collect();
+        assert_eq!(means, vec![1_700_000_010.0, 1_700_000_110.0]);
+    }
+
+    #[test]
+    fn test_timeline_errors_when_no_varying_key() {
+        let (_dir, engine) = setup_storage("h1");
+        let bench: BenchmarkId = "bench2".try_into().unwrap();
+
+        let err = engine.timeline(&bench, &Config::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            StatsEngineError::TimelineError(TimelineError::NoVaryingKey)
+        ));
+    }
+
+    #[test]
+    fn test_timeline_errors_when_multiple_keys_vary() {
+        let dir = TempDir::new().unwrap();
+        let host = "h1";
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["x", "y"] },
+                "commit": { "values": ["a", "b"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}-{commit}"],
+                    "config": { "build": ["x", "y"], "commit": ["a", "b"] }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(dir.path(), Some(host), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), host).unwrap();
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+
+        let mk_series = |build: &str, commit: &str, ts: i32| crate::run::RunSeries {
+            schema: 1,
+            bench: bench.clone(),
+            config: config_file
+                .config_from_string(&format!("build={build},commit={commit},host={host}"))
+                .unwrap(),
+            timestamp: jiff::Timestamp::from_second(i64::from(ts)).unwrap(),
+            runs: vec![Run {
+                timestamp: jiff::Timestamp::from_second(i64::from(ts) + 1).unwrap(),
+                stats: StatsResult {
+                    mean_ns_per_iter: f64::from(ts),
+                    ci95_half_width_ns: 1.0,
+                    mode: EstimationMode::PerIter,
+                    intercept_ns: None,
+                    outlier_count: 0,
+                    temporal_correlation: 0.0,
+                    samples: vec![Sample {
+                        iters: 10,
+                        total_ns: 100,
+                    }],
+                },
+            }],
+            checksum: None,
+        };
+
+        let series = [
+            mk_series("x", "a", 1_000),
+            mk_series("y", "a", 2_000),
+            mk_series("x", "b", 3_000),
+        ];
+
+        for s in series {
+            storage.write_run_series_json(s.clone()).unwrap();
+            storage
+                .write_transaction(|tx| {
+                    storage.insert_run_series(tx, &s)?;
+                    storage.upsert_results(
+                        tx,
+                        &crate::storage::ResultsRow {
+                            bench: s.bench.clone(),
+                            config: s.config.clone(),
+                            stable_series_timestamp: s.timestamp,
+                            last_series_timestamp: s.timestamp,
+                            suspicious_count: 0,
+                            matched_count: 0,
+                            replaced_count: 0,
+                        },
+                    )
+                })
+                .unwrap();
+        }
+
+        let engine = StatsEngine::new(config_file);
+        let err = engine.timeline(&bench, &Config::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            StatsEngineError::TimelineError(TimelineError::MultipleVaryingKeys(_))
+        ));
+    }
+
+    #[test]
+    fn test_timeline_summary() {
+        let dir = TempDir::new().unwrap();
+        let host = "h1";
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["a", "b", "c", "d", "e", "f"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["a", "b", "c", "d", "e", "f"] }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(dir.path(), Some(host), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), host).unwrap();
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+
+        let mk_series = |build: &str, mean: f64, ts: i64| crate::run::RunSeries {
+            schema: 1,
+            bench: bench.clone(),
+            config: config_file
+                .config_from_string(&format!("build={build},host={host}"))
+                .unwrap(),
+            timestamp: Timestamp::from_second(ts).unwrap(),
+            runs: vec![Run {
+                timestamp: Timestamp::from_second(ts + 1).unwrap(),
+                stats: StatsResult {
+                    mean_ns_per_iter: mean,
+                    ci95_half_width_ns: 1.0,
+                    mode: EstimationMode::PerIter,
+                    intercept_ns: None,
+                    outlier_count: 0,
+                    temporal_correlation: 0.0,
+                    samples: vec![Sample {
+                        iters: 10,
+                        total_ns: 100,
+                    }],
+                },
+            }],
+            checksum: None,
+        };
+
+        let series = [
+            mk_series("a", 100.0, 1_000),
+            mk_series("b", 106.0, 2_000),
+            mk_series("c", 111.0, 3_000), // REGRESSION
+            mk_series("d", 120.0, 4_000),
+            mk_series("e", 123.0, 5_000), // REGRESSION
+            mk_series("f", 50.0, 6_000),  // IMPROVEMENT
+        ];
+
+        for s in series {
+            storage.write_run_series_json(s.clone()).unwrap();
+            storage
+                .write_transaction(|tx| {
+                    storage.insert_run_series(tx, &s)?;
+                    storage.upsert_results(
+                        tx,
+                        &crate::storage::ResultsRow {
+                            bench: s.bench.clone(),
+                            config: s.config.clone(),
+                            stable_series_timestamp: s.timestamp,
+                            last_series_timestamp: s.timestamp,
+                            suspicious_count: 0,
+                            matched_count: 0,
+                            replaced_count: 0,
+                        },
+                    )
+                })
+                .unwrap();
+        }
+
+        let engine = StatsEngine::new(config_file);
+        let summary = engine
+            .timeline_summary_with_threshold(&bench, &Config::new(), 0.10)
+            .unwrap();
+
+        assert_eq!(summary.changes.len(), 3); // initial + two significant changes
+        assert_eq!(summary.omitted, 2); // one insignificant point
+
+        assert_eq!(summary.initial.comparison_value.value_name(), "a");
+
+        assert_eq!(summary.changes[0].0.comparison_value.value_name(), "c");
+        assert_eq!(summary.changes[0].1.direction, ChangeDirection::Regression);
+        assert!((summary.changes[0].1.rel_change - 0.1100).abs() < 1e-4);
+
+        assert_eq!(summary.changes[1].0.comparison_value.value_name(), "e");
+        assert_eq!(summary.changes[1].1.direction, ChangeDirection::Regression);
+        assert!((summary.changes[1].1.rel_change - 0.1081).abs() < 1e-4);
+
+        assert_eq!(summary.changes[2].0.comparison_value.value_name(), "f");
+        assert_eq!(summary.changes[2].1.direction, ChangeDirection::Improvement);
+        assert!((summary.changes[2].1.rel_change - 0.5935).abs() < 1e-4);
     }
 }
