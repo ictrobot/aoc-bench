@@ -1,8 +1,10 @@
 use crate::config::{
-    Benchmark, BenchmarkId, Config, ConfigError, ConfigFile, ConfigProductIter, KeyValue,
+    Benchmark, BenchmarkId, Config, ConfigError, ConfigFile, ConfigProductIter, Key, KeyValue,
 };
 use crate::run::{RunSeries, RunSeriesDef};
-use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage};
+use crate::storage::{
+    PerHostStorage, ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage, StorageRead,
+};
 use jiff::Timestamp;
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::types::{Type, ValueRef};
@@ -14,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::fs::{File, TryLockError};
 use std::io;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::NamedTempFile;
@@ -136,14 +139,24 @@ impl HybridDiskStorage {
         }
     }
 
+    // Used for full configs where the host is required
     fn ensure_host_matches<'a>(&self, config: &'a Config) -> Result<&'a KeyValue, HybridDiskError> {
+        self.ensure_host_matches_if_present(config)?
+            .ok_or_else(|| HybridDiskError::ConfigMissingHostKey(config.to_string()))
+    }
+
+    // Used for stats config filters where the host is optional
+    fn ensure_host_matches_if_present<'a>(
+        &self,
+        config: &'a Config,
+    ) -> Result<Option<&'a KeyValue>, HybridDiskError> {
         match config.get(self.config_file.host_key()) {
-            Some(kv) if kv == &self.host => Ok(kv),
+            Some(kv) if kv == &self.host => Ok(Some(kv)),
             Some(value) => Err(HybridDiskError::HostMismatch {
                 expected: self.host.to_string(),
                 found: value.to_string(),
             }),
-            None => Err(HybridDiskError::ConfigMissingHostKey(config.to_string())),
+            None => Ok(None),
         }
     }
 
@@ -272,6 +285,7 @@ impl HybridDiskStorage {
     }
 
     fn sql_bench_config_filter<'a>(
+        table_name: &'static str,
         benchmark_filter: Option<&'a BenchmarkId>,
         config_filter: &'a Config,
     ) -> (String, Vec<&'a dyn ToSql>) {
@@ -281,18 +295,25 @@ impl HybridDiskStorage {
         condition.push_str("(1=1");
 
         if let Some(benchmark_filter) = benchmark_filter {
-            condition.push_str(" AND bench = ?");
+            condition.push_str(" AND ");
+            condition.push_str(table_name);
+            condition.push_str(".bench = ?");
             binds.push(benchmark_filter.as_arc() as &dyn ToSql);
         }
 
-        for kv in config_filter.iter() {
+        for kv in config_filter
+            .iter()
+            .filter(|kv| kv.key().name() != Key::HOST_KEY_NAME)
+        {
+            condition.push_str(" AND ");
+            condition.push_str(table_name);
             if CONFIG_GENERATED_COLUMNS.contains(&kv.key().name()) {
-                condition.push_str(" AND config_");
+                condition.push_str(".config_");
                 condition.push_str(kv.key().name());
                 condition.push_str(" = ?");
                 binds.push(kv.value_name_arc() as &dyn ToSql);
             } else {
-                condition.push_str(" AND config ->> ? = ?");
+                condition.push_str(".config ->> ? = ?");
                 binds.push(kv.key().name_arc() as &dyn ToSql);
                 binds.push(kv.value_name_arc() as &dyn ToSql);
             }
@@ -304,31 +325,9 @@ impl HybridDiskStorage {
     }
 }
 
-impl Storage for HybridDiskStorage {
+impl StorageRead for HybridDiskStorage {
     type Tx<'a> = Transaction<'a>;
     type Error = HybridDiskError;
-    type Lock = FileLock;
-
-    fn write_run_series_json(&self, mut series: RunSeries) -> Result<PathBuf, HybridDiskError> {
-        self.ensure_config_valid_for_benchmark(&series.bench, &series.config)?;
-
-        let series_dir = self.ensure_run_series_dir(&series.bench, &series.config)?;
-        let path = self.series_file(&series.bench, &series.config, series.timestamp)?;
-        let mut tmp = NamedTempFile::new_in(&series_dir).map_err(|e| io_error(&series_dir, e))?;
-
-        // Persist hostless configs; storage is already split per-host.
-        series.config = series.config.without_key(self.config_file.host_key());
-        serde_json::to_writer_pretty(tmp.as_file_mut(), &series)?;
-
-        tmp.as_file_mut()
-            .sync_all()
-            .map_err(|e| io_error(tmp.path(), e))?;
-
-        tmp.persist(&path)
-            .map_err(|e| io_error(path.clone(), e.error))?;
-
-        Ok(path)
-    }
 
     fn read_run_series_json(
         &self,
@@ -375,10 +374,6 @@ impl Storage for HybridDiskStorage {
         }
     }
 
-    fn acquire_lock(&self) -> Result<FileLock, HybridDiskError> {
-        FileLock::new(self.lock_path.clone())
-    }
-
     fn read_transaction<F, T>(&self, f: F) -> Result<T, HybridDiskError>
     where
         F: FnOnce(&Transaction<'_>) -> Result<T, HybridDiskError>,
@@ -391,6 +386,279 @@ impl Storage for HybridDiskStorage {
             tx.rollback()?;
         }
         Ok(result)
+    }
+
+    fn get_result_with_stats(
+        &self,
+        tx: &Transaction<'_>,
+        bench: &BenchmarkId,
+        config: &Config,
+    ) -> Result<Option<ResultsRowWithStats>, HybridDiskError> {
+        self.ensure_host_matches(config)?;
+        // Don't check for valid config for benchmark when reading existing results
+
+        let config_json = serde_json::to_string(&config.without_host_key())?;
+        let mut stmt = tx.prepare_cached(
+            "SELECT r.stable_series_timestamp,
+                    r.last_series_timestamp,
+                    r.suspicious_count,
+                    r.matched_count,
+                    r.replaced_count,
+                    s.run_count,
+                    s.median_run_mean_ns, s.median_run_ci95_half_ns,
+                    s.median_run_outlier_count, s.median_run_sample_count,
+                    l.run_count,
+                    l.median_run_mean_ns, l.median_run_ci95_half_ns,
+                    l.median_run_outlier_count, l.median_run_sample_count
+             FROM results r
+             JOIN run_series s ON s.bench = r.bench AND s.config = r.config AND s.timestamp = r.stable_series_timestamp
+             JOIN run_series l ON l.bench = r.bench AND l.config = r.config AND l.timestamp = r.last_series_timestamp
+             WHERE r.bench = ?1 AND r.config = ?2",
+        )?;
+
+        Ok(stmt
+            .query_row(params![bench.as_str(), config_json], |row| {
+                Ok(ResultsRowWithStats {
+                    row: ResultsRow {
+                        bench: bench.clone(),
+                        config: config.clone(),
+                        stable_series_timestamp: Self::sql_to_ts(row.get_ref(0)?)?,
+                        last_series_timestamp: Self::sql_to_ts(row.get_ref(1)?)?,
+                        suspicious_count: row.get(2)?,
+                        matched_count: row.get(3)?,
+                        replaced_count: row.get(4)?,
+                    },
+                    stable_stats: RunSeriesStats {
+                        run_count: row.get(5)?,
+                        median_run_mean_ns: row.get(6)?,
+                        median_run_ci95_half_ns: row.get(7)?,
+                        median_run_outlier_count: row.get(8)?,
+                        median_run_sample_count: row.get(9)?,
+                    },
+                    last_stats: RunSeriesStats {
+                        run_count: row.get(10)?,
+                        median_run_mean_ns: row.get(11)?,
+                        median_run_ci95_half_ns: row.get(12)?,
+                        median_run_outlier_count: row.get(13)?,
+                        median_run_sample_count: row.get(14)?,
+                    },
+                })
+            })
+            .optional()?)
+    }
+
+    fn for_each_result_with_stats(
+        &self,
+        tx: &Self::Tx<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        mut f: impl FnMut(&[ResultsRowWithStats]) -> ControlFlow<()>,
+    ) -> Result<(), Self::Error> {
+        self.ensure_host_matches_if_present(config_filter)?;
+
+        let mut results: Vec<ResultsRowWithStats> = Vec::new();
+
+        // Benchmarks are batched by benchmark then sorted by config, using the current value order
+        // for each key from the config file.
+        // This may be different to lexicographic ordering of the configs.
+        let sort_fn =
+            |a: &ResultsRowWithStats, b: &ResultsRowWithStats| a.row.config.cmp(&b.row.config);
+
+        let (condition, params) =
+            Self::sql_bench_config_filter("r", benchmark_filter, config_filter);
+
+        let mut stmt = tx.prepare_cached(&format!(
+            "SELECT r.bench,
+                    r.config,
+                    r.stable_series_timestamp,
+                    r.last_series_timestamp,
+                    r.suspicious_count,
+                    r.matched_count,
+                    r.replaced_count,
+                    s.run_count,
+                    s.median_run_mean_ns,
+                    s.median_run_ci95_half_ns,
+                    s.median_run_outlier_count,
+                    s.median_run_sample_count,
+                    l.run_count,
+                    l.median_run_mean_ns,
+                    l.median_run_ci95_half_ns,
+                    l.median_run_outlier_count,
+                    l.median_run_sample_count
+             FROM results r
+             JOIN run_series s ON s.bench = r.bench AND s.config = r.config AND s.timestamp = r.stable_series_timestamp
+             JOIN run_series l ON l.bench = r.bench AND l.config = r.config AND l.timestamp = r.last_series_timestamp
+             WHERE {condition}
+             ORDER BY r.bench",
+        ))?;
+
+        let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
+        while let Some(row) = rows_iter.next()? {
+            let Ok(base_row) = self.sql_to_results_row(row) else {
+                continue;
+            };
+
+            if let Some(existing) = results.first()
+                && existing.row.bench != base_row.bench
+            {
+                // New benchmark, flush the current batch
+                results.sort_unstable_by(sort_fn);
+                let control_flow = f(&results);
+                results.clear();
+
+                if let ControlFlow::Break(()) = control_flow {
+                    break;
+                }
+            }
+
+            let stable_stats = RunSeriesStats {
+                run_count: row.get(7)?,
+                median_run_mean_ns: row.get(8)?,
+                median_run_ci95_half_ns: row.get(9)?,
+                median_run_outlier_count: row.get(10)?,
+                median_run_sample_count: row.get(11)?,
+            };
+
+            let last_stats = RunSeriesStats {
+                run_count: row.get(12)?,
+                median_run_mean_ns: row.get(13)?,
+                median_run_ci95_half_ns: row.get(14)?,
+                median_run_outlier_count: row.get(15)?,
+                median_run_sample_count: row.get(16)?,
+            };
+
+            results.push(ResultsRowWithStats {
+                row: base_row,
+                stable_stats,
+                last_stats,
+            });
+        }
+
+        if !results.is_empty() {
+            results.sort_unstable_by(sort_fn);
+            let _ = f(&results);
+        }
+
+        Ok(())
+    }
+
+    fn oldest_results(
+        &self,
+        tx: &Transaction<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        limit: usize,
+    ) -> Result<Vec<ResultsRow>, HybridDiskError> {
+        self.ensure_host_matches_if_present(config_filter)?;
+
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let (condition, params) =
+            Self::sql_bench_config_filter("results", benchmark_filter, config_filter);
+
+        // Don't pass limit to query as there is extra filtering below to check the benchmarks and
+        // configs still exist in the current config file
+        let mut stmt = tx.prepare_cached(&format!(
+            "SELECT *
+             FROM results
+             WHERE {condition}
+             ORDER BY last_series_timestamp ASC",
+        ))?;
+
+        let mut rows = Vec::new();
+        let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
+        while let Some(row) = rows_iter.next()? {
+            if let Ok(row) = self.sql_to_results_row(row)
+                && let Some(benchmark) = self.config_file.benchmark_by_id(&row.bench)
+                && benchmark.valid_config(&row.config)
+            {
+                rows.push(row);
+
+                if rows.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+
+    fn missing_results(
+        &self,
+        tx: &Transaction<'_>,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        limit: usize,
+    ) -> Result<Vec<(BenchmarkId, Config)>, HybridDiskError> {
+        self.ensure_host_matches_if_present(config_filter)?;
+        let config_filter = config_filter.without_host_key();
+
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt =
+            tx.prepare_cached("SELECT 1 FROM results WHERE bench = ?1 AND config = ?2")?;
+
+        self.config_file
+            .benchmarks_filtered(benchmark_filter)
+            .iter()
+            .flat_map(Benchmark::variants)
+            .flat_map(|variant| {
+                match variant.config().filter(&config_filter) {
+                    None => ConfigProductIter::empty(),
+                    Some(product) => product.into_iter(),
+                }
+                .map(|c| (variant.benchmark_id(), c))
+            })
+            .filter_map(|(bench, config)| {
+                let config_json = match serde_json::to_string(&config) {
+                    Ok(json) => json,
+                    Err(e) => return Some(Err(HybridDiskError::from(e))),
+                };
+
+                match stmt
+                    .query_row(params![bench.as_str(), config_json], |_| Ok(()))
+                    .optional()
+                {
+                    Ok(Some(())) => None,
+                    Ok(None) => Some(Ok((bench.clone(), config))),
+                    Err(e) => Some(Err(HybridDiskError::from(e))),
+                }
+            })
+            .take(limit)
+            .collect::<Result<Vec<_>, HybridDiskError>>()
+    }
+}
+
+impl Storage for HybridDiskStorage {
+    type Lock = FileLock;
+
+    fn write_run_series_json(&self, mut series: RunSeries) -> Result<PathBuf, HybridDiskError> {
+        self.ensure_config_valid_for_benchmark(&series.bench, &series.config)?;
+
+        let series_dir = self.ensure_run_series_dir(&series.bench, &series.config)?;
+        let path = self.series_file(&series.bench, &series.config, series.timestamp)?;
+        let mut tmp = NamedTempFile::new_in(&series_dir).map_err(|e| io_error(&series_dir, e))?;
+
+        // Persist hostless configs; storage is already split per-host.
+        series.config = series.config.without_key(self.config_file.host_key());
+        serde_json::to_writer_pretty(tmp.as_file_mut(), &series)?;
+
+        tmp.as_file_mut()
+            .sync_all()
+            .map_err(|e| io_error(tmp.path(), e))?;
+
+        tmp.persist(&path)
+            .map_err(|e| io_error(path.clone(), e.error))?;
+
+        Ok(path)
+    }
+
+    fn acquire_lock(&self) -> Result<FileLock, HybridDiskError> {
+        FileLock::new(self.lock_path.clone())
     }
 
     fn write_transaction<F, T>(&self, f: F) -> Result<T, HybridDiskError>
@@ -474,148 +742,15 @@ impl Storage for HybridDiskStorage {
         ])?;
         Ok(())
     }
+}
 
-    fn get_results_with_stats(
-        &self,
-        tx: &Transaction<'_>,
-        bench: &BenchmarkId,
-        config: &Config,
-    ) -> Result<Option<ResultsRowWithStats>, HybridDiskError> {
-        self.ensure_host_matches(config)?;
-        // Don't check for valid config for benchmark when reading existing results
-
-        let config_json = serde_json::to_string(&config.without_host_key())?;
-        let mut stmt = tx.prepare_cached(
-            "SELECT r.stable_series_timestamp,
-                    r.last_series_timestamp,
-                    r.suspicious_count,
-                    r.matched_count,
-                    r.replaced_count,
-                    s.run_count,
-                    s.median_run_mean_ns, s.median_run_ci95_half_ns,
-                    s.median_run_outlier_count, s.median_run_sample_count,
-                    l.run_count,
-                    l.median_run_mean_ns, l.median_run_ci95_half_ns,
-                    l.median_run_outlier_count, l.median_run_sample_count
-             FROM results r
-             JOIN run_series s ON s.bench = r.bench AND s.config = r.config AND s.timestamp = r.stable_series_timestamp
-             JOIN run_series l ON l.bench = r.bench AND l.config = r.config AND l.timestamp = r.last_series_timestamp
-             WHERE r.bench = ?1 AND r.config = ?2",
-        )?;
-
-        Ok(stmt
-            .query_row(params![bench.as_str(), config_json], |row| {
-                Ok(ResultsRowWithStats {
-                    row: ResultsRow {
-                        bench: bench.clone(),
-                        config: config.clone(),
-                        stable_series_timestamp: Self::sql_to_ts(row.get_ref(0)?)?,
-                        last_series_timestamp: Self::sql_to_ts(row.get_ref(1)?)?,
-                        suspicious_count: row.get(2)?,
-                        matched_count: row.get(3)?,
-                        replaced_count: row.get(4)?,
-                    },
-                    stable_stats: RunSeriesStats {
-                        run_count: row.get(5)?,
-                        median_run_mean_ns: row.get(6)?,
-                        median_run_ci95_half_ns: row.get(7)?,
-                        median_run_outlier_count: row.get(8)?,
-                        median_run_sample_count: row.get(9)?,
-                    },
-                    last_stats: RunSeriesStats {
-                        run_count: row.get(10)?,
-                        median_run_mean_ns: row.get(11)?,
-                        median_run_ci95_half_ns: row.get(12)?,
-                        median_run_outlier_count: row.get(13)?,
-                        median_run_sample_count: row.get(14)?,
-                    },
-                })
-            })
-            .optional()?)
+impl PerHostStorage for HybridDiskStorage {
+    fn new_for_host(config_file: ConfigFile, host: &str) -> Result<Self, Self::Error> {
+        Self::new(config_file, host)
     }
 
-    fn oldest_results(
-        &self,
-        tx: &Transaction<'_>,
-        benchmark_filter: Option<&BenchmarkId>,
-        config_filter: &Config,
-        limit: usize,
-    ) -> Result<Vec<ResultsRow>, HybridDiskError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let (condition, params) = Self::sql_bench_config_filter(benchmark_filter, config_filter);
-
-        // Don't pass limit to query as there is extra filtering below to check the benchmarks and
-        // configs still exist in the current config file
-        let mut stmt = tx.prepare_cached(&format!(
-            "SELECT *
-             FROM results
-             WHERE {condition}
-             ORDER BY last_series_timestamp ASC",
-        ))?;
-
-        let mut rows = Vec::new();
-        let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
-        while let Some(row) = rows_iter.next()? {
-            if let Ok(row) = self.sql_to_results_row(row)
-                && let Some(benchmark) = self.config_file.benchmark_by_id(&row.bench)
-                && benchmark.valid_config(&row.config)
-            {
-                rows.push(row);
-
-                if rows.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        Ok(rows)
-    }
-
-    fn missing_results(
-        &self,
-        tx: &Transaction<'_>,
-        benchmark_filter: Option<&BenchmarkId>,
-        config_filter: &Config,
-        limit: usize,
-    ) -> Result<Vec<(BenchmarkId, Config)>, HybridDiskError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut stmt =
-            tx.prepare_cached("SELECT 1 FROM results WHERE bench = ?1 AND config = ?2")?;
-
-        self.config_file
-            .benchmarks_filtered(benchmark_filter)
-            .iter()
-            .flat_map(Benchmark::variants)
-            .flat_map(|variant| {
-                match variant.config().filter(config_filter) {
-                    None => ConfigProductIter::empty(),
-                    Some(product) => product.into_iter(),
-                }
-                .map(|c| (variant.benchmark_id(), c))
-            })
-            .filter_map(|(bench, config)| {
-                let config_json = match serde_json::to_string(&config) {
-                    Ok(json) => json,
-                    Err(e) => return Some(Err(HybridDiskError::from(e))),
-                };
-
-                match stmt
-                    .query_row(params![bench.as_str(), config_json], |_| Ok(()))
-                    .optional()
-                {
-                    Ok(Some(())) => None,
-                    Ok(None) => Some(Ok((bench.clone(), config))),
-                    Err(e) => Some(Err(HybridDiskError::from(e))),
-                }
-            })
-            .take(limit)
-            .collect::<Result<Vec<_>, HybridDiskError>>()
+    fn host(&self) -> &KeyValue {
+        &self.host
     }
 }
 
@@ -882,7 +1017,7 @@ mod tests {
                     },
                 )?;
 
-                let retrieved = storage.get_results_with_stats(tx, &series.bench, &config)?;
+                let retrieved = storage.get_result_with_stats(tx, &series.bench, &config)?;
                 assert!(retrieved.is_some());
                 let r = retrieved.unwrap();
                 assert_eq!(r.row.bench, series.bench);
@@ -1067,9 +1202,7 @@ mod tests {
                 storage.upsert_results(tx, &row2)?;
 
                 // Verify update
-                let retrieved = storage
-                    .get_results_with_stats(tx, &bench, &config)?
-                    .unwrap();
+                let retrieved = storage.get_result_with_stats(tx, &bench, &config)?.unwrap();
                 assert_eq!(retrieved.row.last_series_timestamp, timestamp2);
                 assert_eq!(retrieved.row.suspicious_count, 2);
 
@@ -1089,7 +1222,7 @@ mod tests {
 
         storage
             .read_transaction(|tx| {
-                let result = storage.get_results_with_stats(tx, &bench, &config)?;
+                let result = storage.get_result_with_stats(tx, &bench, &config)?;
                 assert!(result.is_none());
                 Ok(())
             })
@@ -1158,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_results_lists_all_unseen_configs() {
+    fn test_missing_results_lists_all_unseen_configs() {
         let (_dir, storage) = temp_storage("pi3");
 
         let missing = storage
@@ -1170,7 +1303,70 @@ mod tests {
     }
 
     #[test]
-    fn missing_results_respects_limit() {
+    fn test_missing_results_with_existing_series() {
+        let (_dir, storage) = temp_storage("pi4");
+
+        let bench1: BenchmarkId = "2015-04".try_into().unwrap();
+        let cfg1 = storage
+            .config_file()
+            .config_from_string("build=generic,commit=abc1234,host=pi4")
+            .unwrap();
+
+        let bench2: BenchmarkId = "empty-config".try_into().unwrap();
+        let cfg2 = storage
+            .config_file()
+            .config_from_string("host=pi4")
+            .unwrap();
+
+        // Insert one config for each bench
+        storage
+            .write_transaction(|tx| {
+                for (b, cfg) in [
+                    (bench1.clone(), cfg1.clone()),
+                    (bench2.clone(), cfg2.clone()),
+                ] {
+                    let series = run_series_for_bench(
+                        b.clone(),
+                        cfg.clone(),
+                        Timestamp::from_second(10).unwrap(),
+                    );
+                    storage.insert_run_series(tx, &series)?;
+                    storage.upsert_results(
+                        tx,
+                        &ResultsRow {
+                            bench: b.clone(),
+                            config: cfg.clone(),
+                            stable_series_timestamp: series.timestamp,
+                            last_series_timestamp: series.timestamp,
+                            suspicious_count: 0,
+                            matched_count: 0,
+                            replaced_count: 0,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // 3 outstanding configs for 2015-04
+        let missing = storage
+            .read_transaction(|tx| storage.missing_results(tx, None, &Config::new(), 10))
+            .unwrap();
+
+        assert!(missing.iter().all(|(b, _)| b == &bench1));
+        let configs: Vec<_> = missing.iter().map(|(_, c)| c.to_string()).collect();
+        assert_eq!(
+            configs,
+            vec![
+                "build=generic,commit=def4567",
+                "build=native,commit=abc1234",
+                "build=native,commit=def4567",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_missing_results_respects_limit() {
         let (_dir, storage) = temp_storage("pi3");
 
         let missing = storage
@@ -1181,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn oldest_results_orders_and_limits() {
+    fn test_oldest_results_orders_and_limits() {
         let (_dir, storage) = temp_storage("pi3");
         let bench: BenchmarkId = "2015-04".try_into().unwrap();
 
@@ -1238,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn oldest_results_skips_removed_benchmarks() {
+    fn test_oldest_results_skips_removed_benchmarks() {
         let (dir, storage) = temp_storage("pi3");
         let bench_keep: BenchmarkId = "2015-04".try_into().unwrap();
         let bench_drop: BenchmarkId = "empty-config".try_into().unwrap();
@@ -1337,5 +1533,122 @@ mod tests {
             BTreeMap::from(results[0].config.clone()),
             bench_keep_config_keep.into()
         );
+    }
+
+    #[test]
+    fn test_for_each_result_with_stats_batches_and_respects_break() {
+        let (_dir, storage) = temp_storage("pi3");
+
+        let bench1: BenchmarkId = "2015-04".try_into().unwrap();
+        let bench2: BenchmarkId = "empty-config".try_into().unwrap();
+
+        let cfg1 = storage
+            .config_file()
+            .config_from_string("build=generic,commit=abc1234,host=pi3")
+            .unwrap();
+        let cfg2 = storage
+            .config_file()
+            .config_from_string("build=native,commit=abc1234,host=pi3")
+            .unwrap();
+        let cfg_empty = storage
+            .config_file()
+            .config_from_string("host=pi3")
+            .unwrap();
+
+        // Insert two configs for bench1 and one for bench2
+        storage
+            .write_transaction(|tx| {
+                for (b, cfg, ts) in [
+                    (bench1.clone(), cfg1.clone(), 10),
+                    (bench1.clone(), cfg2.clone(), 20),
+                    (bench2.clone(), cfg_empty.clone(), 30),
+                ] {
+                    let series = run_series_for_bench(
+                        b.clone(),
+                        cfg.clone(),
+                        Timestamp::from_second(ts).unwrap(),
+                    );
+                    storage.insert_run_series(tx, &series)?;
+                    storage.upsert_results(
+                        tx,
+                        &ResultsRow {
+                            bench: b.clone(),
+                            config: cfg.clone(),
+                            stable_series_timestamp: series.timestamp,
+                            last_series_timestamp: series.timestamp,
+                            suspicious_count: 0,
+                            matched_count: 0,
+                            replaced_count: 0,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // Collect all batches
+        let mut batches: Vec<Vec<ResultsRowWithStats>> = Vec::new();
+        storage
+            .read_transaction(|tx| {
+                storage.for_each_result_with_stats(tx, None, &Config::new(), |rows| {
+                    batches.push(rows.to_vec());
+                    ControlFlow::Continue(())
+                })
+            })
+            .unwrap();
+
+        assert_eq!(batches.len(), 2);
+
+        // First batch should be bench1 with configs sorted
+        assert!(batches[0].iter().all(|r| r.row.bench == bench1));
+        let configs: Vec<_> = batches[0]
+            .iter()
+            .map(|r| r.row.config.to_string())
+            .collect();
+        assert_eq!(
+            configs,
+            vec![
+                "build=generic,commit=abc1234,host=pi3",
+                "build=native,commit=abc1234,host=pi3"
+            ]
+        );
+
+        // Second batch should be bench2 with empty config
+        assert!(batches[1].iter().all(|r| r.row.bench == bench2));
+        assert_eq!(batches[1].len(), 1);
+
+        // Filter with config
+        let config_filter = storage
+            .config_file()
+            .config_from_string("build=native")
+            .unwrap();
+        let mut batches: Vec<Vec<ResultsRowWithStats>> = Vec::new();
+        storage
+            .read_transaction(|tx| {
+                storage.for_each_result_with_stats(tx, None, &config_filter, |rows| {
+                    batches.push(rows.to_vec());
+                    ControlFlow::Continue(())
+                })
+            })
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0].row.bench.to_string(), "2015-04");
+        assert_eq!(
+            batches[0][0].row.config.to_string(),
+            "build=native,commit=abc1234,host=pi3"
+        );
+
+        // Break after first batch
+        let mut seen = 0usize;
+        storage
+            .read_transaction(|tx| {
+                storage.for_each_result_with_stats(tx, None, &Config::new(), |_rows| {
+                    seen += 1;
+                    ControlFlow::Break(())
+                })
+            })
+            .unwrap();
+        assert_eq!(seen, 1);
     }
 }

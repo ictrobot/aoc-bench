@@ -568,7 +568,7 @@ impl KeyValuesSubset {
 /// Keys are stored sorted by [`Key`] for efficient binary search.
 ///
 /// Use [`ConfigFile::config_from_string`] to parse a Config from a string like `"key1=a,key2=b"`.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Config {
     kv: Vec<KeyValue>,
 }

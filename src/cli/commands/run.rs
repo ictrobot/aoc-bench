@@ -1,8 +1,8 @@
 use crate::cli::CliError;
-use crate::cli::args::{CommonFilterArgs, CommonRunArgs};
+use crate::cli::args::{CommonRunArgs, CommonRunFilterArgs};
 use aoc_bench::config::Benchmark;
 use aoc_bench::engine::RunEngine;
-use aoc_bench::storage::Storage;
+use aoc_bench::storage::StorageRead;
 use clap::Args;
 use rand::prelude::*;
 use tracing::{error, info, info_span};
@@ -18,7 +18,7 @@ pub struct RunArgs {
     pub rerun_limit: usize,
 
     #[command(flatten)]
-    filter: CommonFilterArgs,
+    filter: CommonRunFilterArgs,
 
     #[command(flatten)]
     run: CommonRunArgs,

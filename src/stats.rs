@@ -1405,4 +1405,42 @@ mod tests {
         let corr = StatsAccumulator::spearman_correlation(x, y);
         assert!((corr - 0.0).abs() < 0.001);
     }
+
+    #[test]
+    fn test_trend_detection_aborts_after_min_samples() {
+        let mut acc = StatsAccumulator::with_options(StatsOptions::new_skip_warmup());
+
+        // Generate a strong upward trend in per-iteration time
+        for i in 1..StatsAccumulator::TREND_CORRELATION_MIN_ITERATIONS {
+            assert!(matches!(
+                acc.add_sample(100, i as u64 * StatsAccumulator::CHECK_EVERY_NS),
+                StatsState::MoreSamplesRequired
+            ));
+        }
+
+        // Next sample should push it over the threshold and trigger Abort
+        assert!(matches!(
+            acc.add_sample(100, 1_000_000_000),
+            StatsState::Abort(StatsError::TrendDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn test_stats_options_validate_rejects_bad_values() {
+        // target_rel_ci outside (0,1)
+        let opts = StatsOptions {
+            target_rel_ci: 1.5,
+            ..StatsOptions::default()
+        };
+        let err = opts.validate().unwrap_err();
+        assert_eq!(err.0, "target_rel_ci");
+
+        // runs_per_series must be odd
+        let opts = StatsOptions {
+            runs_per_series: NonZeroUsize::new(4).unwrap(),
+            ..StatsOptions::default()
+        };
+        let err = opts.validate().unwrap_err();
+        assert_eq!(err.0, "runs_per_series");
+    }
 }

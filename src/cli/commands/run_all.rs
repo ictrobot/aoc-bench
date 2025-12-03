@@ -1,5 +1,5 @@
 use crate::cli::CliError;
-use crate::cli::args::{CommonFilterArgs, CommonRunArgs};
+use crate::cli::args::{CommonRunArgs, CommonRunFilterArgs};
 use aoc_bench::engine::RunEngine;
 use clap::Args;
 use tracing::{info, info_span, trace_span};
@@ -7,7 +7,7 @@ use tracing::{info, info_span, trace_span};
 #[derive(Args, Debug)]
 pub struct RunAllArgs {
     #[command(flatten)]
-    filter: CommonFilterArgs,
+    filter: CommonRunFilterArgs,
 
     #[command(flatten)]
     run: CommonRunArgs,

@@ -4,7 +4,7 @@ pub mod logging;
 
 use crate::cli::commands::Commands;
 use aoc_bench::config::{BenchmarkId, ConfigError};
-use aoc_bench::engine::RunEngineError;
+use aoc_bench::engine::{RunEngineError, StatsEngineError};
 use aoc_bench::runner::RunError;
 use aoc_bench::storage::HybridDiskError;
 use clap::Parser;
@@ -57,6 +57,8 @@ pub enum CliError {
     NoBenchmarksFound,
     #[error(transparent)]
     RunEngineError(#[from] RunEngineError),
+    #[error(transparent)]
+    StatsEngineError(#[from] StatsEngineError),
     #[error("{error}")]
     WithinSpan {
         // This keeps the span alive until the error is reported, so the error is logged within the
@@ -71,6 +73,12 @@ pub enum CliError {
     BenchmarkSelectionError(#[source] HybridDiskError),
     #[error("running {0} benchmarks failed")]
     BenchmarksFailed(NonZeroUsize),
+
+    // export command
+    #[error("--host cannot be used with a --config filter that includes a host key")]
+    HostFilterConflict,
+    #[error("host '{0}' not found")]
+    InvalidHostFilter(String),
 
     // debug command
     #[error("failed to construct benchmark: {0}")]

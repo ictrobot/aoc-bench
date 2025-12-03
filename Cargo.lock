@@ -83,6 +83,7 @@ dependencies = [
  "hostname",
  "jiff",
  "libc",
+ "once_cell",
  "rand",
  "rand_xoshiro",
  "rusqlite",

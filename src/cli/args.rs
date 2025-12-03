@@ -1,6 +1,6 @@
 use crate::cli::CliError;
-use aoc_bench::config::{Benchmark, BenchmarkId, Config, ConfigFile};
-use aoc_bench::engine::{RunEngine, RunEngineConfig};
+use aoc_bench::config::{Benchmark, BenchmarkId, Config, ConfigError, ConfigFile};
+use aoc_bench::engine::{RunEngine, RunEngineConfig, StatsEngine};
 use aoc_bench::host_config::{CpuAffinity, HostConfig};
 use clap::Args;
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ impl TryFrom<CommonRunArgs> for RunEngine {
 }
 
 #[derive(Clone, Debug, Args)]
-pub struct CommonFilterArgs {
+pub struct CommonRunFilterArgs {
     /// Config filter (key=value,key=value format, host key not allowed)
     #[arg(long)]
     config: Option<String>,
@@ -54,13 +54,78 @@ pub struct CommonFilterArgs {
     benchmark: Option<String>,
 }
 
-impl CommonFilterArgs {
+impl CommonRunFilterArgs {
     pub fn get_filter<'a>(
         &self,
         config_file: &'a ConfigFile,
     ) -> Result<(Option<&'a Benchmark>, Config), CliError> {
         let benchmark = get_benchmark_filter(config_file, self.benchmark.as_deref())?;
-        let config = get_config_filter(config_file, self.config.as_deref())?;
+        let config = get_config_filter(
+            config_file,
+            self.config.as_deref(),
+            ConfigFile::config_without_host_from_string,
+        )?;
+
+        Ok((benchmark, config))
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct CommonStatsArgs {
+    /// Path to the data directory (defaults to ./data)
+    #[arg(long, value_parser = clap::value_parser!(PathBuf))]
+    data_dir: Option<PathBuf>,
+}
+
+impl TryFrom<CommonStatsArgs> for StatsEngine {
+    type Error = CliError;
+
+    fn try_from(value: CommonStatsArgs) -> Result<Self, Self::Error> {
+        let config_file = get_config_file(value.data_dir.as_deref(), None)?;
+
+        Ok(StatsEngine::new(config_file))
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct CommonStatsFilterArgs {
+    /// Config filter (key=value,key=value format)
+    #[arg(long)]
+    config: Option<String>,
+
+    /// Host filter. Equivalent to `--config host=<host>`
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Benchmark filter
+    #[arg(value_name = "BENCH")]
+    benchmark: Option<String>,
+}
+
+impl CommonStatsFilterArgs {
+    pub fn get_filter<'a>(
+        &self,
+        config_file: &'a ConfigFile,
+    ) -> Result<(Option<&'a Benchmark>, Config), CliError> {
+        let benchmark = get_benchmark_filter(config_file, self.benchmark.as_deref())?;
+        let mut config = get_config_filter(
+            config_file,
+            self.config.as_deref(),
+            ConfigFile::config_from_string,
+        )?;
+
+        if let Some(host) = self.host.as_deref() {
+            let host_key = config_file.host_key();
+            if config.get(host_key).is_some() {
+                return Err(CliError::HostFilterConflict {});
+            }
+
+            let host_kv = host_key
+                .value_from_name(host)
+                .ok_or_else(|| CliError::InvalidHostFilter(host.to_string()))?;
+            config = config.with(host_kv.clone());
+        }
+
         Ok((benchmark, config))
     }
 }
@@ -125,17 +190,16 @@ pub fn get_benchmark_filter<'a>(
     }
 }
 
-pub fn get_config_filter(
+fn get_config_filter(
     config_file: &ConfigFile,
     value: Option<&str>,
+    parse_fn: fn(&ConfigFile, &str) -> Result<Config, ConfigError>,
 ) -> Result<Config, CliError> {
     match value {
         None => Ok(Config::new()),
-        Some(s) => config_file
-            .config_without_host_from_string(s)
-            .map_err(|error| CliError::InvalidConfigFilter {
-                value: s.to_string(),
-                error,
-            }),
+        Some(s) => parse_fn(config_file, s).map_err(|error| CliError::InvalidConfigFilter {
+            value: s.to_string(),
+            error,
+        }),
     }
 }

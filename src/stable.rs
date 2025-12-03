@@ -1,7 +1,7 @@
 //! Stable result management: drift detection and promotion logic.
 
 use crate::run::RunSeries;
-use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage};
+use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage, StorageRead};
 use std::path::PathBuf;
 
 const STABLE_RESULT_CHANGE_REL_THRESHOLD: f64 = 0.03; // 3%
@@ -29,7 +29,7 @@ pub fn record_run_series<S: Storage>(
 ///
 /// This runs the same drift-detection logic as [`record_run_series`] and returns the outcome
 /// that would occur, but leaves storage untouched.
-pub fn preview_run_series<S: Storage>(
+pub fn preview_run_series<S: StorageRead>(
     storage: &S,
     series: &RunSeries,
     options: RecordOptions,
@@ -40,7 +40,7 @@ pub fn preview_run_series<S: Storage>(
     })
 }
 
-fn process_series<S: Storage>(
+fn process_series<S: StorageRead>(
     storage: &S,
     tx: &S::Tx<'_>,
     series: &RunSeries,
@@ -50,7 +50,7 @@ fn process_series<S: Storage>(
         mut row,
         stable_stats,
         ..
-    }) = storage.get_results_with_stats(tx, &series.bench, &series.config)?
+    }) = storage.get_result_with_stats(tx, &series.bench, &series.config)?
     {
         let outcome = compute_outcome(&mut row, stable_stats, series, options.force_update_stable);
         Ok((row, outcome))
@@ -224,7 +224,7 @@ mod tests {
 
         let results_row = storage
             .write_transaction(|tx| {
-                storage.get_results_with_stats(tx, &series.bench, &series.config)
+                storage.get_result_with_stats(tx, &series.bench, &series.config)
             })
             .unwrap()
             .unwrap();
@@ -248,7 +248,7 @@ mod tests {
         storage
             .write_transaction(|tx| {
                 let mut row = storage
-                    .get_results_with_stats(tx, &stable.bench, &stable.config)?
+                    .get_result_with_stats(tx, &stable.bench, &stable.config)?
                     .unwrap()
                     .row;
                 row.suspicious_count = 1;
@@ -261,7 +261,7 @@ mod tests {
 
         let results_row = storage
             .write_transaction(|tx| {
-                storage.get_results_with_stats(tx, &stable.bench, &stable.config)
+                storage.get_result_with_stats(tx, &stable.bench, &stable.config)
             })
             .unwrap()
             .unwrap();
@@ -283,7 +283,7 @@ mod tests {
         storage
             .write_transaction(|tx| {
                 let mut row = storage
-                    .get_results_with_stats(tx, &stable.bench, &stable.config)?
+                    .get_result_with_stats(tx, &stable.bench, &stable.config)?
                     .unwrap()
                     .row;
                 row.matched_count = 54;
@@ -299,7 +299,7 @@ mod tests {
 
             let results_row = storage
                 .write_transaction(|tx| {
-                    storage.get_results_with_stats(tx, &stable.bench, &stable.config)
+                    storage.get_result_with_stats(tx, &stable.bench, &stable.config)
                 })
                 .unwrap()
                 .unwrap();
@@ -357,7 +357,7 @@ mod tests {
 
         let results_row = storage
             .write_transaction(|tx| {
-                storage.get_results_with_stats(tx, &stable.bench, &stable.config)
+                storage.get_result_with_stats(tx, &stable.bench, &stable.config)
             })
             .unwrap()
             .unwrap();
@@ -378,7 +378,7 @@ mod tests {
         storage
             .write_transaction(|tx| {
                 let mut row = storage
-                    .get_results_with_stats(tx, &stable.bench, &stable.config)?
+                    .get_result_with_stats(tx, &stable.bench, &stable.config)?
                     .unwrap()
                     .row;
                 row.suspicious_count = 2;
@@ -400,9 +400,7 @@ mod tests {
 
         // Storage state should remain unchanged after preview.
         let results_row = storage
-            .read_transaction(|tx| {
-                storage.get_results_with_stats(tx, &stable.bench, &stable.config)
-            })
+            .read_transaction(|tx| storage.get_result_with_stats(tx, &stable.bench, &stable.config))
             .unwrap()
             .unwrap();
 
