@@ -1,8 +1,8 @@
 use crate::cli::CliError;
 use crate::cli::args::{CommonStatsArgs, CommonStatsFilterArgs};
 use crate::cli::format::format_duration_ns;
-use aoc_bench::config::{Benchmark, Config};
-use aoc_bench::engine::{FastestResult, StatsEngine, StatsEngineError};
+use aoc_bench::config::Config;
+use aoc_bench::engine::{FastestResult, StatsEngine};
 use clap::Args;
 use std::io::{self, Write};
 
@@ -19,10 +19,11 @@ pub fn execute(args: FastestArgs) -> Result<(), CliError> {
     let engine: StatsEngine = args.stats.try_into()?;
     let (benchmark, config) = args.filter.get_filter(&engine.config_file)?;
 
-    let fastest = engine.fastest_configs(benchmark.map(Benchmark::id), &config)?;
+    let fastest = engine.fastest_configs(benchmark, &config)?;
 
-    print_fastest(&fastest, &config)
-        .map_err(|error| CliError::StatsEngineError(StatsEngineError::OutputError(error)))
+    let _ = print_fastest(&fastest, &config);
+
+    Ok(())
 }
 
 fn print_fastest(fastest: &[FastestResult], config_filter: &Config) -> io::Result<()> {

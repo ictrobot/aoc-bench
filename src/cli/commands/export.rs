@@ -1,6 +1,5 @@
 use crate::cli::CliError;
 use crate::cli::args::{CommonStatsArgs, CommonStatsFilterArgs};
-use aoc_bench::config::Benchmark;
 use aoc_bench::engine::{StatsEngine, StatsEngineError};
 use clap::Args;
 use std::io;
@@ -20,7 +19,7 @@ pub fn execute(args: ExportArgs) -> Result<(), CliError> {
 
     let mut stdout = io::BufWriter::new(io::stdout().lock());
 
-    match engine.export_tsv(&mut stdout, benchmark.map(Benchmark::id), &config) {
+    match engine.export_tsv(&mut stdout, benchmark, &config) {
         Ok(()) | Err(StatsEngineError::OutputError(_)) => {
             // Ignore any errors writing to stdout. This ensures that e.g. `| head -n10` doesn't error
             Ok(())

@@ -105,7 +105,7 @@ impl CommonStatsFilterArgs {
     pub fn get_filter<'a>(
         &self,
         config_file: &'a ConfigFile,
-    ) -> Result<(Option<&'a Benchmark>, Config), CliError> {
+    ) -> Result<(Option<&'a BenchmarkId>, Config), CliError> {
         let benchmark = get_benchmark_filter(config_file, self.benchmark.as_deref())?;
         let mut config = get_config_filter(
             config_file,
@@ -125,7 +125,7 @@ impl CommonStatsFilterArgs {
             config = config.with(host_kv.clone());
         }
 
-        Ok((benchmark, config))
+        Ok((benchmark.map(Benchmark::id), config))
     }
 }
 

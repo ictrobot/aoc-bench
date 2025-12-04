@@ -80,10 +80,16 @@ pub enum CliError {
     HostFilterConflict,
     #[error("host '{0}' not found")]
     InvalidHostFilter(String),
+    #[error("threshold must be positive")]
+    InvalidThreshold,
 
     // timeline command
     #[error("benchmark argument is required")]
     BenchmarkRequired,
+
+    // impact command
+    #[error("comparison must be a single key=value pair (e.g. commit=abc1234); got '{0}'")]
+    InvalidImpactComparison(String),
 
     // debug command
     #[error("failed to construct benchmark: {0}")]

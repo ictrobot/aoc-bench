@@ -196,12 +196,11 @@
 
 ### 7.5 `impact` Command
 
-- [ ] Parse commit comparison (commit=X)
-- [ ] Find previous commit in config.json ordering
-- [ ] Query results for both commits
-- [ ] Match configs (ignoring comparison key)
-- [ ] Group into regressions/improvements/unchanged
-- [ ] Format output summary
+- [x] Parse comparison key-value
+- [x] Query results in previous and new value
+- [x] Match configs (ignoring comparison key)
+- [x] Group into regressions/improvements/unchanged
+- [x] Format output summary
 
 ## Phase 8: Host configuration
 

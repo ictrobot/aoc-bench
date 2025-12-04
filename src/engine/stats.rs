@@ -1,5 +1,5 @@
 use crate::config::{BenchmarkId, Config, ConfigFile, Key, KeyValue};
-use crate::stable::{Change, significant_change_with_threshold};
+use crate::stable::{Change, ChangeDirection, significant_change_with_threshold};
 use crate::storage::{
     HybridDiskStorage, MultiHostError, MultiHostStorage, ResultsRowWithStats, RunSeriesStats,
     StorageRead,
@@ -270,6 +270,124 @@ impl StatsEngine {
             omitted,
         })
     }
+
+    /// Compare stable results for a single config key change and classify regressions/improvements.
+    pub fn impact(
+        &self,
+        comparison_value: &KeyValue,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+        rel_threshold: f64,
+    ) -> Result<ImpactSummary, StatsEngineError> {
+        if config_filter.get(comparison_value.key()).is_some() {
+            return Err(StatsEngineError::ComparisonKeyInFilter(
+                comparison_value.key().name().to_string(),
+            ));
+        }
+
+        let comparison_key = comparison_value.key().clone();
+        let value_index = comparison_value.value_index();
+        let Some(previous_value) = value_index
+            .checked_sub(1)
+            .and_then(|idx| comparison_key.values().nth(idx))
+        else {
+            return Err(StatsEngineError::NoPreviousValue {
+                key: comparison_key.name().to_string(),
+                value: comparison_value.value_name().to_string(),
+            });
+        };
+
+        let mut current: BTreeMap<(BenchmarkId, Config), RunSeriesStats> = BTreeMap::new();
+        let mut previous: BTreeMap<(BenchmarkId, Config), RunSeriesStats> = BTreeMap::new();
+
+        let with_current = config_filter.with(comparison_value.clone());
+        self.storage.read_transaction(|tx| {
+            self.storage
+                .for_each_result_with_stats(tx, benchmark_filter, &with_current, |rows| {
+                    for row in rows {
+                        current.insert(
+                            (
+                                row.row.bench.clone(),
+                                row.row.config.without_key(&comparison_key),
+                            ),
+                            row.stable_stats,
+                        );
+                    }
+                    ControlFlow::Continue(())
+                })
+        })?;
+
+        if current.is_empty() {
+            return Err(StatsEngineError::NoResultsForComparison {
+                key: comparison_key.name().to_string(),
+                value: comparison_value.value_name().to_string(),
+            });
+        }
+
+        let with_previous = config_filter.with(previous_value.clone());
+        self.storage.read_transaction(|tx| {
+            self.storage
+                .for_each_result_with_stats(tx, benchmark_filter, &with_previous, |rows| {
+                    for row in rows {
+                        previous.insert(
+                            (
+                                row.row.bench.clone(),
+                                row.row.config.without_key(&comparison_key),
+                            ),
+                            row.stable_stats,
+                        );
+                    }
+                    ControlFlow::Continue(())
+                })
+        })?;
+
+        if previous.is_empty() {
+            return Err(StatsEngineError::NoPreviousResults {
+                key: comparison_key.name().to_string(),
+                value: previous_value.value_name().to_string(),
+            });
+        }
+
+        let mut regressions = Vec::new();
+        let mut improvements = Vec::new();
+        let mut unchanged = 0usize;
+        let mut missing_previous = 0usize;
+
+        for ((bench, config), current_stats) in current {
+            if let Some(prev_stats) = previous.get(&(bench.clone(), config.clone())) {
+                if let Some(change) =
+                    significant_change_with_threshold(*prev_stats, current_stats, rel_threshold)
+                {
+                    let entry = ImpactEntry {
+                        bench,
+                        config,
+                        previous_stats: *prev_stats,
+                        current_stats,
+                        change,
+                    };
+
+                    match change.direction {
+                        ChangeDirection::Regression => regressions.push(entry),
+                        ChangeDirection::Improvement => improvements.push(entry),
+                    }
+                } else {
+                    unchanged += 1;
+                }
+            } else {
+                missing_previous += 1;
+            }
+        }
+
+        Ok(ImpactSummary {
+            comparison_key,
+            previous_value,
+            current_value: comparison_value.clone(),
+            regressions,
+            improvements,
+            unchanged,
+            missing_previous,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -305,6 +423,26 @@ pub struct TimelineSummary {
     pub omitted: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ImpactEntry {
+    pub bench: BenchmarkId,
+    pub config: Config,
+    pub previous_stats: RunSeriesStats,
+    pub current_stats: RunSeriesStats,
+    pub change: Change,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImpactSummary {
+    pub comparison_key: Key,
+    pub previous_value: KeyValue,
+    pub current_value: KeyValue,
+    pub regressions: Vec<ImpactEntry>,
+    pub improvements: Vec<ImpactEntry>,
+    pub unchanged: usize,
+    pub missing_previous: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StatsEngineError {
     #[error("failed to read storage: {0}")]
@@ -326,6 +464,14 @@ pub enum StatsEngineError {
         "multiple varying keys found ({0}); narrow the --config filter so only one key differs"
     )]
     MultipleVaryingKeys(String),
+    #[error("comparison key '{0}' must not be included in --config filter")]
+    ComparisonKeyInFilter(String),
+    #[error("no previous value for {key} before {value}")]
+    NoPreviousValue { key: String, value: String },
+    #[error("no results found with {key}={value}")]
+    NoResultsForComparison { key: String, value: String },
+    #[error("no results found with previous {key}={value}")]
+    NoPreviousResults { key: String, value: String },
 }
 
 #[cfg(test)]
@@ -393,6 +539,84 @@ mod tests {
             mk_series(&bench1, "x", 1_700_000_000),
             mk_series(&bench1, "y", 1_700_000_100),
             mk_series(&bench2, "x", 1_700_000_200),
+        ];
+
+        for s in series {
+            storage.write_run_series_json(s.clone()).unwrap();
+            storage
+                .write_transaction(|tx| {
+                    storage.insert_run_series(tx, &s)?;
+                    storage.upsert_results(
+                        tx,
+                        &crate::storage::ResultsRow {
+                            bench: s.bench.clone(),
+                            config: s.config.clone(),
+                            stable_series_timestamp: s.timestamp,
+                            last_series_timestamp: s.timestamp,
+                            suspicious_count: 0,
+                            matched_count: 0,
+                            replaced_count: 0,
+                        },
+                    )
+                })
+                .unwrap();
+        }
+
+        let engine = StatsEngine::new(config_file);
+        (dir, engine)
+    }
+
+    fn setup_impact_storage() -> (TempDir, StatsEngine) {
+        let dir = TempDir::new().unwrap();
+        let host = "h1";
+        let json = r#"{
+            "config_keys": {
+                "commit": { "values": ["a", "b"] },
+                "threads": { "values": ["1", "2"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{commit}", "{threads}"],
+                    "config": { "commit": ["a", "b"], "threads": ["1", "2"] }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(dir.path(), Some(host), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), host).unwrap();
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+
+        let mk_series = |commit: &str, threads: &str, mean: f64, ts: i64| crate::run::RunSeries {
+            schema: 1,
+            bench: bench.clone(),
+            config: config_file
+                .config_from_string(&format!("commit={commit},threads={threads},host={host}"))
+                .unwrap(),
+            timestamp: Timestamp::from_second(ts).unwrap(),
+            runs: vec![Run {
+                timestamp: Timestamp::from_second(ts + 1).unwrap(),
+                stats: StatsResult {
+                    mean_ns_per_iter: mean,
+                    ci95_half_width_ns: 1.0,
+                    mode: EstimationMode::PerIter,
+                    intercept_ns: None,
+                    outlier_count: 0,
+                    temporal_correlation: 0.0,
+                    samples: vec![Sample {
+                        iters: 10,
+                        total_ns: 100,
+                    }],
+                },
+            }],
+            checksum: None,
+        };
+
+        let series = [
+            mk_series("a", "1", 100.0, 1_000),
+            mk_series("a", "2", 200.0, 1_100),
+            mk_series("b", "1", 120.0, 1_200), // regression vs a/1
+            mk_series("b", "2", 150.0, 1_300), // improvement vs a/2
         ];
 
         for s in series {
@@ -663,6 +887,57 @@ mod tests {
         assert_eq!(summary.changes[2].0.comparison_value.value_name(), "f");
         assert_eq!(summary.changes[2].1.direction, ChangeDirection::Improvement);
         assert!((summary.changes[2].1.rel_change - 0.5935).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_impact_groups_changes() {
+        let (_dir, engine) = setup_impact_storage();
+        let commit_key = engine.config_file.key_from_name("commit").unwrap();
+        let comparison_value = commit_key.value_from_name("b").unwrap();
+
+        let summary = engine
+            .impact(&comparison_value, None, &Config::new(), 0.03)
+            .expect("impact succeeds");
+
+        assert_eq!(summary.regressions.len(), 1);
+        assert_eq!(summary.improvements.len(), 1);
+        assert_eq!(summary.unchanged, 0);
+        assert_eq!(summary.missing_previous, 0);
+
+        assert_eq!(
+            summary.regressions[0]
+                .config
+                .get_by_name("threads")
+                .unwrap()
+                .value_name(),
+            "1"
+        );
+        assert_eq!(
+            summary.improvements[0]
+                .config
+                .get_by_name("threads")
+                .unwrap()
+                .value_name(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn test_impact_rejects_filter_with_comparison_key() {
+        let (_dir, engine) = setup_impact_storage();
+        let commit_key = engine.config_file.key_from_name("commit").unwrap();
+        let comparison_value = commit_key.value_from_name("b").unwrap();
+
+        let filter = engine
+            .config_file
+            .config_from_string("commit=a,threads=1")
+            .unwrap();
+
+        let err = engine
+            .impact(&comparison_value, None, &filter, 0.03)
+            .unwrap_err();
+
+        assert!(matches!(err, StatsEngineError::ComparisonKeyInFilter(_)));
     }
 
     #[test]

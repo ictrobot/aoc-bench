@@ -1352,15 +1352,14 @@ aoc-bench impact --config profile=release commit=abc1234
 **Output format:**
 
 ```text
-Commit: abc1234
-Filter: profile=release
-
-REGRESSIONS:
-  2015-04 [threads=1]     30.93ms → 32.10ms  +3.7%
+Comparison from commit=aaa1111 to commit=abc1234, filtered to profile=release
 
 IMPROVEMENTS:
   2015-04 [threads=32]    5.20ms → 4.15ms    -20%
   2015-06 [threads=1]     28.50ms → 25.10ms  -11.93%
+
+REGRESSIONS:
+  2015-04 [threads=1]     30.93ms → 32.10ms  +3.7%
 
 17 configs unchanged
 ```
@@ -1372,7 +1371,9 @@ IMPROVEMENTS:
 - Finds all results with `commit=def4567` (and optionally filtered by a partial config)
 - For each pair of results with the same config (ignoring the comparison key), determines if there was a regression,
   improvement, or no significant change
-- Outputs a summary of the regressions and improvements
+- Uses a relative change threshold (`--threshold`, default 15%) and requires non-overlapping CIs (similar to
+  `timeline`).
+- Outputs a summary with improvements and regressions.
 
 ## 13.4 Web UI (future)
 

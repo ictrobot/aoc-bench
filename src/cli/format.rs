@@ -1,5 +1,11 @@
 use aoc_bench::stable::{Change, ChangeDirection};
 
+// 4 before dot, 1 for dot, 2 after dot, 1 for space, 2 for unit
+pub const DURATION_WIDTH: usize = 10;
+
+// 1 for +-, 3 before dot, 1 for dot, 2 after dot, 1 for %
+pub const DELTA_WIDTH: usize = 8;
+
 pub fn format_duration_ns(ns: f64) -> String {
     if ns >= 1_000_000_000.0 {
         format!("{:.2} s", ns / 1_000_000_000.0)
