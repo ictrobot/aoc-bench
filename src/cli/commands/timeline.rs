@@ -1,8 +1,8 @@
 use crate::cli::CliError;
 use crate::cli::args::{CommonStatsArgs, CommonStatsFilterArgs};
+use crate::cli::format::{format_ci, format_delta, format_duration_ns};
 use aoc_bench::config::Benchmark;
 use aoc_bench::engine::{StatsEngine, StatsEngineError, TimelineSummary};
-use aoc_bench::stable::{Change, ChangeDirection};
 use clap::Args;
 use std::io::{self, Write};
 
@@ -99,28 +99,4 @@ fn print_timeline(timeline: &TimelineSummary) -> io::Result<()> {
     }
 
     out.flush()
-}
-
-fn format_duration_ns(ns: f64) -> String {
-    if ns >= 1_000_000_000.0 {
-        format!("{:.2} s", ns / 1_000_000_000.0)
-    } else if ns >= 1_000_000.0 {
-        format!("{:.2} ms", ns / 1_000_000.0)
-    } else if ns >= 1_000.0 {
-        format!("{:.2} µs", ns / 1_000.0)
-    } else {
-        format!("{ns:.0} ns")
-    }
-}
-
-fn format_ci(ns: f64) -> String {
-    format!("±{}", format_duration_ns(ns))
-}
-
-fn format_delta(change: Change) -> String {
-    let pct = change.rel_change * 100.0;
-    match change.direction {
-        ChangeDirection::Regression => format!("+{pct:.2}%"),
-        ChangeDirection::Improvement => format!("-{pct:.2}%"),
-    }
 }

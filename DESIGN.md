@@ -41,6 +41,11 @@ The `aoc-bench` tool provides the following subcommands:
     * Automatically detects comparison key (unspecified dimension)
     * Shows regressions and improvements with delta percentages
 
+* **`fastest`** - List fastest config per benchmark
+    * Respects benchmark/config/host filters
+    * Prints benchmark name, fastest config (minus shared filters), and mean time
+    * Includes a total row summing mean times across the listed benchmarks
+
 * **`impact`** - Show which benchmarks changed for a specific config value
     * Compares results before/after a config key change
     * Groups results into regressions, improvements, and unchanged

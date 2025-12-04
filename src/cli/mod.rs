@@ -1,5 +1,6 @@
 mod args;
 mod commands;
+pub mod format;
 pub mod logging;
 
 use crate::cli::commands::Commands;

@@ -1,5 +1,6 @@
 mod debug;
 mod export;
+mod fastest;
 mod impact;
 mod run;
 mod run_all;
@@ -25,6 +26,9 @@ pub enum Commands {
     /// Show which benchmarks changed for a specific config value
     Impact(impact::ImpactArgs),
 
+    /// Show the fastest config for each benchmark
+    Fastest(fastest::FastestArgs),
+
     /// Debug the runner independently with a raw command
     Debug(debug::DebugArgs),
 }
@@ -37,6 +41,7 @@ impl Commands {
             Commands::Export(args) => export::execute(args),
             Commands::Timeline(args) => timeline::execute(args),
             Commands::Impact(args) => impact::execute(args),
+            Commands::Fastest(args) => fastest::execute(args),
             Commands::Debug(args) => debug::execute(args),
         }
     }

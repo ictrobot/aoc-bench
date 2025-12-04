@@ -5,6 +5,7 @@ use crate::storage::{
     StorageRead,
 };
 use jiff::Timestamp;
+use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 use std::ops::ControlFlow;
@@ -96,6 +97,49 @@ impl StatsEngine {
         io_result.map_err(StatsEngineError::OutputError)
     }
 
+    /// Find the fastest stable config for each matching benchmark.
+    pub fn fastest_configs(
+        &self,
+        benchmark_filter: Option<&BenchmarkId>,
+        config_filter: &Config,
+    ) -> Result<Vec<FastestResult>, StatsEngineError> {
+        let mut fastest: BTreeMap<BenchmarkId, FastestResult> = BTreeMap::new();
+
+        self.storage.read_transaction(|tx| {
+            self.storage
+                .for_each_result_with_stats(tx, benchmark_filter, config_filter, |rows| {
+                    for row in rows {
+                        let entry =
+                            fastest
+                                .entry(row.row.bench.clone())
+                                .or_insert_with(|| FastestResult {
+                                    bench: row.row.bench.clone(),
+                                    config: row.row.config.clone(),
+                                    stable_stats: row.stable_stats,
+                                });
+
+                        if row.stable_stats.median_run_mean_ns
+                            < entry.stable_stats.median_run_mean_ns
+                        {
+                            *entry = FastestResult {
+                                bench: row.row.bench.clone(),
+                                config: row.row.config.clone(),
+                                stable_stats: row.stable_stats,
+                            };
+                        }
+                    }
+
+                    ControlFlow::Continue(())
+                })
+        })?;
+
+        if fastest.is_empty() {
+            return Err(StatsEngineError::NoResults);
+        }
+
+        Ok(fastest.into_values().collect())
+    }
+
     /// Build a sorted timeline of stable results across a single varying config key.
     pub fn timeline(
         &self,
@@ -113,18 +157,17 @@ impl StatsEngine {
         })?;
 
         if rows.is_empty() {
-            return Err(TimelineError::NoResults.into());
+            return Err(StatsEngineError::NoResults);
         }
 
         let expected_keys: Vec<&Key> = rows[0].row.config.iter().map(KeyValue::key).collect();
         for row in &rows[1..] {
             let keys: Vec<&Key> = row.row.config.iter().map(KeyValue::key).collect();
             if keys != expected_keys {
-                return Err(TimelineError::MismatchedKeys {
+                return Err(StatsEngineError::MismatchedKeys {
                     expected: expected_keys.iter().map(|k| k.name().to_string()).collect(),
                     found: keys.iter().map(|k| k.name().to_string()).collect(),
-                }
-                .into());
+                });
             }
         }
 
@@ -141,7 +184,7 @@ impl StatsEngine {
         }
 
         let comparison_key = match varying_keys.len() {
-            0 => return Err(TimelineError::NoVaryingKey.into()),
+            0 => return Err(StatsEngineError::NoVaryingKey),
             1 => varying_keys.remove(0),
             _ => {
                 let keys = varying_keys
@@ -149,7 +192,7 @@ impl StatsEngine {
                     .map(|k| k.name().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(TimelineError::MultipleVaryingKeys(keys).into());
+                return Err(StatsEngineError::MultipleVaryingKeys(keys));
             }
         };
 
@@ -200,7 +243,7 @@ impl StatsEngine {
         let timeline = self.timeline(benchmark, config_filter)?;
 
         let Some(initial) = timeline.points.first().cloned() else {
-            return Err(TimelineError::NoResults.into());
+            return Err(StatsEngineError::NoResults);
         };
 
         let mut omitted = 0usize;
@@ -227,6 +270,13 @@ impl StatsEngine {
             omitted,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FastestResult {
+    pub bench: BenchmarkId,
+    pub config: Config,
+    pub stable_stats: RunSeriesStats,
 }
 
 #[derive(Debug, Clone)]
@@ -261,13 +311,7 @@ pub enum StatsEngineError {
     StorageError(#[from] MultiHostError<HybridDiskStorage>),
     #[error("error writing output: {0}")]
     OutputError(#[source] io::Error),
-    #[error("timeline query failed: {0}")]
-    TimelineError(#[from] TimelineError),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TimelineError {
-    #[error("no stable results found for the requested benchmark/config")]
+    #[error("no matching benchmark results found")]
     NoResults,
     #[error(
         "matched configs do not share the same set of keys (expected: {expected:?}, found: {found:?})"
@@ -440,10 +484,7 @@ mod tests {
         let bench: BenchmarkId = "bench2".try_into().unwrap();
 
         let err = engine.timeline(&bench, &Config::new()).unwrap_err();
-        assert!(matches!(
-            err,
-            StatsEngineError::TimelineError(TimelineError::NoVaryingKey)
-        ));
+        assert!(matches!(err, StatsEngineError::NoVaryingKey));
     }
 
     #[test]
@@ -474,9 +515,9 @@ mod tests {
             config: config_file
                 .config_from_string(&format!("build={build},commit={commit},host={host}"))
                 .unwrap(),
-            timestamp: jiff::Timestamp::from_second(i64::from(ts)).unwrap(),
+            timestamp: Timestamp::from_second(i64::from(ts)).unwrap(),
             runs: vec![Run {
-                timestamp: jiff::Timestamp::from_second(i64::from(ts) + 1).unwrap(),
+                timestamp: Timestamp::from_second(i64::from(ts) + 1).unwrap(),
                 stats: StatsResult {
                     mean_ns_per_iter: f64::from(ts),
                     ci95_half_width_ns: 1.0,
@@ -522,10 +563,7 @@ mod tests {
 
         let engine = StatsEngine::new(config_file);
         let err = engine.timeline(&bench, &Config::new()).unwrap_err();
-        assert!(matches!(
-            err,
-            StatsEngineError::TimelineError(TimelineError::MultipleVaryingKeys(_))
-        ));
+        assert!(matches!(err, StatsEngineError::MultipleVaryingKeys(_)));
     }
 
     #[test]
@@ -625,5 +663,39 @@ mod tests {
         assert_eq!(summary.changes[2].0.comparison_value.value_name(), "f");
         assert_eq!(summary.changes[2].1.direction, ChangeDirection::Improvement);
         assert!((summary.changes[2].1.rel_change - 0.5935).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_fastest_configs_selects_min_per_bench() {
+        let (_dir, engine) = setup_storage("h1");
+
+        let fastest = engine
+            .fastest_configs(None, &Config::new())
+            .expect("query succeeds");
+
+        assert_eq!(fastest.len(), 2);
+
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+        let bench2: BenchmarkId = "bench2".try_into().unwrap();
+
+        assert_eq!(fastest[0].bench, bench);
+        assert_eq!(fastest[0].config.to_string(), "build=x,host=h1");
+        assert!((fastest[0].stable_stats.median_run_mean_ns - 1_700_000_010.0).abs() < 1e-4);
+
+        assert_eq!(fastest[1].bench, bench2);
+        assert_eq!(fastest[1].config.to_string(), "build=x,host=h1");
+        assert!((fastest[1].stable_stats.median_run_mean_ns - 1_700_000_210.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_fastest_configs_errors_on_empty() {
+        let (_dir, engine) = setup_storage("h1");
+        let missing: BenchmarkId = "missing".try_into().unwrap();
+
+        let err = engine
+            .fastest_configs(Some(&missing), &Config::new())
+            .unwrap_err();
+
+        assert!(matches!(err, StatsEngineError::NoResults));
     }
 }
