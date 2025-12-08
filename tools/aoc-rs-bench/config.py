@@ -19,7 +19,7 @@ class BuildPuzzleDetails(TypedDict):
 
 
 class MatrixBuilder:
-    BUILDS = ["generic", "generic_lto", "native_lto"]
+    BUILDS = ["generic", "native"]
 
     def __init__(self, data_dir: Path, inputs_dir: Path):
         self.data_dir = data_dir
@@ -70,7 +70,7 @@ class MatrixBuilder:
 
         for commit in commits:
             for kind in MatrixBuilder.BUILDS:
-                f = self.builds_dir / kind / commit
+                f = self.builds_dir / kind / commit / "2015-01"
                 if not f.is_file():
                     missing.append(str(f))
 
@@ -128,7 +128,7 @@ class MatrixBuilder:
 
     async def process_build(self, commit: str, kind: str, sem: asyncio.Semaphore, results: dict):
         async with sem:
-            puzzles = await self.get_build_puzzles(commit, kind)
+            puzzles = self.get_build_puzzles(commit, kind)
             for puzzle in puzzles:
                 details = await self.get_build_puzzle_details(commit, kind, puzzle)
                 for v in details["multiversion"]:
@@ -195,10 +195,8 @@ class MatrixBuilder:
         return {
             "benchmark": name,
             "command": [
-                "builds/{build}/{commit}",
+                f"builds/{{build}}/{{commit}}/{year}-{day}",
                 "bench",
-                year,
-                day,
                 "{threads}",
                 "{multiversion}",
             ],
@@ -210,32 +208,27 @@ class MatrixBuilder:
             )
         }
 
-    async def get_build_puzzles(self, commit: str, kind: str) -> list[tuple[str, str]]:
-        cache = self.cache[commit][kind]
-        if not cache:
-            build = str(self.build_path(commit, kind))
-            puzzles_code, puzzles_stdout, puzzles_stderr = await run(build, "puzzles")
+    def get_build_puzzles(self, commit: str, kind: str) -> list[tuple[str, str]]:
+        build_dir = self.commit_build_dir(commit, kind)
 
-            if puzzles_code != 0 or puzzles_stderr != "":
-                raise RuntimeError(f"error: gathering puzzles from {build} failed with exit code {puzzles_code}")
+        puzzles = []
+        for filename in os.listdir(build_dir):
+            if re.fullmatch(r"\d{4}-\d{2}", filename):
+                year, day = filename.split("-")
+                puzzles.append((year, day))
+            else:
+                raise RuntimeError(f"error: unexpected filename under {build_dir}: {filename}")
 
-            for line in puzzles_stdout.splitlines():
-                if re.fullmatch(r"\d{4} \d{2}", line):
-                    year, day = line.split(" ")
-                    _unused = cache[year][day]
-                else:
-                    raise RuntimeError(f"error: unexpected output from {build} puzzles: {line}")
-
-        return [(year, day) for year in cache for day in cache[year]]
+        return puzzles
 
     async def get_build_puzzle_details(self, commit: str, kind: str, puzzle: tuple[str, str]) -> BuildPuzzleDetails:
         year, day = puzzle
         cache = self.cache[commit][kind][year][day]
         if not cache:
-            build = str(self.build_path(commit, kind))
+            build = str(self.build_path(commit, kind, puzzle))
             input_hash = self.get_input_hash(year, day)
 
-            code, stdout, stderr, trace = await strace_run(build, "check", year, day,
+            code, stdout, stderr, trace = await strace_run(build, "check",
                                                            stdin=self.required_inputs[input_hash],
                                                            strace_filter="trace=clone,clone3,fork,vfork")
             if code != 0 or stderr != "":
@@ -263,8 +256,11 @@ class MatrixBuilder:
 
         return input_hash
 
-    def build_path(self, commit: str, kind: str) -> Path:
+    def commit_build_dir(self, commit: str, kind: str) -> Path:
         return self.builds_dir / kind / commit
+
+    def build_path(self, commit: str, kind: str, puzzle: tuple[str, str]) -> Path:
+        return self.commit_build_dir(commit, kind) / f"{puzzle[0]}-{puzzle[1]}"
 
 
 def write_atomic(file: Path, binary: bool, write_fn):

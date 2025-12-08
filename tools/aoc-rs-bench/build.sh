@@ -27,21 +27,20 @@ framework_revisions=(
     "9676a84981560f110728475366b9170c47972884" # glue-v2 Multiversion support
     "2ee87f5e33a26a1fc99237c49120214a568c014c" # glue-v3 Multithreading support
     "ab1e77c27919360630046d825583af16a1423d16" # glue-v4 Year 2016 added
-    "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Nested macro repeats for year and day
-    "421df7084cf3de9e7279ca9b841fed222c6b33fa" # glue-v6 One DATE constant instead of YEAR and DAY
+    "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Year crates reexported from aoc, nested macro repeats for year and day
 )
 
-# Skip native without LTO to reduce the total number of configurations.
-# It also means the profiles follow a logical progression where subsequent profiles only enable more features
 profiles=(
     "generic"
-    "generic_lto"
-    "native_lto"
+    "native"
+    # LTO profiles have been disabled in favour of building per benchmark binaries as doing both would be very slow
+    # "generic_lto"
+    # "native_lto"
 )
 
 # Changes to these files will rebuild all the binaries
 checksum_files=(
-    "src/main.rs"
+    "src/lib.rs"
     "Cargo.toml"
     "build.sh"
     "rustc-wrapper-strip-metadata.sh"
@@ -78,7 +77,21 @@ check_checksum() {
     fi
 }
 
-build_binary() {
+build_binary() (
+    # (...) used instead of {...} so the following commands always run in a subshell, allowing it to have a separate
+    # trap EXIT command
+
+    # Create a temporary copy of aoc-rs-bench, used to dynamically generate binary targets for each of the benchmarks.
+    # Generating one binary per benchmark seems to significantly decrease commit-to-commit layout variance by ensuring
+    # each executable only includes functions needed for that benchmark.
+    tmp_crate="$(mktemp -d)"
+    trap 'rm -rf "$tmp_crate"' EXIT
+    mkdir -p "$tmp_crate/src/bin"
+    cp "src/lib.rs" "$tmp_crate/src/lib.rs"
+    cp "Cargo.toml" "$tmp_crate/Cargo.toml"
+    cp "rustc-wrapper-strip-metadata.sh" "$tmp_crate/rustc-wrapper-strip-metadata.sh"
+    cd "$tmp_crate"
+
     rust_version="$(
         git -C "$tmp_clone" show "$commit:Cargo.toml" \
           | sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([0-9]\+\.[0-9]\+\).*/\1/p' \
@@ -98,8 +111,23 @@ build_binary() {
         exit 1
     fi
 
+    binaries=0
+    while read -r path; do
+        if [[ $path =~ ^crates/year([0-9]{4})/src/day([0-9]{2})\.rs$ ]]; then
+            year="${BASH_REMATCH[1]}"
+            day="${BASH_REMATCH[2]}"
+            echo "::aoc_rs_bench::main!{year$year Day$day}" > "$tmp_crate/src/bin/$year-$day.rs"
+            binaries=$((binaries + 1))
+        fi
+    done < <(git -C "$tmp_clone" ls-tree -r --name-only "$commit")
+
+    if (( binaries == 0 )); then
+        echo "Failed to create individual benchmark executables for $commit" 1>&2
+        exit 1
+    fi
+
     echo
-    echo "Building $build with rust $rust_version and glue v$framework_version"
+    echo "Building $binaries binaries for $build with rust $rust_version and glue v$framework_version"
 
     args=(
         "--features" "glue-v$framework_version"
@@ -115,14 +143,25 @@ build_binary() {
         patch_crates+=("year2016")
     fi
 
-    # Patching to a git dependency is better than a path dependency to a temporary local checkout as it gives the
-    # dependency a stable Cargo `SourceId` for a given commit, which stabilizes the crate's metadata hash and the
-    # disambiguator used in symbol names. Without this symbol ordering and code layout can differ between rebuilds of
-    # the same commit, which causes measurable performance differences.
+    # Patch each direct dependency to use the temporary clone.
+    # Using path dependencies for the patches makes it easier to use `remap-path-prefix` compared to using git
+    # dependencies (where the checkout is a path inside ~/.cargo), but does cause each crate to have an unstable
+    # SourceId due to the `$tmp_clone` path being different each build.
+    # However, this is mitigated by the RUSTC_WRAPPER (see below).
+    git -C "$tmp_clone" checkout "$commit" -q
+    for crate in "${patch_crates[@]}"; do
+        args+=(
+            "--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\""
+        )
+    done
+
+    # Inject a wrapper around cargo's rustc calls to strip all "-C metadata=" arguments.
     #
-    # This problem can be reproduced manually by setting RUSTFLAGS='-C metadata=$x' when building the runner, which
-    # changes the crate's metadata hash similar to changing the SourceId.
+    # Without this the crate's metadata hash and the disambiguator used in symbol names will change based on the
+    # revision of git dependencies or the (temporary) path of path dependencies, which then causes symbol ordering and
+    # code layout differences even with zero code changes, which causes measurable performance differences.
     #
+    # This problem can be reproduced manually by setting RUSTFLAGS='-C metadata=$x' when building the runner.
     # For example, when benchmarking 2025-01 with the following config:
     #     build=generic,commit=ec46015ca70754859e23d853113ef8682a1b0c92,multiversion=default,threads=1
     # building eight executables with metadata=0 to metadata=7 produces mean runtimes ranging from ~24,000ns and
@@ -136,28 +175,16 @@ build_binary() {
     # Disassembling the binaries confirms the hot functions are identical apart from differences in relative and
     # absolute addresses and the function ordering. These small layout shifts therefore seem sufficient to cause large
     # knock-on effects at a microarchitecture level.
-    for crate in "${patch_crates[@]}"; do
-        # "https://www.github.com/ictrobot/aoc-rs.git" is a workaround for https://github.com/rust-lang/cargo/issues/5478
-        args+=(
-            "--config" "patch.\"$repo\".$crate.git = \"https://www.github.com/ictrobot/aoc-rs.git\""
-            "--config" "patch.\"$repo\".$crate.rev = \"$commit\""
-        )
-        # args+=("--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\"")
-    done
-
-    # Inject a wrapper around cargo's rustc calls to strip all "-C metadata=" arguments.
-    #
-    # This seems to prevent similar issues to above but across multiple commits, helping to avoid cases where 2 adjacent
-    # commits without any rust code changes can still have a measurable performance difference.
     #
     # This isn't safe in general, but seems to work fine here where the set of dependencies is known and there's no
     # duplicates with e.g. different versions.
     export RUSTC_WRAPPER='./rustc-wrapper-strip-metadata.sh'
 
+    # Remap paths to $tmp_clone and $tmp_crate to avoid the temporary paths being included in binaries
+    export RUSTFLAGS="--remap-path-prefix $tmp_clone=/aoc-rs/ --remap-path-prefix $tmp_crate=/aoc-rs-bench/"
+
     if [[ "$profile" == "native"* ]]; then
-        export RUSTFLAGS='-C target_cpu=native'
-    else
-        export RUSTFLAGS=''
+        export RUSTFLAGS="$RUSTFLAGS -C target_cpu=native"
     fi
 
     if [[ "$profile" == *"_lto" ]]; then
@@ -166,42 +193,53 @@ build_binary() {
         export CARGO_PROFILE_RELEASE_LTO="false"
     fi
 
-    executable="$(
+    # Copy output executables into temporary dir, then atomically rename dir when complete
+    mkdir -p "$build.tmp"
+
+    while read -r executable; do
+        if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
+            echo "No such binary $executable after building $commit" >&2
+            exit 1
+        fi
+
+        if [[ $executable =~ /release/([0-9]{4})-([0-9]{2})$ ]]; then
+            year="${BASH_REMATCH[1]}"
+            day="${BASH_REMATCH[2]}"
+            mv "$executable" "$build.tmp/$year-$day"
+            binaries=$((binaries - 1))
+        else
+            echo "Unknown binary $executable when building $commit" 1>&2
+            exit 1
+        fi
+    done < <(
         rustup run --install "$rust_version" cargo build --release "${args[@]}" --message-format=json-render-diagnostics \
-          | jq -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
-    )"
-    if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
-        echo "No such binary $executable after building $commit" >&2
+          | jq --unbuffered -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
+    )
+
+    if (( binaries != 0 )); then
+        echo "Incorrect number of binaries when building $commit" 1>&2
         exit 1
     fi
 
-    unset CARGO_PROFILE_RELEASE_LTO
-    unset RUSTFLAGS
-    unset RUSTC_WRAPPER
-
-    mv "$executable" "$build"
-}
+    mv "$build.tmp" "$build"
+)
 
 mkdir -p "$builds_dir"
 check_checksum
 
 tmp_clone="$(mktemp -d)"
 trap 'rm -rf "$tmp_clone"' EXIT
-git -C "$tmp_clone" clone --bare "$repo" . -q
+git -C "$tmp_clone" clone "$repo" . -q
 
 git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
 mv "$builds_commit_list.tmp" "$builds_commit_list"
-
-tmp_target_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_clone"; rm -rf "$tmp_target_dir"' EXIT
-export CARGO_TARGET_DIR="$tmp_target_dir"
 
 for profile in "${profiles[@]}"; do
     mkdir -p "$builds_dir/$profile"
 
     while read -r commit <&3; do
         build="$builds_dir/$profile/$commit"
-        if [[ ! -f "$build" || ! -x "$build" ]]; then
+        if [[ ! -d "$build" ]]; then
             build_binary
         fi
     done 3< "$builds_commit_list"

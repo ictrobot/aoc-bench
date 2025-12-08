@@ -1,6 +1,4 @@
-use crate::multithreading_glue::*;
-use crate::multiversion_glue::*;
-use crate::puzzle_glue::*;
+use std::fmt::Display;
 use std::io::Write;
 use std::io::{stdin, stdout, Read};
 use std::num::NonZeroUsize;
@@ -32,47 +30,64 @@ const TARGET_SAMPLE_DURATIONS: [Duration; 18] = [
 
 const EWMA_ALPHA: f64 = 0.2;
 
-fn main() {
+pub fn main<P1, P2, E>(puzzle_fn: fn(&str) -> Result<(P1, P2), E>)
+where
+    P1: ToString,
+    P2: ToString,
+    E: Display,
+{
+    let mut input = String::new();
+    stdin()
+        .read_to_string(&mut input)
+        .expect("reading input from stdin failed");
+    input = input.replace("\r\n", "\n");
+    input = input.strip_suffix('\n').unwrap_or(&input).to_string();
+
+    // Benchmark runner doesn't need to recover from errors and should exit immediately
+    let bench_fn = || match puzzle_fn(std::hint::black_box(&input)) {
+        Ok((p1, p2)) => (
+            std::hint::black_box(p1).to_string(),
+            std::hint::black_box(p2).to_string(),
+        ),
+        // Print InputError display implementation
+        Err(err) => {
+            std::eprintln!("{}", err);
+            std::process::exit(1);
+        }
+    };
+
     let args = std::env::args().collect::<Vec<_>>();
     let args = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>();
     match args.as_slice() {
-        ["puzzles"] => {
-            for (y, d, _) in PUZZLES {
-                println!("{:04} {:02}", y.to_u16(), d.to_u8());
-            }
-        }
-        ["check", y, d] => {
-            let puzzle_fn = get_puzzle_fn(y, d);
-            let (part1, part2) = puzzle_fn();
+        ["check"] => {
+            let (part1, part2) = bench_fn();
             println!("Checksum: {}", checksum(&part1, &part2));
 
-            if multiversion_used() {
+            if multiversion_glue::multiversion_used() {
                 println!(
                     "Multiversion: default,{}",
-                    get_supported_versions().join(",")
+                    multiversion_glue::get_supported_versions().join(",")
                 )
             } else {
                 println!("Multiversion: default")
             }
         }
-        ["bench", y, d, threads, multiversion] => {
+        ["bench", threads, multiversion] => {
             if *threads != "n" {
                 let threads: usize = threads.parse().unwrap();
                 let threads = NonZeroUsize::new(threads).unwrap();
-                set_thread_count(threads);
+                multithreading_glue::set_thread_count(threads);
             }
             if *multiversion != "default" {
-                set_override(multiversion);
+                multiversion_glue::set_override(multiversion);
             }
-
-            let puzzle_fn = get_puzzle_fn(y, d);
 
             println!("META\tversion=1");
 
             let mut iters_per_sample = 1;
             let mut ewma_iter_seconds = 0.0;
             for i in 0.. {
-                let (duration, (part1, part2)) = sample(&puzzle_fn, iters_per_sample);
+                let (duration, (part1, part2)) = sample(&bench_fn, iters_per_sample);
                 let checksum = checksum(&part1, &part2);
 
                 if writeln!(
@@ -104,32 +119,6 @@ fn main() {
         }
         _ => {
             panic!("invalid args");
-        }
-    }
-}
-
-fn get_puzzle_fn(year: &str, day: &str) -> impl Fn() -> (String, String) {
-    let year = year.parse().expect("invalid year");
-    let day = day.parse().expect("invalid day");
-    let (_, _, puzzle_fn) = PUZZLES
-        .iter()
-        .find(|(y, d, _)| y == &year && d == &day)
-        .expect("no matching solution found");
-
-    let mut input = String::new();
-    stdin()
-        .read_to_string(&mut input)
-        .expect("reading input from stdin failed");
-    input = input.replace("\r\n", "\n");
-    input = input.strip_suffix('\n').unwrap_or(&input).to_string();
-
-    // Benchmark runner doesn't need to recover from errors and should exit immediately
-    move || match puzzle_fn(std::hint::black_box(&input)) {
-        Ok(v) => std::hint::black_box(v),
-        // Print InputError display implementation
-        Err(err) => {
-            std::eprintln!("{}", err);
-            std::process::exit(1);
         }
     }
 }
@@ -173,6 +162,25 @@ fn fnv1a64(data: &[u8]) -> u64 {
     hash
 }
 
+#[macro_export]
+macro_rules! main {
+    ($year:ident $day:ident) => {
+        fn main() {
+            $crate::main(puzzle_fn);
+        }
+
+        #[inline(never)]
+        fn puzzle_fn(input: &str) -> Result<(String, String), $crate::puzzle_glue::InputError> {
+            let solution =
+                $crate::puzzle_glue::$year::$day::new(input, $crate::puzzle_glue::InputType::Real)?;
+            let part1 = solution.part1();
+            let part2 = solution.part2();
+            Ok((part1.to_string(), part2.to_string()))
+        }
+    };
+}
+
+// Puzzle glue
 #[cfg(any(
     feature = "glue-v0",
     feature = "glue-v1",
@@ -180,73 +188,30 @@ fn fnv1a64(data: &[u8]) -> u64 {
     feature = "glue-v3",
     feature = "glue-v4"
 ))]
-mod puzzle_glue {
-    use aoc::all_puzzles;
-    use utils::date::{Day, Year};
-    #[cfg(any(
-        feature = "glue-v1",
-        feature = "glue-v2",
-        feature = "glue-v3",
-        feature = "glue-v4"
-    ))]
-    use utils::input::{InputError, InputType};
+pub mod puzzle_glue {
+    pub use ::year2015;
+    #[cfg(feature = "glue-v4")]
+    pub use ::year2016;
+
+    #[cfg(not(feature = "glue-v0"))]
+    pub use ::utils::input::{InputError, InputType};
     #[cfg(feature = "glue-v0")]
-    use utils::input::{InputType, InvalidInputError as InputError};
-    use utils::Puzzle;
-
-    // Export doesn't exist in all commits
-    type PuzzleFn = fn(&str) -> Result<(String, String), InputError>;
-
-    macro_rules! matcher {
-        ($([$(::$p:ident)+])*) => {
-            pub const PUZZLES: &[(Year, Day, PuzzleFn)] = &[$(
-                ($(::$p)+::YEAR, $(::$p)+::DAY, |input: &str| {
-                    let solution = $(::$p)+::new(input, InputType::Real)?;
-                    let part1 = solution.part1();
-                    let part2 = solution.part2();
-                    Ok((part1.to_string(), part2.to_string()))
-                })
-            ),*];
-        };
-    }
-
-    all_puzzles!(matcher);
+    pub use ::utils::input::{InputType, InvalidInputError as InputError};
 }
 
 #[cfg(feature = "glue-v5")]
-mod puzzle_glue {
-    pub use aoc::PUZZLES;
+pub mod puzzle_glue {
+    pub use ::aoc::*;
+
+    pub use ::aoc::utils::input::{InputError, InputType};
 }
 
-#[cfg(feature = "glue-v6")]
-mod puzzle_glue {
-    use aoc::utils::date::{Day, Year};
-    use aoc::utils::input::{strip_final_newline, InputType};
-    use aoc::utils::PuzzleDate;
-    use aoc::{all_puzzles, PuzzleFn};
-
-    macro_rules! matcher {
-        ($(
-            $y:literal => $year:ident{$(
-                $d:literal => $day:ident,
-            )*}
-        )*) => {
-            pub static PUZZLES: &[(Year, Day, PuzzleFn)] = &[$($(
-                (aoc::$year::$day::DATE.year(), aoc::$year::$day::DATE.day(), |input: &str| {
-                    let input = strip_final_newline(input);
-                    let solution = aoc::$year::$day::new(input, InputType::Real)?;
-                    let part1 = solution.part1();
-                    let part2 = solution.part2();
-                    Ok((part1.to_string(), part2.to_string()))
-                }),
-            )*)*];
-        };
-    }
-
-    all_puzzles!(matcher);
-}
-
-#[cfg(any(feature = "glue-v0", feature = "glue-v1"))]
+#[cfg(not(any(
+    feature = "glue-v2",
+    feature = "glue-v3",
+    feature = "glue-v4",
+    feature = "glue-v5"
+)))]
 mod multiversion_glue {
     pub fn get_supported_versions() -> Vec<String> {
         Vec::new()
@@ -263,15 +228,14 @@ mod multiversion_glue {
     feature = "glue-v2",
     feature = "glue-v3",
     feature = "glue-v4",
-    feature = "glue-v5",
-    feature = "glue-v6"
+    feature = "glue-v5"
 ))]
 mod multiversion_glue {
-    #[cfg(any(feature = "glue-v5", feature = "glue-v6"))]
-    use aoc::utils::multiversion::{Version, VERSIONS};
-    use std::panic;
+    #[cfg(feature = "glue-v5")]
+    use ::aoc::utils::multiversion::{Version, VERSIONS};
     #[cfg(any(feature = "glue-v2", feature = "glue-v3", feature = "glue-v4"))]
-    use utils::multiversion::{Version, VERSIONS};
+    use ::utils::multiversion::{Version, VERSIONS};
+    use std::panic;
 
     pub fn get_supported_versions() -> Vec<String> {
         VERSIONS
@@ -301,10 +265,10 @@ mod multiversion_glue {
 }
 
 mod multithreading_glue {
-    #[cfg(any(feature = "glue-v5", feature = "glue-v6"))]
-    pub use aoc::utils::multithreading::set_thread_count;
+    #[cfg(feature = "glue-v5")]
+    pub use ::aoc::utils::multithreading::set_thread_count;
     #[cfg(any(feature = "glue-v3", feature = "glue-v4"))]
-    pub use utils::multithreading::set_thread_count;
-    #[cfg(any(feature = "glue-v0", feature = "glue-v1", feature = "glue-v2"))]
+    pub use ::utils::multithreading::set_thread_count;
+    #[cfg(not(any(feature = "glue-v3", feature = "glue-v4", feature = "glue-v5")))]
     pub fn set_thread_count(_: std::num::NonZeroUsize) {}
 }
