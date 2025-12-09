@@ -14,7 +14,7 @@ pub struct ImpactArgs {
     pub comparison: String,
 
     /// Relative change threshold percentage
-    #[arg(long, default_value = "15")]
+    #[arg(long, default_value = "10")]
     pub threshold: f64,
 
     #[command(flatten)]
