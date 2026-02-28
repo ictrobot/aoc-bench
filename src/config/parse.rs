@@ -15,6 +15,7 @@ pub(super) struct ParsedConfigFile {
     pub config_keys: Vec<Key>,
     pub benchmarks: Vec<Benchmark>,
     pub host_key: Key,
+    pub timeline_key: Option<Key>,
 }
 
 pub(super) fn parse_config_file(
@@ -34,10 +35,22 @@ pub(super) fn parse_config_file(
     config_keys.push(host_key.clone());
     config_keys.sort_unstable();
 
+    let timeline_key = json
+        .timeline_key
+        .map(|name| {
+            key_lookup
+                .get(name)
+                .map(|kl| kl.key.clone())
+                .ok_or_else(|| ConfigError::UnknownKey(name.to_string()))
+        })
+        .transpose()?
+        .or_else(|| key_lookup.get("commit").map(|kl| kl.key.clone()));
+
     Ok(ParsedConfigFile {
         config_keys,
         benchmarks,
         host_key,
+        timeline_key,
     })
 }
 
@@ -48,6 +61,8 @@ struct ConfigFileJson<'a> {
     config_keys: HashMap<&'a str, ConfigKeyDef<'a>>,
     #[serde(borrow)]
     benchmarks: Vec<BenchmarkDef<'a>>,
+    #[serde(borrow, default)]
+    timeline_key: Option<&'a str>,
 }
 
 #[derive(Deserialize)]

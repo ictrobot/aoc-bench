@@ -1,5 +1,6 @@
 mod debug;
 mod export;
+mod export_web;
 mod fastest;
 mod impact;
 mod run;
@@ -20,6 +21,9 @@ pub enum Commands {
     /// Query and export benchmark results
     Export(export::ExportArgs),
 
+    /// Export benchmark data as JSON for the web interface
+    ExportWeb(export_web::ExportWebArgs),
+
     /// Show performance history across one config dimension
     Timeline(timeline::TimelineArgs),
 
@@ -39,6 +43,7 @@ impl Commands {
             Commands::RunAll(args) => run_all::execute(args),
             Commands::Run(args) => run::execute(args),
             Commands::Export(args) => export::execute(args),
+            Commands::ExportWeb(args) => export_web::execute(args),
             Commands::Timeline(args) => timeline::execute(args),
             Commands::Impact(args) => impact::execute(args),
             Commands::Fastest(args) => fastest::execute(args),

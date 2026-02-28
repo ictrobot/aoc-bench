@@ -33,6 +33,8 @@ pub struct ConfigFile {
     benchmarks_by_id: Arc<HashMap<BenchmarkId, usize>>,
     /// Host key
     host_key: Key,
+    /// Timeline ordering key
+    timeline_key: Option<Key>,
 }
 
 impl ConfigFile {
@@ -73,6 +75,7 @@ impl ConfigFile {
             benchmarks: parsed.benchmarks.into(),
             benchmarks_by_id,
             host_key: parsed.host_key,
+            timeline_key: parsed.timeline_key,
         })
     }
 
@@ -117,6 +120,15 @@ impl ConfigFile {
     #[must_use]
     pub fn host_key(&self) -> &Key {
         &self.host_key
+    }
+
+    /// Get the timeline key: the config dimension representing the primary ordering axis.
+    ///
+    /// Returns the explicit `timeline_key` from config if set, otherwise the "commit" key if one
+    /// exists, otherwise `None`.
+    #[must_use]
+    pub fn timeline_key(&self) -> Option<&Key> {
+        self.timeline_key.as_ref()
     }
 
     /// Look up a [`Key`] by its string name, returning None if not found

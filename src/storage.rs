@@ -54,6 +54,17 @@ pub trait StorageRead: Debug {
         f: impl FnMut(&[ResultsRowWithStats]) -> ControlFlow<()>,
     ) -> Result<(), Self::Error>;
 
+    /// Retrieve run series rows for a benchmark.
+    ///
+    /// `f` may be called multiple times with different batches of rows.
+    /// The ordering of rows is backend-defined.
+    fn for_each_run_series(
+        &self,
+        tx: &Self::Tx<'_>,
+        benchmark: &BenchmarkId,
+        f: impl FnMut(&[RunSeriesRow]) -> ControlFlow<()>,
+    ) -> Result<(), Self::Error>;
+
     /// Return up to `limit` existing results ordered by ascending `last_series_timestamp`.
     ///
     /// Only valid benchmarks and configs for the current config file are returned.
@@ -158,6 +169,16 @@ impl From<&RunSeries> for RunSeriesStats {
             median_run_sample_count: stats.samples.len(),
         }
     }
+}
+
+/// Summary row from the `run_series` table for a single benchmark execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSeriesRow {
+    pub config: Config,
+    pub timestamp: Timestamp,
+    pub median_run_mean_ns: f64,
+    pub median_run_ci95_half_ns: f64,
+    pub run_count: usize,
 }
 
 impl RunSeriesStats {

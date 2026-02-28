@@ -1,6 +1,6 @@
 use crate::config::{BenchmarkId, Config, ConfigFile, KeyValue};
 use crate::run::RunSeries;
-use crate::storage::{PerHostStorage, ResultsRow, ResultsRowWithStats, StorageRead};
+use crate::storage::{PerHostStorage, ResultsRow, ResultsRowWithStats, RunSeriesRow, StorageRead};
 use jiff::Timestamp;
 use std::ops::ControlFlow;
 
@@ -134,6 +134,33 @@ impl<S: PerHostStorage> StorageRead for MultiHostStorage<S> {
             })?;
             Ok(control_flow)
         })
+    }
+
+    fn for_each_run_series(
+        &self,
+        _tx: &Self::Tx<'_>,
+        benchmark: &BenchmarkId,
+        mut f: impl FnMut(&[RunSeriesRow]) -> ControlFlow<()>,
+    ) -> Result<(), Self::Error> {
+        for host_kv in self.config_file.host_key().values() {
+            let storage = self.host_storage(&host_kv)?;
+            let mut control_flow = ControlFlow::Continue(());
+            storage
+                .read_transaction(|tx| {
+                    storage.for_each_run_series(tx, benchmark, |rows| {
+                        control_flow = f(rows);
+                        control_flow
+                    })
+                })
+                .map_err(|e| MultiHostError::BackendError {
+                    host: host_kv.value_name().to_string(),
+                    source: e,
+                })?;
+            if let ControlFlow::Break(()) = control_flow {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn oldest_results(

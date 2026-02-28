@@ -3,7 +3,8 @@ use crate::config::{
 };
 use crate::run::{RunSeries, RunSeriesDef};
 use crate::storage::{
-    PerHostStorage, ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage, StorageRead,
+    PerHostStorage, ResultsRow, ResultsRowWithStats, RunSeriesRow, RunSeriesStats, Storage,
+    StorageRead,
 };
 use jiff::Timestamp;
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
@@ -537,6 +538,48 @@ impl StorageRead for HybridDiskStorage {
         if !results.is_empty() {
             results.sort_unstable_by(sort_fn);
             let _ = f(&results);
+        }
+
+        Ok(())
+    }
+
+    fn for_each_run_series(
+        &self,
+        tx: &Self::Tx<'_>,
+        benchmark: &BenchmarkId,
+        mut f: impl FnMut(&[RunSeriesRow]) -> ControlFlow<()>,
+    ) -> Result<(), Self::Error> {
+        let mut stmt = tx.prepare_cached(
+            "SELECT config, timestamp, median_run_mean_ns, median_run_ci95_half_ns, run_count
+             FROM run_series
+             WHERE bench = ?1
+             ORDER BY timestamp",
+        )?;
+
+        let mut batch: Vec<RunSeriesRow> = Vec::new();
+        let mut rows_iter = stmt.query(params![benchmark.as_str()])?;
+        while let Some(row) = rows_iter.next()? {
+            let config_json: &str = row.get_ref(0)?.as_str()?;
+            let config_map: BTreeMap<String, String> = match serde_json::from_str(config_json) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let config = match self.config_file.config_from_map(&config_map) {
+                Ok(c) => c.with(self.host.clone()),
+                Err(_) => continue,
+            };
+
+            batch.push(RunSeriesRow {
+                config,
+                timestamp: Self::sql_to_ts(row.get_ref(1)?)?,
+                median_run_mean_ns: row.get(2)?,
+                median_run_ci95_half_ns: row.get(3)?,
+                run_count: row.get(4)?,
+            });
+        }
+
+        if !batch.is_empty() {
+            let _ = f(&batch);
         }
 
         Ok(())

@@ -5,7 +5,7 @@ pub mod logging;
 
 use crate::cli::commands::Commands;
 use aoc_bench::config::{BenchmarkId, ConfigError};
-use aoc_bench::engine::{RunEngineError, StatsEngineError};
+use aoc_bench::engine::{RunEngineError, StatsEngineError, WebSnapshotExportError};
 use aoc_bench::runner::RunError;
 use aoc_bench::storage::HybridDiskError;
 use clap::Parser;
@@ -98,6 +98,10 @@ pub enum CliError {
     RunnerConstructionError(#[source] RunError),
     #[error("failed to run benchmark: {0}")]
     BenchmarkRunError(#[source] RunError),
+
+    // export-web command
+    #[error(transparent)]
+    WebSnapshotExport(#[from] WebSnapshotExportError),
 }
 
 impl CliError {
