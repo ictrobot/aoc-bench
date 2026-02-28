@@ -1,0 +1,188 @@
+---
+- name: Prepare benchmark host
+  hosts: bench_hosts
+  become: true
+
+  vars:
+    bench_user: bench
+    user_shell: /usr/bin/fish
+
+  pre_tasks:
+    - name: Set timezone to UTC
+      become: true
+      community.general.timezone:
+        name: UTC
+
+    - name: Ensure APT cache is up to date
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    - name: Upgrade all packages to latest
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+
+    - name: Install tools
+      ansible.builtin.apt:
+        name:
+          - fish
+          - ufw
+          - build-essential
+          - git
+          - curl
+          - wget
+          - htop
+          - screen
+          - lm-sensors
+          - linux-perf
+          - strace
+          - hwloc-nox
+          - jq
+          - tuned
+          - stress-ng
+          - s-tui
+          - btop
+          - gdu
+          - sqlite3
+          - sqlite3-tools
+          - valgrind
+          - time
+          - hyperfine
+          - icdiff
+          - nvme-cli
+          - smartmontools
+        state: present
+
+    - name: Change root shell
+      ansible.builtin.user:
+        name: root
+        shell: "{{ user_shell }}"
+
+    # Firewall
+    - name: Enable UFW logging
+      community.general.ufw:
+        logging: 'on'
+      become: true
+
+    - name: Allow SSH
+      community.general.ufw:
+        rule: allow
+        port: 22
+        proto: tcp
+      become: true
+
+    - name: Deny incoming traffic
+      community.general.ufw:
+        direction: incoming
+        policy: deny
+      become: true
+
+    - name: Allow outgoing traffic
+      community.general.ufw:
+        direction: outgoing
+        policy: allow
+      become: true
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+      become: true
+
+    # Allow perf access
+    - name: Allow users to profile their own processes in userspace
+      ansible.posix.sysctl:
+        name: kernel.perf_event_paranoid
+        value: "1"
+        sysctl_set: true
+        reload: true
+
+    # CPU partitioning and tuning
+    - name: Enabled tuned service
+      ansible.builtin.systemd:
+        name: tuned
+        enabled: true
+        state: started
+
+    - name: Check current tuned profile
+      ansible.builtin.command: tuned-adm active
+      register: tuned_profile
+      changed_when: false
+
+    # Don't set no_balance_cores=(/isolcpus) as that would disable scheduler load balancing on those cores, which is
+    # required for multithreaded benchmarks without pinning threads to specific cores.
+    - name: Configure tuned cpu-partitioning profile
+      ansible.builtin.lineinfile:
+        path: /etc/tuned/cpu-partitioning-variables.conf
+        regexp: '^isolated_cores=.+'
+        line: 'isolated_cores={{ isolated_cores }}'
+
+    # See /usr/lib/tuned/profiles/cpu-partitioning/tuned.conf, which includes:
+    #   /usr/lib/tuned/profiles/network-latency/tuned.conf
+    #   /usr/lib/tuned/profiles/latency-performance/tuned.conf
+    - name: Enable tuned cpu-partitioning profile
+      ansible.builtin.command: tuned-adm profile cpu-partitioning
+      when: "'Current active profile: cpu-partitioning' not in tuned_profile.stdout"
+      changed_when: true
+
+    - name: Check kernel cmdline
+      ansible.builtin.command: cat /proc/cmdline
+      register: cmdline
+      changed_when: false
+
+    - name: Reboot to apply CPU isolation
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
+
+    - name: Disable unattended upgrades
+      ansible.builtin.systemd:
+        name: apt-daily-upgrade.timer
+        enabled: false
+        state: stopped
+
+    # User setup
+    - name: Ensure bench user exists
+      ansible.builtin.user:
+        name: "{{ bench_user }}"
+        shell: "{{ user_shell }}"
+        create_home: true
+        state: present
+
+    - name: Add SSH key for bench user
+      ansible.posix.authorized_key:
+        user: "{{ bench_user }}"
+        key: "{{ bench_ssh_pubkey }}"
+        state: present
+
+    - name: Check whether rustup is already installed for bench user
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.stat:
+        path: "~{{ bench_user }}/.cargo/bin/rustup"
+      register: bench_rustup
+
+    - name: Download rustup installer for bench user
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.get_url:
+        url: https://sh.rustup.rs
+        dest: "~{{ bench_user }}/rustup-init.sh"
+        mode: "0755"
+      when: not bench_rustup.stat.exists
+
+    - name: Install rustup for bench user
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.command: "~{{ bench_user }}/rustup-init.sh -y"
+      args:
+        creates: "~{{ bench_user }}/.cargo/bin/rustup"
+      when: not bench_rustup.stat.exists
+
+    - name: Remove rustup installer for bench user
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.file:
+        path: "~{{ bench_user }}/rustup-init.sh"
+        state: absent
