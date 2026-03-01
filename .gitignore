@@ -1,4 +1,5 @@
 .idea
+.wrangler
 target
 data
 web/public/data/
