@@ -1,0 +1,49 @@
+[Unit]
+Description=aoc-bench
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{ bench_user }}
+Group={{ bench_user }}
+WorkingDirectory=/home/{{ bench_user }}/aoc-bench
+Environment=HOME=/home/{{ bench_user }}
+Environment=PATH=/home/{{ bench_user }}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/{{ bench_user }}/aoc-bench/tools/ex44/bench-all.sh
+Restart=always
+RestartSec=20
+
+# Isolate temporary files under a service-private /tmp to ensure cleanup.
+PrivateTmp=true
+
+# Make the system mostly read-only while still allowing writes under bench user's home.
+ProtectSystem=strict
+ReadWritePaths=/home/{{ bench_user }}
+
+# Restrict privilege and attack surface.
+PrivateDevices=true
+ProtectProc=invisible
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+
+# Intentionally not setting:
+# - LockPersonality=true: aoc-bench calls personality(ADDR_NO_RANDOMIZE) to disable ASLR.
+# - MemoryDenyWriteExecute=true: may break node/wrangler JIT used by deployment steps.
+# - ProtectHome=...: service writes under /home/{{ bench_user }}.
+# - PrivateNetwork=true / IPAddressDeny=any: service needs network egress for git/cargo/npm/wrangler.
+
+[Install]
+WantedBy=multi-user.target

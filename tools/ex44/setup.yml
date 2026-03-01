@@ -6,6 +6,10 @@
   vars:
     bench_user: bench
     user_shell: /usr/bin/fish
+    bench_repo_dir: "/home/{{ bench_user }}/aoc-bench"
+    bench_repo_url: "https://github.com/ictrobot/aoc-bench.git"
+    bench_repo_branch: master
+    cloudflare_env_file: "/home/{{ bench_user }}/.config/aoc-bench/cloudflare.env"
 
   pre_tasks:
     - name: Set timezone to UTC
@@ -19,6 +23,15 @@
         cache_valid_time: 3600
 
   tasks:
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Stop aoc-bench service before updates
+      ansible.builtin.systemd:
+        name: aoc-bench.service
+        state: stopped
+      when: "'aoc-bench.service' in ansible_facts.services"
+
     - name: Upgrade all packages to latest
       ansible.builtin.apt:
         upgrade: dist
@@ -53,6 +66,8 @@
           - icdiff
           - nvme-cli
           - smartmontools
+          - nodejs
+          - npm
         state: present
 
     - name: Change root shell
@@ -186,3 +201,85 @@
       ansible.builtin.file:
         path: "~{{ bench_user }}/rustup-init.sh"
         state: absent
+
+    - name: Ensure benchmark repo is cloned
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.git:
+        repo: "{{ bench_repo_url }}"
+        dest: "{{ bench_repo_dir }}"
+        version: "{{ bench_repo_branch }}"
+        accept_hostkey: true
+        update: true
+        force: false
+
+    - name: Ensure benchmark config directory exists
+      ansible.builtin.file:
+        path: "/home/{{ bench_user }}/.config/aoc-bench"
+        state: directory
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0700"
+
+    - name: Ensure benchmark state directory exists
+      ansible.builtin.file:
+        path: "/home/{{ bench_user }}/.local/state/aoc-bench"
+        state: directory
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0700"
+
+    - name: Check whether Cloudflare env file exists
+      ansible.builtin.stat:
+        path: "{{ cloudflare_env_file }}"
+      register: cloudflare_env
+
+    - name: Ensure Cloudflare env file has strict permissions when present
+      ansible.builtin.file:
+        path: "{{ cloudflare_env_file }}"
+        state: file
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0600"
+      when: cloudflare_env.stat.exists | default(false)
+
+    - name: Check wrangler version
+      ansible.builtin.command: wrangler --version
+      register: wrangler_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install wrangler v4 globally
+      ansible.builtin.command: npm install -g wrangler@4
+      when: wrangler_version.rc != 0 or (wrangler_version.stdout is not search('^4\\.'))
+      changed_when: true
+
+    - name: Install aoc-bench systemd unit
+      ansible.builtin.template:
+        src: templates/aoc-bench.service.j2
+        dest: /etc/systemd/system/aoc-bench.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd daemon
+        - Restart aoc-bench service
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure aoc-bench service is enabled and running
+      ansible.builtin.systemd:
+        name: aoc-bench.service
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart aoc-bench service
+      ansible.builtin.systemd:
+        name: aoc-bench.service
+        state: restarted
