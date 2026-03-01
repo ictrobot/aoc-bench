@@ -19,7 +19,7 @@ export class SnapshotNotFoundError extends Error {
 }
 
 /**
- * Create a TanStack Query retry handler that recovers from stale snapshot 404s.
+ * Create a TanStack Query retry handler that recovers from stale snapshot misses.
  *
  * When a `SnapshotNotFoundError` occurs, the handler invalidates the `["index"]`
  * query so a fresh index (with updated snapshot paths) is fetched, then allows
@@ -46,11 +46,17 @@ export function createSnapshotRetry(
 
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}/${path}`)
-  if (res.status === 404 && path.includes("snapshots/")) {
+  const snapshotPath = path.includes("snapshots/")
+  if (snapshotPath && res.status === 404) {
     throw new SnapshotNotFoundError(path)
   }
   if (!res.ok) {
     throw new Error(`Failed to fetch ${path}: ${res.status} ${res.statusText}`)
+  }
+  const contentType = res.headers.get("content-type")?.toLowerCase() ?? ""
+  if (snapshotPath && contentType.includes("text/html")) {
+    // Unknown path rewritten to index.html
+    throw new SnapshotNotFoundError(path)
   }
   return res.json() as Promise<T>
 }

@@ -1,6 +1,7 @@
 import { QueryClient } from "@tanstack/react-query"
-import { describe, expect, it, vi } from "vitest"
-import { createSnapshotRetry, SnapshotNotFoundError } from "./api.ts"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import type { HostIndex } from "./types.ts"
+import { createSnapshotRetry, loadHistory, loadResults, SnapshotNotFoundError } from "./api.ts"
 
 function makeQueryClient(snapshotId?: string) {
   const qc = new QueryClient()
@@ -10,6 +11,21 @@ function makeQueryClient(snapshotId?: string) {
   vi.spyOn(qc, "invalidateQueries")
   return qc
 }
+
+function makeSnapshotHostIndex(): HostIndex {
+  return {
+    last_updated: 1_700_000_000,
+    config_keys: {},
+    benchmarks: [],
+    timeline_key: "compiler",
+    results_path: "snapshots/snap-1/linux-x64/results.json",
+    history_dir: "snapshots/snap-1/linux-x64/history",
+  }
+}
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe("createSnapshotRetry", () => {
   it("allows 3 retries for non-snapshot errors", () => {
@@ -101,5 +117,39 @@ describe("createSnapshotRetry", () => {
     retry(0, new Error("network error"))
 
     expect(onRecovery).not.toHaveBeenCalled()
+  })
+})
+
+describe("fetchJson snapshot handling", () => {
+  it("throws SnapshotNotFoundError for snapshot 404 responses", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 404, statusText: "Not Found" }))
+
+    await expect(loadResults(makeSnapshotHostIndex())).rejects.toBeInstanceOf(SnapshotNotFoundError)
+  })
+
+  it("throws SnapshotNotFoundError for SPA HTML fallback responses", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<!doctype html><html><body>App shell</body></html>", {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    )
+
+    await expect(loadHistory(makeSnapshotHostIndex(), "bench-a")).rejects.toBeInstanceOf(SnapshotNotFoundError)
+  })
+
+  it("keeps malformed non-HTML snapshot JSON as a parse error", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{not-json", {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "application/json" },
+      }),
+    )
+
+    const error = await loadResults(makeSnapshotHostIndex()).catch((err: unknown) => err)
+    expect(error).not.toBeInstanceOf(SnapshotNotFoundError)
+    expect(error).toBeInstanceOf(Error)
   })
 })
