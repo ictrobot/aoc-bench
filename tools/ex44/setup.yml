@@ -83,16 +83,43 @@
         shell: "{{ user_shell }}"
 
     # Firewall
+    - name: Validate allowed SSH subnets
+      ansible.builtin.assert:
+        that:
+          - ssh_allowed_subnets is defined
+          - ssh_allowed_subnets is sequence
+          - ssh_allowed_subnets is not string
+          - ssh_allowed_subnets | length > 0
+          - (ssh_allowed_subnets | reject('string') | list | length) == 0
+          - (ssh_allowed_subnets | select('search', '/') | list | length) == (ssh_allowed_subnets | length)
+          - (ssh_allowed_subnets | ansible.utils.ipaddr | length) == (ssh_allowed_subnets | length)
+        fail_msg: >-
+          Define ssh_allowed_subnets in inventory as a non-empty YAML list of IPv4/IPv6 CIDR networks,
+          for example `["203.0.113.1/32", "2001:db8::/48"]`.
+
     - name: Enable UFW logging
       community.general.ufw:
         logging: 'on'
       become: true
 
-    - name: Allow SSH
+    - name: Allow SSH from allowed subnets
       community.general.ufw:
         rule: allow
+        direction: in
         port: 22
         proto: tcp
+        src: "{{ item }}"
+      loop: "{{ ssh_allowed_subnets }}"
+      become: true
+
+    - name: Remove SSH allow any rule
+      community.general.ufw:
+        rule: allow
+        direction: in
+        port: 22
+        proto: tcp
+        src: any
+        delete: true
       become: true
 
     - name: Deny incoming traffic
