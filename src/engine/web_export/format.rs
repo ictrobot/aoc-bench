@@ -66,6 +66,8 @@ pub struct WebHostIndex {
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct WebConfigKey {
     pub values: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]

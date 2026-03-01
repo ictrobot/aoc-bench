@@ -7,6 +7,7 @@ use crate::config::{BenchmarkId, Config, ConfigFile, Key, KeyValue};
 use crate::storage::{HybridDiskStorage, ResultsRowWithStats, StorageRead};
 use ahash::{HashMap, HashMapExt as _};
 use jiff::Timestamp;
+use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
 /// Collect and build all web export data for a single host.
@@ -173,7 +174,19 @@ fn build_host_index(
             .keys
             .iter()
             .zip(config_index.values.iter())
-            .map(|(k, v)| (k.name().to_string(), WebConfigKey { values: v.clone() }))
+            .map(|(k, v)| {
+                let annotations: BTreeMap<String, String> = k
+                    .annotations()
+                    .map(|(kv, ann)| (kv.value_name().to_string(), ann.to_string()))
+                    .collect();
+                (
+                    k.name().to_string(),
+                    WebConfigKey {
+                        values: v.clone(),
+                        annotations,
+                    },
+                )
+            })
             .collect(),
         benchmarks,
         timeline_key: config_file.timeline_key().map(|k| k.name().to_string()),
@@ -427,6 +440,37 @@ mod tests {
         assert!(!data.index.config_keys.contains_key("host"));
         assert_eq!(data.index.timeline_key, None);
         assert!(data.index.latest_results.is_none());
+    }
+
+    #[test]
+    fn test_export_annotations() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {
+                "build": {
+                    "values": ["x", "y"],
+                    "annotations": { "y": "optimized" }
+                }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["x", "y"] }
+                }
+            ]
+        }"#;
+        let config_file = ConfigFile::from_str(dir.path(), Some("h1"), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
+
+        let s = mk_series(&config_file, "h1", "bench", "build=x", 100.0, 1000);
+        insert(&storage, &s);
+
+        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+
+        let build_key = &data.index.config_keys["build"];
+        assert_eq!(build_key.annotations.len(), 1);
+        assert_eq!(build_key.annotations["y"], "optimized");
     }
 
     #[test]

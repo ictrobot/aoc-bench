@@ -1,6 +1,17 @@
 import React, { useEffect, useId, useMemo, useState, useTransition } from "react"
 import { useSearchParams, type SetURLSearchParams } from "react-router-dom"
-import { ComposedChart, Bar, ErrorBar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts"
+import {
+  ComposedChart,
+  Bar,
+  ErrorBar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+  ReferenceLine,
+} from "recharts"
 import { useHostIndex, useBenchmarkResults, useBenchmarkHistory } from "@/hooks/queries.ts"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
 import { HistoryChart } from "@/components/charts/HistoryChart.tsx"
@@ -9,6 +20,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx"
 import { formatDurationNs, formatCi, shortenValue } from "@/lib/format.ts"
 import { Combobox } from "@/components/ui/combobox.tsx"
+import { Badge } from "@/components/ui/badge.tsx"
 import { Button } from "@/components/ui/button.tsx"
 import type { CompactResult } from "@/lib/types.ts"
 import { relativeChange } from "@/lib/delta.ts"
@@ -187,14 +199,16 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                 : "oklch(0.55 0.20 142)" // green — improvement
           }
         }
+        const value = r.config[effectiveVaryingKey] ?? ""
+        const annotation = index?.config_keys[effectiveVaryingKey]?.annotations?.[value]
         return {
-          label: shortenValue(r.config[effectiveVaryingKey] ?? ""),
-          fullValue: r.config[effectiveVaryingKey] ?? "",
+          fullValue: value,
           mean_ns: r.mean_ns,
           ci95_half_ns: r.ci95_half_ns,
           color,
           delta,
           config: r.config,
+          annotation,
         }
       })
   }, [results, filters, effectiveVaryingKey, index])
@@ -210,6 +224,8 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
         .map((d) => d.i),
     )
   }, [chartData])
+
+  const annotatedItems = useMemo(() => chartData.filter((d) => d.annotation), [chartData])
 
   const [detailMode, setDetailMode] = useState(false)
   const MIN_DETAIL_BAR_PX = 20
@@ -347,10 +363,11 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                       <ComposedChart data={chartData} margin={{ top: 5, right: 20, bottom: 0, left: 20 }}>
                         <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
                         <XAxis
-                          dataKey="label"
+                          dataKey="fullValue"
                           angle={-45}
                           textAnchor="end"
                           interval={0}
+                          tickFormatter={shortenValue}
                           tick={{ fontSize: 11 }}
                           height={100}
                         />
@@ -373,6 +390,16 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                             <Cell key={i} fill={entry.color} />
                           ))}
                         </Bar>
+                        {annotatedItems.map((d) => (
+                          <ReferenceLine
+                            key={d.fullValue}
+                            x={d.fullValue}
+                            stroke="var(--color-foreground)"
+                            strokeOpacity={0.8}
+                            strokeDasharray="6 3"
+                            strokeWidth={2.5}
+                          />
+                        ))}
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
@@ -382,7 +409,7 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                   <ComposedChart data={chartData} margin={{ top: 5, right: 20, bottom: 0, left: 20 }}>
                     {chartData.length <= 30 && <CartesianGrid strokeDasharray="3 3" className="opacity-30" />}
                     <XAxis
-                      dataKey="label"
+                      dataKey="fullValue"
                       angle={-45}
                       textAnchor="end"
                       interval={0}
@@ -391,6 +418,20 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                     />
                     <YAxis tickFormatter={(v: number) => formatDurationNs(v)} tick={{ fontSize: 11 }} width={80} />
                     <Tooltip content={<TimelineTooltip />} />
+                    {annotatedItems.map((d) => (
+                      <ReferenceLine
+                        key={d.fullValue}
+                        x={d.fullValue}
+                        stroke="var(--color-muted-foreground)"
+                        strokeDasharray="3 3"
+                        label={{
+                          value: d.annotation!,
+                          position: "top",
+                          fontSize: 10,
+                          fill: "currentColor",
+                        }}
+                      />
+                    ))}
                     <Bar
                       dataKey="mean_ns"
                       isAnimationActive={false}
@@ -431,10 +472,16 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                           type="button"
                           onClick={() => setSelectedConfig(d.config)}
                           className="hover:underline"
+                          title={d.fullValue}
                           aria-label={`Open history for ${d.fullValue}`}
                         >
-                          {d.fullValue}
+                          {shortenValue(d.fullValue)}
                         </button>
+                        {d.annotation && (
+                          <Badge variant="outline" className="ml-2 font-sans text-xs">
+                            {d.annotation}
+                          </Badge>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">{formatDurationNs(d.mean_ns)}</TableCell>
                       <TableCell className="text-right text-muted-foreground">{formatCi(d.ci95_half_ns)}</TableCell>
@@ -499,7 +546,13 @@ function TimelineTooltip({
 }: {
   active?: boolean
   payload?: Array<{
-    payload: { fullValue: string; mean_ns: number; ci95_half_ns: number; delta: number | null }
+    payload: {
+      fullValue: string
+      mean_ns: number
+      ci95_half_ns: number
+      delta: number | null
+      annotation?: string
+    }
   }>
 }) {
   if (!active || !payload?.[0]) return null
@@ -507,8 +560,11 @@ function TimelineTooltip({
   return (
     <div className="rounded-md border bg-background p-3 shadow-md text-sm">
       <div className="font-medium">{d.fullValue}</div>
-      <div>Mean: {formatDurationNs(d.mean_ns)}</div>
-      <div className="text-muted-foreground">{formatCi(d.ci95_half_ns)}</div>
+      {d.annotation && <div>{d.annotation}</div>}
+      <div>
+        Mean: {formatDurationNs(d.mean_ns)}
+        <span className="text-muted-foreground"> {formatCi(d.ci95_half_ns)}</span>
+      </div>
       {d.delta !== null && (
         <div>
           Delta: {d.delta > 0 ? "+" : ""}
@@ -563,7 +619,7 @@ function SparseTick({
   return (
     <g transform={`translate(${x},${y})`}>
       <text x={0} y={0} dy={4} textAnchor="end" fill="currentColor" fontSize={11} transform="rotate(-45)">
-        {payload?.value}
+        {payload?.value ? shortenValue(String(payload.value)) : ""}
       </text>
     </g>
   )

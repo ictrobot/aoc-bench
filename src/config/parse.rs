@@ -72,6 +72,8 @@ struct ConfigKeyDef<'a> {
     values: Vec<&'a str>,
     #[serde(borrow, default)]
     presets: HashMap<&'a str, Vec<&'a str>>,
+    #[serde(borrow, default)]
+    annotations: HashMap<&'a str, &'a str>,
 }
 
 #[derive(Deserialize)]
@@ -145,7 +147,7 @@ fn parse_config_keys<'a>(
     let mut key_lookup = HashMap::with_capacity(raw_keys.len());
 
     for (key_name, key_def) in raw_keys {
-        let key = Key::new(key_name, key_def.values)?;
+        let key = Key::new(key_name, key_def.values, key_def.annotations)?;
         let presets = parse_presets(&key, key_def.presets)?;
         config_keys.push(key.clone());
         key_lookup.insert(key_name, KeyLookup { key, presets });

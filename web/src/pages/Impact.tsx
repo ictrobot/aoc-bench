@@ -177,9 +177,12 @@ function ImpactContent({ host }: { host: string }) {
                     setFromValue(v)
                     setToValue("")
                   }}
-                  options={comparisonValues.slice(0, -1).map((v) => ({ value: v, label: shortenValue(v) }))}
+                  options={comparisonValues.slice(0, -1).map((v) => {
+                    const ann = configKeys[comparisonKey]?.annotations?.[v]
+                    return { value: v, label: ann ? `${shortenValue(v)} - ${ann}` : shortenValue(v) }
+                  })}
                   placeholder="Select"
-                  className="w-[160px]"
+                  className="w-[200px]"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -191,11 +194,12 @@ function ImpactContent({ host }: { host: string }) {
                   ariaLabelledBy={toLabelId}
                   value={toValue}
                   onChange={setToValue}
-                  options={comparisonValues
-                    .slice(fromValue ? comparisonValues.indexOf(fromValue) + 1 : 0)
-                    .map((v) => ({ value: v, label: shortenValue(v) }))}
+                  options={comparisonValues.slice(fromValue ? comparisonValues.indexOf(fromValue) + 1 : 0).map((v) => {
+                    const ann = configKeys[comparisonKey]?.annotations?.[v]
+                    return { value: v, label: ann ? `${shortenValue(v)} - ${ann}` : shortenValue(v) }
+                  })}
                   placeholder="Select"
-                  className="w-[160px]"
+                  className="w-[200px]"
                 />
               </div>
             </>

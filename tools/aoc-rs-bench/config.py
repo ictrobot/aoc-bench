@@ -119,6 +119,10 @@ class MatrixBuilder:
             if isinstance(r, Exception):
                 raise r
 
+        annotations = await self.generate_commit_annotations(commits, sem)
+        if annotations:
+            results["config_keys"]["commit"]["annotations"] = annotations
+
         post_processed = []
         for key in sorted(results["benchmarks"].keys()):
             post_processed.append(self.post_process_benchmark(key, results["benchmarks"][key], results["config_keys"]))
@@ -261,6 +265,44 @@ class MatrixBuilder:
 
     def build_path(self, commit: str, kind: str, puzzle: tuple[str, str]) -> Path:
         return self.commit_build_dir(commit, kind) / f"{puzzle[0]}-{puzzle[1]}"
+
+    async def get_rust_version(self, commit: str, sem: asyncio.Semaphore) -> str | None:
+        cached = self.cache[commit].get("rust_version")
+        if cached:
+            return cached
+
+        binary = self.build_path(commit, MatrixBuilder.BUILDS[0], ("2015", "01"))
+        if not binary.is_file():
+            return None
+
+        async with sem:
+            code, stdout, stderr = await run("readelf", "-p", ".comment", str(binary))
+
+        if code != 0:
+            return None
+
+        match = re.search(r"rustc version (\d+\.\d+\.\d+)", stdout)
+        if match:
+            self.cache[commit]["rust_version"] = match.group(1)
+            return match.group(1)
+        return None
+
+    async def generate_commit_annotations(
+            self, commits: list[str], sem: asyncio.Semaphore
+    ) -> dict[str, str]:
+        versions = await asyncio.gather(
+            *(self.get_rust_version(c, sem) for c in commits)
+        )
+
+        annotations = {}
+        prev_version = None
+        for commit, version in zip(commits, versions):
+            if version is not None and version != prev_version:
+                if prev_version is not None:
+                    annotations[commit] = f"Rust {version}"
+            prev_version = version if version is not None else prev_version
+
+        return annotations
 
 
 def write_atomic(file: Path, binary: bool, write_fn):

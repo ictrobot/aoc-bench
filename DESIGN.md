@@ -199,6 +199,9 @@ All commands and paths specified in the config are relative to the `data/` direc
         "ghi9012",
         ...
       ],
+      "annotations": {
+        "def5678": "Rust 1.85.0"
+      },
       "presets": {
         "from_abc1234": [
           "abc1234",
@@ -248,6 +251,7 @@ All commands and paths specified in the config are relative to the `data/` direc
       }
     }
   },
+  "timeline_key": "commit",
   "benchmarks": [
     {
       "benchmark": "2015-04",
@@ -280,6 +284,8 @@ All commands and paths specified in the config are relative to the `data/` direc
 For each key (e.g., `commit`, `build`, `threads`):
 
 - **`values`**: Array of all valid values for this key (in canonical order)
+- **`annotations`** *(optional)*: Map of value labels used to show markers/tooltips for specific
+  values (e.g. compiler-version transitions on commit values)
 - **`presets`** *(optional)*: Named groups of values for convenient reuse
     - Preset names can be any string (e.g., `"all"`, `"from_abc1234"`, `"power_of_2"`)
     - Preset values must be subsets of `values`
@@ -293,6 +299,12 @@ strings or stored, values are sorted according to this order.
 
 **Disallowed keys**: The following keys are reserved to avoid confusion: `bench`, `benchmark`, `host`, `timestamp`.
 The system synthesizes the `host` key automatically, so user configs must never define it manually.
+
+## 4.2.1 Top-level optional fields
+
+- **`timeline_key`** *(optional)*: Selects the default dimension used for timeline ordering in exports/UI.
+  Must reference a key defined in `config_keys`.
+  If omitted, the system defaults to `commit` when present.
 
 ## 4.3 Benchmarks Section
 
