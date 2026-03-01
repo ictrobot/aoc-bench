@@ -1,4 +1,5 @@
 import { screen, within } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { Dashboard } from "./Dashboard.tsx"
 import * as api from "@/lib/api.ts"
@@ -63,5 +64,43 @@ describe("Dashboard", () => {
 
     expect(await screen.findByText("Error: decode failed")).toBeInTheDocument()
     expect(screen.queryByRole("table")).toBeNull()
+  })
+
+  it("formats result counts and sorts by results", async () => {
+    const hostIndex = makeHostIndex({
+      config_keys: {
+        commit: { values: ["a"] },
+      },
+      benchmarks: [
+        { name: "bench-a", result_count: 12_000 },
+        { name: "bench-b", result_count: 9 },
+        { name: "bench-c", result_count: 345 },
+      ],
+      timeline_key: "commit",
+    })
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([])
+
+    const user = userEvent.setup()
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
+
+    const table = await screen.findByRole("table")
+    const resultsButton = within(table).getByRole("button", { name: /Results/ })
+    const benchmarkOrder = () =>
+      within(table)
+        .getAllByRole("link")
+        .map((link) => link.textContent)
+
+    const benchARow = screen.getByRole("link", { name: "bench-a" }).closest("tr")
+    expect(benchARow).not.toBeNull()
+    expect(within(benchARow!).getByText((12_000).toLocaleString())).toBeInTheDocument()
+
+    expect(benchmarkOrder()).toEqual(["bench-a", "bench-b", "bench-c"])
+
+    await user.click(resultsButton)
+    expect(benchmarkOrder()).toEqual(["bench-b", "bench-c", "bench-a"])
+
+    await user.click(resultsButton)
+    expect(benchmarkOrder()).toEqual(["bench-a", "bench-c", "bench-b"])
   })
 })

@@ -105,7 +105,7 @@ function BenchmarkTableWithLatest({
   }, [latestResults, timelineKey])
 
   const [filters, setFilters] = useState<Record<string, string>>({})
-  const [sortBy, setSortBy] = useState<"index" | "name" | "time">("index")
+  const [sortBy, setSortBy] = useState<"index" | "name" | "time" | "results">("index")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc")
 
   // Compute aggregated times: for each bench, min mean_ns across filtered results
@@ -131,21 +131,23 @@ function BenchmarkTableWithLatest({
     if (sortBy === "index") return rows
 
     return [...rows].sort((a, b) => {
-      let cmp = 0
+      let cmp
       if (sortBy === "name") {
         cmp = a.name.localeCompare(b.name)
-      } else {
+      } else if (sortBy === "time") {
         // Sort by time: null times go last
         if (a.mean_ns === null && b.mean_ns === null) cmp = 0
         else if (a.mean_ns === null) cmp = 1
         else if (b.mean_ns === null) cmp = -1
         else cmp = a.mean_ns - b.mean_ns
+      } else {
+        cmp = a.result_count - b.result_count
       }
       return sortDir === "asc" ? cmp : -cmp
     })
   }, [benchmarks, aggregatedTimes, sortBy, sortDir])
 
-  function toggleSort(col: "name" | "time") {
+  function toggleSort(col: "name" | "time" | "results") {
     if (sortBy === col) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"))
     } else {
@@ -154,12 +156,12 @@ function BenchmarkTableWithLatest({
     }
   }
 
-  function sortIndicator(col: "name" | "time") {
+  function sortIndicator(col: "name" | "time" | "results") {
     if (sortBy !== col) return <span className="text-muted-foreground/40 ml-1">↕</span>
     return <span className="ml-1">{sortDir === "asc" ? "↑" : "↓"}</span>
   }
 
-  function sortAria(col: "name" | "time"): "ascending" | "descending" | "none" {
+  function sortAria(col: "name" | "time" | "results"): "ascending" | "descending" | "none" {
     if (sortBy !== col) return "none"
     return sortDir === "asc" ? "ascending" : "descending"
   }
@@ -211,7 +213,15 @@ function BenchmarkTableWithLatest({
                       </button>
                     </TableHead>
                   )}
-                  <TableHead className="text-right">Results</TableHead>
+                  <TableHead className="text-right" aria-sort={sortAria("results")}>
+                    <button
+                      type="button"
+                      className="w-full cursor-pointer select-none text-right hover:text-foreground"
+                      onClick={() => toggleSort("results")}
+                    >
+                      Results {sortIndicator("results")}
+                    </button>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -230,7 +240,7 @@ function BenchmarkTableWithLatest({
                         {b.mean_ns !== null ? formatDurationNs(b.mean_ns) : "—"}
                       </TableCell>
                     )}
-                    <TableCell className="text-right">{b.result_count}</TableCell>
+                    <TableCell className="text-right">{b.result_count.toLocaleString()}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
