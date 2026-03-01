@@ -20,7 +20,12 @@ pub fn init() {
         subscriber.json().init();
     } else {
         // Only modify fields in the pretty output, keep the full float precision in JSON
-        subscriber.map_fmt_fields(CustomFmt).init();
+        if std::env::var_os("JOURNAL_STREAM").is_some() {
+            // Don't log time when running under systemd and logging to journal
+            subscriber.without_time().map_fmt_fields(CustomFmt).init();
+        } else {
+            subscriber.map_fmt_fields(CustomFmt).init();
+        }
     }
 }
 
