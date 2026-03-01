@@ -12,6 +12,8 @@ pub struct HostConfig {
     pub cpu_affinity: CpuAffinity,
     #[serde(default = "default_disable_aslr")]
     pub disable_aslr: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl HostConfig {
@@ -38,6 +40,7 @@ impl Default for HostConfig {
         Self {
             cpu_affinity: CpuAffinity::All,
             disable_aslr: default_disable_aslr(),
+            description: None,
         }
     }
 }
@@ -212,6 +215,7 @@ mod tests {
         let cfg = HostConfig {
             cpu_affinity: CpuAffinity::Cpus(vec![0, 1, 2, 4]),
             disable_aslr: false,
+            description: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"cpu_affinity\":\"0-2,4\""));
@@ -260,5 +264,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_parses_description() {
+        let dir = TempDir::new().unwrap();
+        let hosts = dir.path().join("hosts");
+        fs::create_dir_all(&hosts).unwrap();
+        fs::write(
+            hosts.join("h1.json"),
+            r#"{ "description": "[Example](https://example.com) instance." }"#,
+        )
+        .unwrap();
+
+        let cfg = HostConfig::load(dir.path(), "h1").unwrap();
+        assert_eq!(
+            cfg.description.as_deref(),
+            Some("[Example](https://example.com) instance.")
+        );
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"description\":"));
+
+        // Without description, field is omitted
+        let no_desc = HostConfig::default();
+        let json = serde_json::to_string(&no_desc).unwrap();
+        assert!(!json.contains("description"));
     }
 }

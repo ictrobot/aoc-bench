@@ -3,5 +3,6 @@
 target
 data
 web/public/data/
+**/node_modules/
 **/__pycache__/
 /lefthook-local.yaml

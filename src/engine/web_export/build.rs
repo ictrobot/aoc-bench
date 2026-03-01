@@ -170,6 +170,7 @@ fn build_host_index(
 
     WebHostIndex {
         last_updated,
+        description: None,
         config_keys: config_index
             .keys
             .iter()

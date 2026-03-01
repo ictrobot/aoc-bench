@@ -10,6 +10,13 @@
     bench_repo_url: "https://github.com/ictrobot/aoc-bench.git"
     bench_repo_branch: master
     cloudflare_env_file: "/home/{{ bench_user }}/.config/aoc-bench/cloudflare.env"
+    isolated_cores: "0-11"
+    # yamllint disable rule:line-length
+    host_description: >-
+      [Hetzner EX44](https://www.hetzner.com/dedicated-rootserver/ex44/) instance with an
+      [Intel i5-13500](https://www.intel.com/content/www/us/en/products/sku/230580/intel-core-i513500-processor-24m-cache-up-to-4-80-ghz/specifications.html).
+      Benchmarks isolated to the 6 P-cores.
+    # yamllint enable rule:line-length
 
   pre_tasks:
     - name: Set timezone to UTC
@@ -212,6 +219,32 @@
         accept_hostkey: true
         update: true
         force: false
+
+    - name: Ensure host config directory exists
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.file:
+        path: "{{ bench_repo_dir }}/data/hosts"
+        state: directory
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0755"
+
+    - name: Write host config
+      become: true
+      become_user: "{{ bench_user }}"
+      ansible.builtin.copy:
+        content: "{{ host_config | to_nice_json }}\n"
+        dest: "{{ bench_repo_dir }}/data/hosts/{{ inventory_hostname }}.json"
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0644"
+      vars:
+        host_config: >-
+          {{
+            {'cpu_affinity': isolated_cores}
+            | combine({'description': host_description} if host_description is defined else {})
+          }}
 
     - name: Ensure benchmark config directory exists
       ansible.builtin.file:

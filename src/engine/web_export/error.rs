@@ -1,3 +1,4 @@
+use crate::host_config::HostConfigError;
 use crate::storage::HybridDiskError;
 use std::io;
 use std::path::PathBuf;
@@ -12,6 +13,8 @@ pub enum WebExportError {
 pub enum WebSnapshotExportError {
     #[error(transparent)]
     WebExport(#[from] WebExportError),
+    #[error("host config error: {0}")]
+    HostConfig(#[from] HostConfigError),
     #[error("I/O error at '{path:?}': {error}")]
     Io {
         path: PathBuf,

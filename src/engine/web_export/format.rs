@@ -54,6 +54,8 @@ impl Serialize for HistoryRow {
 #[derive(Serialize, Debug, PartialEq)]
 pub struct WebHostIndex {
     pub last_updated: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub config_keys: BTreeMap<String, WebConfigKey>,
     pub benchmarks: Vec<WebBenchmarkEntry>,
     pub timeline_key: Option<String>,

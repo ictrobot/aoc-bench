@@ -78,14 +78,16 @@ export function Header({ hosts }: { hosts: string[] }) {
           >
             {isDark ? <Sun size={16} /> : <Moon size={16} />}
           </button>
-          <Combobox
-            ariaLabel="Select host"
-            value={currentHost}
-            onChange={onHostChange}
-            options={hosts.map((h) => ({ value: h, label: h }))}
-            placeholder="Select host"
-            className="w-[170px] min-[480px]:w-[220px] md:w-[190px]"
-          />
+          {hosts.length > 1 && (
+            <Combobox
+              ariaLabel="Select host"
+              value={currentHost}
+              onChange={onHostChange}
+              options={hosts.map((h) => ({ value: h, label: h }))}
+              placeholder="Select host"
+              className="w-[170px] min-[480px]:w-[220px] md:w-[190px]"
+            />
+          )}
         </div>
       </div>
     </header>

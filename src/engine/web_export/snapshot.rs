@@ -2,6 +2,7 @@ use super::build::{export_host, host_names};
 use super::error::WebSnapshotExportError;
 use super::format::WebHostIndex;
 use crate::config::ConfigFile;
+use crate::host_config::HostConfig;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -102,7 +103,7 @@ fn write_snapshot_payload(
         let history_dir = host_dir.join("history");
         let mut history_count = 0usize;
 
-        let data = export_host(config_file, host_name, |bench_id, history| {
+        let mut data = export_host(config_file, host_name, |bench_id, history| {
             history_count += 1;
             let file_name = format!("{}.json", bench_id.as_str());
             let relative_path = format!("{host_name}/history/{file_name}");
@@ -128,6 +129,9 @@ fn write_snapshot_payload(
             count = data.compact.results.len(),
             "wrote results.json"
         );
+
+        let host_config = HostConfig::load(config_file.data_dir(), host_name)?;
+        data.index.description = host_config.description;
 
         host_index_map.insert(host_name.clone(), data.index);
     }

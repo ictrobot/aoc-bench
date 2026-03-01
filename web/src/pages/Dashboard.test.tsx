@@ -66,6 +66,29 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("table")).toBeNull()
   })
 
+  it("shows host description with links when present", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    hostIndex.description = "[Example](https://example.com) instance."
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([])
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
+
+    const link = await screen.findByRole("link", { name: "Example" })
+    expect(link).toHaveAttribute("href", "https://example.com")
+    expect(link.closest("p")?.textContent).toBe("Example instance.")
+  })
+
+  it("does not show description when not present", async () => {
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeDashboardHostIndex()))
+    mockDecodeLatestResults.mockReturnValue([])
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
+
+    await screen.findByText(HOST)
+    expect(screen.queryByText("instance")).toBeNull()
+  })
+
   it("formats result counts and sorts by results", async () => {
     const hostIndex = makeHostIndex({
       config_keys: {

@@ -8,6 +8,7 @@ import { BenchmarkLeaderboard } from "@/components/benchmarks/BenchmarkLeaderboa
 import { formatDurationNs } from "@/lib/format.ts"
 import type { CompactResult } from "@/lib/types.ts"
 import { withQuery } from "@/lib/routes.ts"
+import { MarkdownLinks } from "@/components/ui/markdown-links.tsx"
 
 export function Dashboard() {
   const [searchParams] = useSearchParams()
@@ -23,6 +24,11 @@ export function Dashboard() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">{host}</h1>
+      {data?.description && (
+        <p className="text-sm text-muted-foreground -mt-4">
+          <MarkdownLinks text={data.description} />
+        </p>
+      )}
       {isLoading && <div className="text-muted-foreground">Loading...</div>}
       {error && <div className="text-destructive">Error: {error.message}</div>}
       {decodeError && <div className="text-destructive">Error: {decodeError.message}</div>}
