@@ -262,12 +262,13 @@ impl Key {
                     value: value_name.to_string(),
                 });
             }
-            let idx = name_to_idx.get(value_name).ok_or_else(|| {
-                ConfigError::UnknownValueForKey {
-                    key: name.to_string(),
-                    value: value_name.to_string(),
-                }
-            })?;
+            let idx =
+                name_to_idx
+                    .get(value_name)
+                    .ok_or_else(|| ConfigError::UnknownValueForKey {
+                        key: name.to_string(),
+                        value: value_name.to_string(),
+                    })?;
             indexed_annotations.insert(*idx, Arc::from(annotation));
         }
 
@@ -545,7 +546,7 @@ impl KeyValue {
     /// Get the annotation for this value, if any
     #[must_use]
     pub fn annotation(&self) -> Option<&str> {
-        self.key.0.annotations.get(&self.index).map(|s| s.as_ref())
+        self.key.0.annotations.get(&self.index).map(Arc::as_ref)
     }
 }
 
@@ -749,7 +750,7 @@ impl Config {
 
     /// Expand a list of templates.
     ///
-    /// See [`expand_template`] for details on placeholder syntax.
+    /// See [`Self::expand_template`] for details on placeholder syntax.
     pub fn expand_templates(&self, templates: &[String]) -> Result<Vec<String>, ConfigError> {
         templates
             .iter()

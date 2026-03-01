@@ -1,0 +1,19 @@
+output:
+  - summary
+  - failure
+
+pre-commit:
+  parallel: true
+  commands:
+    rustfmt:
+      run: cargo fmt --all --check
+    clippy:
+      run: cargo clippy --all --all-targets -- -Dwarnings
+    test:
+      run: cargo nextest run --all
+    doctest:
+      run: cargo test --doc --all
+    docs:
+      run: cargo doc --workspace --no-deps --document-private-items
+      env:
+        RUSTDOCFLAGS: -Dwarnings

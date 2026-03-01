@@ -493,7 +493,7 @@ impl StorageRead for HybridDiskStorage {
              ORDER BY r.bench",
         ))?;
 
-        let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
+        let mut rows_iter = stmt.query(params_from_iter(params))?;
         while let Some(row) = rows_iter.next()? {
             let Ok(base_row) = self.sql_to_results_row(row) else {
                 continue;
@@ -611,7 +611,7 @@ impl StorageRead for HybridDiskStorage {
         ))?;
 
         let mut rows = Vec::new();
-        let mut rows_iter = stmt.query(params_from_iter(params.into_iter()))?;
+        let mut rows_iter = stmt.query(params_from_iter(params))?;
         while let Some(row) = rows_iter.next()? {
             if let Ok(row) = self.sql_to_results_row(row)
                 && let Some(benchmark) = self.config_file.benchmark_by_id(&row.bench)
