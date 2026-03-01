@@ -17,3 +17,12 @@ pre-commit:
       run: cargo doc --workspace --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: -Dwarnings
+    web_build:
+      run: npm run build
+      root: web/
+    web_test:
+      run: npm run test
+      root: web/
+    web_lint:
+      run: npm run lint
+      root: web/
