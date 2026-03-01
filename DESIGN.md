@@ -3,7 +3,7 @@
 You want a system that:
 
 * Benchmarks arbitrary commands with flexible **configuration dimensions**.
-* Uses **in-process benchmarking** (no process spawn overhead) with a simple text protocol.
+* Uses **in-process benchmarking** with a simple text protocol emitted by benchmark processes.
 * Can run for **months/years**, but:
     * You're happy to **replace results** when the environment clearly changed.
     * Old runs are immutable and never removed or modified.
@@ -35,6 +35,10 @@ The `aoc-bench` tool provides the following subcommands:
     * Outputs TSV suitable for plotting
     * Supports partial config matching for filtering
     * Extracts config keys into separate columns (with `cfg_` prefix)
+
+* **`export-web`** - Export benchmark data as JSON for the web interface
+    * Writes snapshot-based JSON data and updates an index file atomically
+    * Intended for static web UI consumption
 
 * **`timeline`** - Show performance history across one config dimension
     * Displays ordered results with performance change highlights
@@ -627,7 +631,7 @@ Defaults (overrideable per-benchmark/variant via the optional `stats` block):
 
 ```rust
 const MIN_WARMUP_SAMPLES: usize = 4;
-const MIN_WARMUP_TIME_NS: u64 = 200_000_000; // 200 ms
+const MIN_WARMUP_TIME_NS: u64 = 1_000_000_000; // 1 second
 const MAX_WARMUP_TIME_NS: u64 = 15_000_000_000; // 15 s
 const STABILITY_WINDOW: usize = 8;
 const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
@@ -941,13 +945,13 @@ Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
 The result is displayed as:
 
 ```
-106.3 µs/iter (±0.4%, 95% CI, median of 7 run means)
+106.3 µs/iter (±0.4%, 95% CI, median of 3 run means)
 ```
 
 or more compact:
 
 ```
-106.3 µs/iter ±0.4%  (median of 7 run means)
+106.3 µs/iter ±0.4%  (median of 3 run means)
 ```
 
 **These JSON files are immutable** - once written, they are never modified. They are the authoritative source of truth.
@@ -1280,10 +1284,10 @@ Benchmark configurations use a key-value system:
 
 ```bash
 # Export all stable results for a host
-aoc-bench export --host silicon --format tsv > results.tsv
+aoc-bench export --host silicon > results.tsv
 
 # Query specific result (using partial config matching)
-aoc-bench export --host silicon --config bench=2015-04,commit=abc1234,profile=release,threads=1
+aoc-bench export --host silicon --config commit=abc1234,profile=release,threads=1 2015-04
 ```
 
 **Config filtering:**
@@ -1307,7 +1311,8 @@ abc1234 2015-04 abc1234     release     1               1731437601        309300
 
 The config JSON is always extracted into a column per key. Keys other than `host` are prefixed with `cfg_`.
 
-**Note:** All exported values are median run values from run series. For full run-level details (all 7 runs),
+**Note:** All exported values are median run values from run series. For full run-level details (all runs in the
+series),
 access the JSON files directly in the `runs/` directory.
 
 Use with gnuplot, matplotlib, R, or any other plotting tool.
@@ -1348,7 +1353,7 @@ ghi9012         24.00 ms        ±0.03 ms      -31.03%   IMPROVEMENT
 - Builds the timeline from **stable results only**, ordered by the comparison key's value order from the config file
   (not by timestamp).
 - A change is highlighted only when the 95% confidence intervals do not overlap **and** the relative difference in
-  means meets the `--threshold` percentage (default 15%). Points below the threshold are omitted but counted and the
+  means meets the `--threshold` percentage (default 10%). Points below the threshold are omitted but counted and the
   omission count is shown at the bottom.
 - Outputs the initial point followed by each significant regression/improvement with its delta sign (+/-) and
   direction label.
@@ -1383,18 +1388,27 @@ REGRESSIONS:
 - Finds all results with `commit=def4567` (and optionally filtered by a partial config)
 - For each pair of results with the same config (ignoring the comparison key), determines if there was a regression,
   improvement, or no significant change
-- Uses a relative change threshold (`--threshold`, default 15%) and requires non-overlapping CIs (similar to
+- Uses a relative change threshold (`--threshold`, default 10%) and requires non-overlapping CIs (similar to
   `timeline`).
 - Outputs a summary with improvements and regressions.
 
-## 13.4 Web UI (future)
+## 13.4 Web UI
 
-A static HTML page can query the database (read-only) or load exported JSON:
+The web UI is a static SPA that loads exported snapshot JSON from `aoc-bench export-web`:
 
-- Time series plots per benchmark
-- Commit-to-commit comparisons
-- Stable result change timeline
-- Cross-config comparisons
+- **Dashboard (`/`)**
+    - Host overview and benchmark table
+    - Latest result filtering across config dimensions
+    - Fastest/slowest benchmark leaderboard
+- **Benchmark detail (`/benchmark`)**
+    - Per-config cards for one benchmark
+    - Links to timeline views for deeper analysis
+- **Timeline (`/timeline`)**
+    - Per-benchmark timeline and comparison-key analysis
+    - Config filtering and history drill-down
+- **Impact (`/impact`)**
+    - Compare two values of a selected config key
+    - Group regressions, improvements, and unchanged results with threshold control
 
 ---
 
@@ -1407,7 +1421,7 @@ These are *not* required now, but the design leaves room for them:
 * **Variance analysis across runs**: Use the stored individual runs in each series to compute cross-run variance
   metrics.
 * Use **daily roll-ups** for heavy usage (materialized views in database).
-* Add a small **web UI** that reads the database and draws time-series.
+* Extend the **web UI** with additional time-series and analysis views.
 * **Multi-host aggregation**: Collect databases from multiple hosts for cross-machine comparison.
 * **Automatic re-run scheduling**: Cron job that re-runs old commits to detect drift.
 
@@ -1423,7 +1437,7 @@ This design gives you:
     * uses bootstrap CIs,
     * stops when the measurement is stable.
 * A **run series approach** that:
-    * Performs 7 runs back-to-back for each benchmark execution
+    * Performs N runs back-to-back for each benchmark execution (default 3)
     * Uses median-of-means to eliminate run-to-run variance (ASLR, cache state, etc.)
     * Stores all runs for later analysis and variance detection
 * A **dual storage architecture**:
