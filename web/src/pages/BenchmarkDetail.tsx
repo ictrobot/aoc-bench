@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react"
-import { useSearchParams, Link } from "react-router-dom"
-import { useBenchmarkResults, useHostIndex } from "@/hooks/queries.ts"
+import { Link } from "react-router"
+import { useUrlHostBenchmark } from "@/hooks/use-url-state.tsx"
+import { useBenchmarkResults } from "@/hooks/queries.ts"
 import { formatDurationNs, formatCi, shortenValue } from "@/lib/format.ts"
 import { Card, CardContent } from "@/components/ui/card.tsx"
 import { withQuery } from "@/lib/routes.ts"
@@ -10,43 +11,21 @@ import type { CompactResult, HostIndex } from "@/lib/types.ts"
 const MAX_SPARK_POINTS = 100
 
 export function BenchmarkDetail() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const host = searchParams.get("host") ?? ""
-  const bench = searchParams.get("bench") ?? ""
+  const { host, bench, hostIndex } = useUrlHostBenchmark()
 
-  const { data: index } = useHostIndex(host)
   const { data: results, isLoading, error } = useBenchmarkResults(host, bench)
-  const benchmarkNames = useMemo(() => (index?.benchmarks ?? []).map((b) => b.name), [index])
-  const benchExists = benchmarkNames.includes(bench)
-  const fallbackBench = index?.benchmarks[0]?.name ?? ""
 
   useEffect(() => {
-    if (fallbackBench && !benchExists) {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev)
-          next.set("bench", fallbackBench)
-          return next
-        },
-        { replace: true },
-      )
-      return
-    }
-    if (benchExists) {
-      document.title = `${bench} — aoc-bench`
-    }
-  }, [bench, benchExists, fallbackBench, setSearchParams])
+    document.title = `${bench} — aoc-bench`
+  }, [bench])
 
   if (isLoading) return <div className="text-muted-foreground">Loading...</div>
   if (error) return <div className="text-destructive">Error: {error.message}</div>
-  if (fallbackBench && !benchExists) {
-    return <div className="text-muted-foreground">Selecting benchmark...</div>
-  }
   if (!results || results.length === 0) {
     return <div className="text-muted-foreground">No results found for this benchmark.</div>
   }
 
-  return <BenchmarkDetailContent host={host} bench={bench} results={results} index={index} />
+  return <BenchmarkDetailContent host={host} bench={bench} results={results} index={hostIndex} />
 }
 
 function BenchmarkDetailContent({
@@ -58,7 +37,7 @@ function BenchmarkDetailContent({
   host: string
   bench: string
   results: CompactResult[]
-  index: HostIndex | undefined
+  index: HostIndex
 }) {
   const cards = useMemo(() => {
     // Find trendKey
@@ -70,11 +49,11 @@ function BenchmarkDetailContent({
       }
     }
     const trendKey =
-      index?.timeline_key && keyCounts.has(index.timeline_key)
+      index.timeline_key && keyCounts.has(index.timeline_key)
         ? index.timeline_key
         : ([...keyCounts.entries()].sort(([, a], [, b]) => b.size - a.size)[0]?.[0] ?? "")
 
-    const canonicalTrendOrder = index?.config_keys[trendKey]?.values ?? []
+    const canonicalTrendOrder = index.config_keys[trendKey]?.values ?? []
 
     // Group by config-minus-trendKey, keeping the result with the highest canonical trendKey
     // index as the headline number, and collecting all trendKey values for the sparkline.
@@ -117,7 +96,7 @@ function BenchmarkDetailContent({
     return [...groups.entries()]
       .sort(([, a], [, b]) => {
         for (const key of Object.keys(a.config)) {
-          const order = index?.config_keys[key]?.values ?? []
+          const order = index.config_keys[key]?.values ?? []
           const ai = order.indexOf(a.config[key])
           const bi = order.indexOf(b.config[key])
           if (ai !== bi) return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi)

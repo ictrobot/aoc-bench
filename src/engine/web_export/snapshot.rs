@@ -45,7 +45,7 @@ struct SnapshotManifestEntry {
 
 /// Export all hosts into a snapshot directory and atomically publish `index.json`.
 ///
-/// Returns `Ok(None)` when the config has no hosts.
+/// Returns `Ok(None)` when the config has no hosts or all hosts have no benchmark results.
 pub fn export_web_snapshot(
     config_file: &ConfigFile,
     output_dir: &Path,
@@ -71,6 +71,12 @@ pub fn export_web_snapshot(
 
     let (snapshot_id, host_index_map) =
         write_snapshot_payload(config_file, staging_snapshot_dir.path(), &hosts)?;
+
+    if host_index_map.is_empty() {
+        return Ok(None);
+    }
+
+    let host_count = host_index_map.len();
     let final_snapshot_dir = snapshots_dir.join(&snapshot_id);
     let snapshot_created = publish_snapshot_dir(staging_snapshot_dir, &final_snapshot_dir)?;
 
@@ -83,7 +89,7 @@ pub fn export_web_snapshot(
 
     Ok(Some(WebSnapshotExport {
         snapshot_id,
-        host_count: hosts.len(),
+        host_count,
         snapshot_created,
     }))
 }
@@ -116,6 +122,11 @@ fn write_snapshot_payload(
             count = history_count,
             "wrote history files"
         );
+
+        if data.index.benchmarks.is_empty() {
+            info!(host = host_name, "skipping host with no benchmark results");
+            continue;
+        }
 
         let results_relative_path = format!("{host_name}/results.json");
         let results_entry = write_json_hashed(
@@ -530,5 +541,55 @@ mod tests {
             .expect("expected hosts");
         assert_eq!(second.snapshot_id, first.snapshot_id);
         assert!(!second.snapshot_created);
+    }
+
+    #[test]
+    fn test_export_web_snapshot_returns_none_when_no_results() {
+        let (dir, config_file, _storage) = setup_storage("h1");
+
+        let output_dir = dir.path().join("web-data");
+        let result = export_web_snapshot(&config_file, &output_dir).unwrap();
+
+        assert!(result.is_none());
+        assert!(!output_dir.join("index.json").exists());
+    }
+
+    #[test]
+    fn test_export_web_snapshot_skips_host_without_results() {
+        let (dir, h1_config_file, storage) = setup_storage("h1");
+
+        // Create h2 results directory so it is autodiscovered as a second host
+        fs::create_dir_all(dir.path().join("results").join("h2")).unwrap();
+
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["x"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["x"] }
+                }
+            ]
+        }"#;
+        // Reload config to autodiscover both hosts for export; use the original
+        // h1_config_file for mk_series/insert since storage was created with it
+        let config_file = ConfigFile::from_str(dir.path(), None, json).unwrap();
+
+        let s1 = mk_series(&h1_config_file, "h1", "bench", "build=x", 100.0, 1000);
+        insert(&storage, &s1);
+
+        let output_dir = dir.path().join("web-data");
+        let result = export_web_snapshot(&config_file, &output_dir)
+            .unwrap()
+            .expect("expected h1 to be exported");
+
+        assert_eq!(result.host_count, 1);
+
+        let index: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("index.json")).unwrap()).unwrap();
+        assert!(index["hosts"]["h1"].is_object());
+        assert!(index["hosts"]["h2"].is_null());
     }
 }

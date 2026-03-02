@@ -23,8 +23,7 @@ pub fn execute(args: ExportWebArgs) -> Result<(), CliError> {
     info!(path = %args.output_dir.display(), "exporting web data");
 
     let Some(result) = export_web_snapshot(&config_file, &args.output_dir)? else {
-        info!("no hosts found, nothing to export");
-        return Ok(());
+        return Err(CliError::NothingToExport);
     };
 
     if result.snapshot_created {

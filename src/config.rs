@@ -1327,6 +1327,8 @@ pub enum ConfigError {
     InvalidHostAtPath { host: String, path: PathBuf },
     #[error("Empty annotation for value '{value}' in key '{key}'")]
     EmptyAnnotation { key: String, value: String },
+    #[error("Config must define at least one benchmark")]
+    NoBenchmarks,
 }
 
 #[cfg(test)]
@@ -2007,7 +2009,7 @@ mod tests {
                 "threads": { "values": ["1", "n"] },
                 "other": { "values": ["a", "b"] }
             },
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         let tmp_dir = TempDir::new().unwrap();
@@ -2578,7 +2580,7 @@ mod tests {
                 "build": { "values": ["debug", "release"] },
                 "threads": { "values": ["1", "4"] }
             },
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         let tmp_dir = TempDir::new().unwrap();
@@ -2623,7 +2625,7 @@ mod tests {
                 "build": { "values": ["debug", "release"] },
                 "threads": { "values": ["1", "4"] }
             },
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         let tmp_dir = TempDir::new().unwrap();
@@ -2819,7 +2821,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let json = r#"{
             "config_keys": {},
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         // Create config with a current host
@@ -2839,7 +2841,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let json = r#"{
             "config_keys": {},
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         // Create some host directories
@@ -2872,7 +2874,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let json = r#"{
             "config_keys": {},
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         // Invalid host name with space

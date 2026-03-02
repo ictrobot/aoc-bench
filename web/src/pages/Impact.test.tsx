@@ -1,5 +1,6 @@
-import { screen } from "@testing-library/react"
+import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { useLocation } from "react-router"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { Impact } from "./Impact.tsx"
 import * as api from "@/lib/api.ts"
@@ -63,6 +64,11 @@ function makeImpactHostIndex() {
   })
 }
 
+function LocationProbe() {
+  const location = useLocation()
+  return <div data-testid="location">{location.pathname + location.search}</div>
+}
+
 describe("Impact", () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -114,5 +120,43 @@ describe("Impact", () => {
     const toSelect = screen.getByLabelText("To:") as HTMLSelectElement
     const optionValues = Array.from(toSelect.options).map((o) => o.value)
     expect(optionValues).toEqual(["", "c"])
+  })
+
+  it("removes unsupported and invalid f_* URL filters for the current host", async () => {
+    const user = userEvent.setup()
+    const hostIndex = makeHostIndex({
+      config_keys: {
+        commit: { values: ["a", "b"] },
+        mode: { values: ["fast", "safe"] },
+      },
+      benchmarks: [{ name: "bench-a", result_count: 2 }],
+      timeline_key: "commit",
+    })
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "a", mode: "fast" }, mean_ns: 100, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "b", mode: "fast" }, mean_ns: 130, ci95_half_ns: 1 },
+    ])
+
+    renderWithRouterAndQueryClient(
+      <>
+        <Impact />
+        <LocationProbe />
+      </>,
+      { initialEntries: [`/impact?host=${HOST}&f_unsupported=1&f_mode=invalid`] },
+    )
+
+    const fromSelect = await screen.findByLabelText("From:")
+    const toSelect = screen.getByLabelText("To:")
+
+    await user.selectOptions(fromSelect, "a")
+    await user.selectOptions(toSelect, "b")
+
+    expect(await screen.findByText("1 regressions")).toBeInTheDocument()
+    expect(screen.getByText("0 improvements")).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByTestId("location").textContent).not.toContain("f_unsupported")
+      expect(screen.getByTestId("location").textContent).not.toContain("f_mode=")
+    })
   })
 })

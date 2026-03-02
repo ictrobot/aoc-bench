@@ -1,11 +1,8 @@
-import { useSearchParams } from "react-router-dom"
-import { useHostIndex } from "@/hooks/queries.ts"
+import { useUrlHostBenchmark } from "@/hooks/use-url-state.tsx"
 import { formatTimestampUtc } from "@/lib/format.ts"
 
-export function Footer({ hosts }: { hosts: string[] }) {
-  const [searchParams] = useSearchParams()
-  const host = searchParams.get("host") ?? hosts[0] ?? ""
-  const { data: hostIndex } = useHostIndex(host)
+export function Footer() {
+  const { hostIndex } = useUrlHostBenchmark()
 
   return (
     <footer className="border-t mt-8">
@@ -18,11 +15,7 @@ export function Footer({ hosts }: { hosts: string[] }) {
         >
           github.com/ictrobot/aoc-bench
         </a>
-        {hostIndex && (
-          <span className="text-xs text-muted-foreground">
-            Last updated {formatTimestampUtc(hostIndex.last_updated)}
-          </span>
-        )}
+        <span className="text-xs text-muted-foreground">Last updated {formatTimestampUtc(hostIndex.last_updated)}</span>
       </div>
     </footer>
   )

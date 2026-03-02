@@ -1,6 +1,7 @@
-import { useDeferredValue, useEffect, useId, useMemo, useState } from "react"
-import { Link, useSearchParams } from "react-router-dom"
-import { useHostIndex, useCompactResults } from "@/hooks/queries.ts"
+import { useDeferredValue, useEffect, useId, useMemo } from "react"
+import { Link } from "react-router"
+import { useUrlHostBenchmark, useUrlParam, useUrlFilters, useSetUrlParams } from "@/hooks/use-url-state.tsx"
+import { useCompactResults } from "@/hooks/queries.ts"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
 import { Combobox } from "@/components/ui/combobox.tsx"
 import { shortenValue } from "@/lib/format.ts"
@@ -22,27 +23,40 @@ interface ImpactEntry {
   direction: "regression" | "improvement"
 }
 
+const validateThreshold = (v: string) => !isNaN(Number(v)) && Number(v) >= 0 && Number(v) <= 100
+
 export function Impact() {
-  const [searchParams] = useSearchParams()
-  const host = searchParams.get("host") ?? ""
+  const { host } = useUrlHostBenchmark()
 
   return <ImpactContent key={host} host={host} />
 }
 
 function ImpactContent({ host }: { host: string }) {
+  const setUrlParams = useSetUrlParams()
   useEffect(() => {
     document.title = "Impact — aoc-bench"
   }, [])
 
-  const { data: index } = useHostIndex(host)
+  const { hostIndex: index } = useUrlHostBenchmark()
   const { data: compact, isLoading, error } = useCompactResults(host)
 
-  const [selectedComparisonKey, setSelectedComparisonKey] = useState("")
-  const [fromValue, setFromValue] = useState("")
-  const [toValue, setToValue] = useState("")
-  const [filters, setFilters] = useState<Record<string, string>>({})
-  const [threshold, setThreshold] = useState(10)
+  const configKeys = index.config_keys
+  const keyNames = useMemo(() => Object.keys(configKeys), [configKeys])
+  const defaultComparisonKey = index.timeline_key || keyNames[0] || ""
+  const [comparisonKey] = useUrlParam("compare", defaultComparisonKey, keyNames)
+  const setComparisonKey = (v: string) => setUrlParams({ compare: v, from: null, to: null })
+
+  const comparisonValues = useMemo(() => configKeys[comparisonKey]?.values ?? [], [configKeys, comparisonKey])
+  const [fromValue] = useUrlParam("from", "", comparisonValues)
+  const setFromValue = (v: string) => setUrlParams({ from: v, to: null })
+  const [toValue, setToValue] = useUrlParam("to", "", comparisonValues)
+
+  const [thresholdStr, setThresholdStr] = useUrlParam("threshold", "10", validateThreshold)
+  const threshold = Number(thresholdStr)
   const deferredThreshold = useDeferredValue(threshold)
+
+  const { filters, setFilter } = useUrlFilters()
+
   const compareByControlId = useId()
   const compareByLabelId = `${compareByControlId}-label`
   const fromControlId = useId()
@@ -50,22 +64,6 @@ function ImpactContent({ host }: { host: string }) {
   const toControlId = useId()
   const toLabelId = `${toControlId}-label`
   const thresholdControlId = useId()
-
-  const configKeys = index?.config_keys ?? {}
-  const keyNames = Object.keys(configKeys)
-  const defaultComparisonKey = index?.timeline_key && configKeys[index.timeline_key] ? index.timeline_key : ""
-  const comparisonKey =
-    selectedComparisonKey && configKeys[selectedComparisonKey] ? selectedComparisonKey : defaultComparisonKey
-
-  // When comparison key changes, reset from/to
-  function onComparisonKeyChange(key: string) {
-    setSelectedComparisonKey(key)
-    setFromValue("")
-    setToValue("")
-    setFilters({})
-  }
-
-  const comparisonValues = comparisonKey ? (configKeys[comparisonKey]?.values ?? []) : []
 
   // Compute impact
   const impact = useMemo(() => {
@@ -157,7 +155,7 @@ function ImpactContent({ host }: { host: string }) {
               id={compareByControlId}
               ariaLabelledBy={compareByLabelId}
               value={comparisonKey}
-              onChange={onComparisonKeyChange}
+              onChange={setComparisonKey}
               options={keyNames.map((k) => ({ value: k, label: k }))}
               placeholder="Select key"
               className="w-[160px]"
@@ -173,10 +171,7 @@ function ImpactContent({ host }: { host: string }) {
                   id={fromControlId}
                   ariaLabelledBy={fromLabelId}
                   value={fromValue}
-                  onChange={(v) => {
-                    setFromValue(v)
-                    setToValue("")
-                  }}
+                  onChange={setFromValue}
                   options={comparisonValues.slice(0, -1).map((v) => {
                     const ann = configKeys[comparisonKey]?.annotations?.[v]
                     return { value: v, label: ann ? `${shortenValue(v)} - ${ann}` : shortenValue(v) }
@@ -193,7 +188,7 @@ function ImpactContent({ host }: { host: string }) {
                   id={toControlId}
                   ariaLabelledBy={toLabelId}
                   value={toValue}
-                  onChange={setToValue}
+                  onChange={(v) => setToValue(v)}
                   options={comparisonValues.slice(fromValue ? comparisonValues.indexOf(fromValue) + 1 : 0).map((v) => {
                     const ann = configKeys[comparisonKey]?.annotations?.[v]
                     return { value: v, label: ann ? `${shortenValue(v)} - ${ann}` : shortenValue(v) }
@@ -214,7 +209,7 @@ function ImpactContent({ host }: { host: string }) {
               min={0}
               max={100}
               value={threshold}
-              onChange={(e) => setThreshold(Number(e.target.value))}
+              onChange={(e) => setThresholdStr(e.target.value)}
               className="w-[70px] rounded-md border px-2 py-1 text-sm bg-transparent"
             />
             <span className="text-sm text-muted-foreground">%</span>
@@ -235,7 +230,7 @@ function ImpactContent({ host }: { host: string }) {
                       label={key}
                       values={values}
                       value={filters[key] ?? ""}
-                      onChange={(v) => setFilters((prev) => ({ ...prev, [key]: v }))}
+                      onChange={(v) => setFilter(key, v)}
                     />
                   )
                 })}

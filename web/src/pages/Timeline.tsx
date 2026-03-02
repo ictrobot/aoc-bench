@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useMemo, useState, useTransition } from "react"
-import { useSearchParams, type SetURLSearchParams } from "react-router-dom"
+import { useUrlHostBenchmark, useUrlParam, useUrlFilters } from "@/hooks/use-url-state.tsx"
 import {
   ComposedChart,
   Bar,
@@ -12,7 +12,7 @@ import {
   Cell,
   ReferenceLine,
 } from "recharts"
-import { useHostIndex, useBenchmarkResults, useBenchmarkHistory } from "@/hooks/queries.ts"
+import { useBenchmarkResults, useBenchmarkHistory } from "@/hooks/queries.ts"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
 import { HistoryChart } from "@/components/charts/HistoryChart.tsx"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx"
@@ -22,54 +22,30 @@ import { formatDurationNs, formatCi, shortenValue } from "@/lib/format.ts"
 import { Combobox } from "@/components/ui/combobox.tsx"
 import { Badge } from "@/components/ui/badge.tsx"
 import { Button } from "@/components/ui/button.tsx"
-import type { CompactResult } from "@/lib/types.ts"
+import type { CompactResult, HostIndex } from "@/lib/types.ts"
 import { relativeChange } from "@/lib/delta.ts"
 
 export function Timeline() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const host = searchParams.get("host") ?? ""
-  const bench = searchParams.get("bench") ?? ""
+  const { host, bench, hostIndex, setBench } = useUrlHostBenchmark()
 
   useEffect(() => {
     document.title = bench ? `${bench} — Timeline — aoc-bench` : "Timeline — aoc-bench"
   }, [bench])
 
   return (
-    <TimelineContent
-      key={`${host}:${bench}`}
-      host={host}
-      bench={bench}
-      searchParams={searchParams}
-      setSearchParams={setSearchParams}
-    />
+    <TimelineContent key={`${host}:${bench}`} host={host} bench={bench} hostIndex={hostIndex} setBench={setBench} />
   )
 }
 
 interface TimelineContentProps {
   host: string
   bench: string
-  searchParams: URLSearchParams
-  setSearchParams: SetURLSearchParams
+  hostIndex: HostIndex
+  setBench: (bench: string, replace?: boolean) => void
 }
 
-function TimelineContent({ host, bench, searchParams, setSearchParams }: TimelineContentProps) {
-  // f_* URL params are one-off initial seeds when navigating from BenchmarkDetail.
-  const [filterOverrides, setFilterOverrides] = useState<Record<string, string>>(() => {
-    const out: Record<string, string> = {}
-    for (const [k, v] of searchParams.entries()) {
-      if (k.startsWith("f_")) out[k.slice(2)] = v
-    }
-    return out
-  })
-
-  const { data: index } = useHostIndex(host)
+function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineContentProps) {
   const { data: results, isLoading, error } = useBenchmarkResults(host, bench)
-
-  const [isPending, startTransition] = useTransition()
-  const [varyingKeyOverride, setVaryingKeyOverride] = useState<string>("")
-  const [selectedConfig, setSelectedConfig] = useState<Record<string, string> | null>(null)
-  const compareByControlId = useId()
-  const compareByLabelId = `${compareByControlId}-label`
 
   // Determine which keys vary and which are fixed
   const analysis = useMemo(() => {
@@ -92,12 +68,20 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
     return { allKeys, keyValues, varying, fixed }
   }, [results])
 
+  const [compare, setCompare] = useUrlParam("compare", "", analysis?.varying)
+  const { filters: urlFilters, setFilter, clearFilters } = useUrlFilters()
+
+  const [isPending, startTransition] = useTransition()
+  const [selectedConfig, setSelectedConfig] = useState<Record<string, string> | null>(null)
+  const compareByControlId = useId()
+  const compareByLabelId = `${compareByControlId}-label`
+
   const defaults = useMemo(() => {
-    if (!results || !analysis || !index) {
+    if (!results || !analysis) {
       return { varyingKey: "", filters: {} as Record<string, string> }
     }
     const defaultVaryingKey =
-      index?.timeline_key && analysis.varying.includes(index.timeline_key)
+      index.timeline_key && analysis.varying.includes(index.timeline_key)
         ? index.timeline_key
         : (analysis.varying[0] ?? "")
 
@@ -113,23 +97,9 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
     return { varyingKey: defaultVaryingKey, filters: defaultFilters }
   }, [analysis, index, results])
 
-  // Consume any f_* params once and remove them from the URL after seeding local state.
-  useEffect(() => {
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev)
-        for (const key of [...next.keys()]) {
-          if (key.startsWith("f_")) next.delete(key)
-        }
-        return next
-      },
-      { replace: true },
-    )
-  }, [setSearchParams])
-
   const filters = useMemo(() => {
     if (!analysis) return {}
-    const merged = { ...defaults.filters, ...filterOverrides }
+    const merged = { ...defaults.filters, ...urlFilters }
     const sanitized: Record<string, string> = {}
     for (const key of analysis.allKeys) {
       const value = merged[key]
@@ -139,23 +109,10 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
       }
     }
     return sanitized
-  }, [analysis, defaults.filters, filterOverrides])
-
-  useEffect(() => {
-    if (!index?.benchmarks.length) return
-    if (bench && index.benchmarks.some((b) => b.name === bench)) return
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev)
-        next.set("bench", index.benchmarks[0].name)
-        return next
-      },
-      { replace: true },
-    )
-  }, [bench, index, setSearchParams])
+  }, [analysis, defaults.filters, urlFilters])
 
   // Auto-select varying key
-  const preferredVaryingKey = varyingKeyOverride || defaults.varyingKey
+  const preferredVaryingKey = compare || defaults.varyingKey
   const effectiveVaryingKey = useMemo(() => {
     if (!analysis) return ""
     if (preferredVaryingKey && analysis.varying.includes(preferredVaryingKey)) return preferredVaryingKey
@@ -176,7 +133,7 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
     const filtered = filterResultsByConfig(results, filters, effectiveVaryingKey)
 
     // Get value order from index config_keys if available
-    const valueOrder = index?.config_keys[effectiveVaryingKey]?.values ?? []
+    const valueOrder = index.config_keys[effectiveVaryingKey]?.values ?? []
 
     return filtered
       .sort((a, b) => {
@@ -200,7 +157,7 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
           }
         }
         const value = r.config[effectiveVaryingKey] ?? ""
-        const annotation = index?.config_keys[effectiveVaryingKey]?.annotations?.[value]
+        const annotation = index.config_keys[effectiveVaryingKey]?.annotations?.[value]
         return {
           fullValue: value,
           mean_ns: r.mean_ns,
@@ -231,28 +188,21 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
   const MIN_DETAIL_BAR_PX = 20
 
   // Benchmark selector
-  const benchmarks = index?.benchmarks ?? []
+  const benchmarks = index.benchmarks
 
   function onBenchChange(b: string) {
     startTransition(() => {
-      setSearchParams((prev) => {
-        const next = new URLSearchParams(prev)
-        next.set("bench", b)
-        for (const key of [...next.keys()]) {
-          if (key.startsWith("f_")) next.delete(key)
-        }
-        return next
-      })
+      setBench(b)
       setSelectedConfig(null)
     })
   }
 
   const filterKeys = analysis?.allKeys.filter((k) => k !== effectiveVaryingKey) ?? []
-  const hasActiveFilterOverrides = Object.values(filterOverrides).some(Boolean) || varyingKeyOverride !== ""
+  const hasActiveFilterOverrides = Object.values(urlFilters).some(Boolean) || compare !== ""
 
   function resetViewFilters() {
-    setFilterOverrides({})
-    setVaryingKeyOverride("")
+    clearFilters()
+    setCompare("")
   }
 
   function openChartConfigAtIndex(barIndex: number | undefined) {
@@ -280,7 +230,7 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                 id={compareByControlId}
                 ariaLabelledBy={compareByLabelId}
                 value={effectiveVaryingKey}
-                onChange={setVaryingKeyOverride}
+                onChange={setCompare}
                 options={analysis.varying.map((k) => ({ value: k, label: k }))}
                 className="w-[140px]"
               />
@@ -293,7 +243,7 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
             <div className="flex flex-wrap items-center gap-3">
               {filterKeys.map((key) => {
                 const valuesInData = analysis?.keyValues.get(key) ?? new Set<string>()
-                const canonicalValues = index?.config_keys[key]?.values ?? []
+                const canonicalValues = index.config_keys[key]?.values ?? []
                 const values = canonicalValues.filter((v) => valuesInData.has(v))
                 for (const v of valuesInData) {
                   if (!canonicalValues.includes(v)) values.push(v)
@@ -306,7 +256,7 @@ function TimelineContent({ host, bench, searchParams, setSearchParams }: Timelin
                     values={values}
                     showAll={false}
                     value={filters[key] ?? ""}
-                    onChange={(v) => setFilterOverrides((prev) => ({ ...prev, [key]: v }))}
+                    onChange={(v) => setFilter(key, v)}
                   />
                 )
               })}

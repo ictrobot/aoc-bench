@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { useLocation } from "react-router-dom"
+import { useLocation } from "react-router"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { Header } from "./Header.tsx"
 import * as api from "@/lib/api.ts"
@@ -11,7 +11,7 @@ vi.mock("@/lib/api.ts", () => ({
   loadIndex: vi.fn(),
 }))
 
-vi.mock("@/lib/use-theme.ts", () => ({
+vi.mock("@/hooks/use-theme.ts", () => ({
   useTheme: () => ({
     isDark: false,
     toggle: vi.fn(),
@@ -67,9 +67,17 @@ describe("Header", () => {
 
   it("preserves existing query params when changing host", async () => {
     const user = userEvent.setup()
+    mockLoadIndex.mockResolvedValue({
+      schema_version: 1,
+      snapshot_id: "snapshot-a",
+      hosts: {
+        "linux-x64": makeHeaderHostIndex(),
+        "mac-arm64": makeHeaderHostIndex(),
+      },
+    })
     renderWithRouterAndQueryClient(
       <>
-        <Header hosts={["linux-x64", "mac-arm64"]} />
+        <Header />
         <LocationProbe />
       </>,
       { initialEntries: ["/benchmark?host=linux-x64&bench=bench-a"] },
@@ -88,7 +96,7 @@ describe("Header", () => {
     const user = userEvent.setup()
     renderWithRouterAndQueryClient(
       <>
-        <Header hosts={["linux-x64", "mac-arm64"]} />
+        <Header />
         <LocationProbe />
       </>,
       { initialEntries: [`/?host=${HOST}`] },

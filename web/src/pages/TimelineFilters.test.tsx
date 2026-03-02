@@ -6,7 +6,7 @@ import * as api from "@/lib/api.ts"
 import { renderWithRouterAndQueryClient } from "@/test/query-client.tsx"
 import { TEST_HOST, makeGlobalIndex, makeHostIndex } from "@/test/fixtures.ts"
 import type { IndexedResults } from "@/lib/types.ts"
-import { useLocation } from "react-router-dom"
+import { useLocation } from "react-router"
 
 vi.mock("@/lib/api.ts", () => ({
   loadIndex: vi.fn(),
@@ -109,7 +109,7 @@ describe("Timeline filters", () => {
     expect(await screen.findByTestId("filter-mode")).toHaveTextContent("a|z")
   })
 
-  it("uses f_* URL filters once and removes them from the URL", async () => {
+  it("reads f_* URL filters and keeps them in the URL", async () => {
     mockDecodeResultsForBenchmark.mockReturnValue([
       { bench: "bench-a", config: { commit: "a", mode: "z" }, mean_ns: 100, ci95_half_ns: 1 },
       { bench: "bench-a", config: { commit: "b", mode: "a" }, mean_ns: 101, ci95_half_ns: 1 },
@@ -130,6 +130,6 @@ describe("Timeline filters", () => {
 
     const locationText = screen.getByTestId("location").textContent ?? ""
     expect(locationText).toContain("/timeline")
-    expect(locationText).not.toContain("f_mode=")
+    expect(locationText).toContain("f_mode=z")
   })
 })

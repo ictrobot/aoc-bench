@@ -30,6 +30,9 @@ pub(super) fn parse_config_file(
     } = parse_config_keys(json.config_keys)?;
 
     let benchmarks = parse_benchmarks(data_dir, json.benchmarks, &key_lookup)?;
+    if benchmarks.is_empty() {
+        return Err(ConfigError::NoBenchmarks);
+    }
 
     let host_key = Key::new_host_key(&data_dir.join(ConfigFile::RESULTS_DIR), current_host)?;
     config_keys.push(host_key.clone());

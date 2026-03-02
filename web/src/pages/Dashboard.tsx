@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
-import { Link, useSearchParams } from "react-router-dom"
-import { useHostIndex, useLatestResults } from "@/hooks/queries.ts"
+import { Link } from "react-router"
+import { useUrlHostBenchmark, useUrlFilters } from "@/hooks/use-url-state.tsx"
+import { useLatestResults } from "@/hooks/queries.ts"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
@@ -11,9 +12,7 @@ import { withQuery } from "@/lib/routes.ts"
 import { MarkdownLinks } from "@/components/ui/markdown-links.tsx"
 
 export function Dashboard() {
-  const [searchParams] = useSearchParams()
-  const host = searchParams.get("host") ?? ""
-  const { data, isLoading, error } = useHostIndex(host)
+  const { host, hostIndex: data } = useUrlHostBenchmark()
   const { data: latestResults, error: decodeError } = useLatestResults(host)
   const latestResultsWithData = latestResults && latestResults.length > 0 ? latestResults : null
 
@@ -24,16 +23,14 @@ export function Dashboard() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">{host}</h1>
-      {data?.description && (
+      {data.description && (
         <p className="text-sm text-muted-foreground -mt-4">
           <MarkdownLinks text={data.description} />
         </p>
       )}
-      {isLoading && <div className="text-muted-foreground">Loading...</div>}
-      {error && <div className="text-destructive">Error: {error.message}</div>}
       {decodeError && <div className="text-destructive">Error: {decodeError.message}</div>}
-      {data && !decodeError && <StatCards benchmarks={data.benchmarks} configKeys={data.config_keys} />}
-      {data && !decodeError && (
+      {!decodeError && <StatCards benchmarks={data.benchmarks} configKeys={data.config_keys} />}
+      {!decodeError && (
         <BenchmarkTableWithLatest
           key={host}
           benchmarks={data.benchmarks}
@@ -110,7 +107,7 @@ function BenchmarkTableWithLatest({
     return [...keys].sort()
   }, [latestResults, timelineKey])
 
-  const [filters, setFilters] = useState<Record<string, string>>({})
+  const { filters, setFilter } = useUrlFilters()
   const [sortBy, setSortBy] = useState<"index" | "name" | "time" | "results">("index")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc")
 
@@ -189,7 +186,7 @@ function BenchmarkTableWithLatest({
                     label={key}
                     values={values}
                     value={filters[key] ?? ""}
-                    onChange={(v) => setFilters((prev) => ({ ...prev, [key]: v }))}
+                    onChange={(v) => setFilter(key, v)}
                   />
                 )
               })}

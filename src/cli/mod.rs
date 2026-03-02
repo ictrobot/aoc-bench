@@ -102,6 +102,8 @@ pub enum CliError {
     // export-web command
     #[error(transparent)]
     WebSnapshotExport(#[from] WebSnapshotExportError),
+    #[error("no hosts with benchmark results found, nothing to export")]
+    NothingToExport,
 }
 
 impl CliError {

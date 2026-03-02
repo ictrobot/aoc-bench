@@ -1,8 +1,8 @@
-import { NavLink, useSearchParams, useNavigate, useLocation } from "react-router-dom"
+import { NavLink, useNavigate, useLocation } from "react-router"
 import { Moon, Sun } from "lucide-react"
 import { Combobox } from "@/components/ui/combobox.tsx"
-import { useTheme } from "@/lib/use-theme.ts"
-import { useHostIndex } from "@/hooks/queries.ts"
+import { useTheme } from "@/hooks/use-theme.ts"
+import { useUrlHostBenchmark } from "@/hooks/use-url-state.tsx"
 import { withQuery } from "@/lib/routes.ts"
 
 const navItems = [
@@ -11,26 +11,17 @@ const navItems = [
   { to: "/impact", label: "Impact" },
 ]
 
-export function Header({ hosts }: { hosts: string[] }) {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const currentHost = searchParams.get("host") ?? hosts[0] ?? ""
+export function Header() {
+  const { host: currentHost, hostIndex, index, setHost, bench } = useUrlHostBenchmark()
+  const hosts = Object.keys(index.hosts).sort()
   const { isDark, toggle } = useTheme()
   const navigate = useNavigate()
   const { pathname } = useLocation()
-  const { data: hostIndex } = useHostIndex(currentHost)
-  const benchmarkOptions = (hostIndex?.benchmarks ?? []).map((b) => ({
+  const benchmarkOptions = hostIndex.benchmarks.map((b) => ({
     value: b.name,
     label: b.name,
   }))
-  const currentBench = pathname === "/benchmark" ? (searchParams.get("bench") ?? "") : ""
-
-  function onHostChange(host: string) {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.set("host", host)
-      return next
-    })
-  }
+  const currentBench = pathname === "/benchmark" ? bench : ""
 
   return (
     <header className="border-b bg-background">
@@ -82,7 +73,7 @@ export function Header({ hosts }: { hosts: string[] }) {
             <Combobox
               ariaLabel="Select host"
               value={currentHost}
-              onChange={onHostChange}
+              onChange={setHost}
               options={hosts.map((h) => ({ value: h, label: h }))}
               placeholder="Select host"
               className="w-[170px] min-[480px]:w-[220px] md:w-[190px]"

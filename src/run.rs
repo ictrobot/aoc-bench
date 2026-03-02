@@ -148,7 +148,7 @@ mod tests {
                 "commit": { "values": ["abc1234", "def5678"] },
                 "threads": { "values": ["1", "n"] }
             },
-            "benchmarks": []
+            "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
         }"#;
 
         let tmp_dir = TempDir::new().unwrap();

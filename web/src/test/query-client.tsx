@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider, type QueryClientConfig } from "@tanstack/react-query"
 import { render, type RenderOptions } from "@testing-library/react"
 import type { ReactElement, ReactNode } from "react"
-import { MemoryRouter } from "react-router-dom"
+import { MemoryRouter } from "react-router"
+import { UrlHostProvider } from "@/hooks/url-state-provider.tsx"
 
 export function createTestQueryClient(config?: QueryClientConfig): QueryClient {
   const overrideDefaults = config?.defaultOptions
@@ -38,5 +39,10 @@ interface RouterQueryRenderOptions extends QueryRenderOptions {
 
 export function renderWithRouterAndQueryClient(ui: ReactElement, options: RouterQueryRenderOptions = {}) {
   const { initialEntries = ["/"], ...rest } = options
-  return renderWithQueryClient(<MemoryRouter initialEntries={initialEntries}>{ui}</MemoryRouter>, rest)
+  return renderWithQueryClient(
+    <MemoryRouter initialEntries={initialEntries}>
+      <UrlHostProvider>{ui}</UrlHostProvider>
+    </MemoryRouter>,
+    rest,
+  )
 }
