@@ -119,6 +119,14 @@ class MatrixBuilder:
             if isinstance(r, Exception):
                 raise r
 
+        # Reorder multiversion values: use the last commit's 2015-04 generic build ordering as canonical
+        # (from cache, so no subprocess is spawned), then append any values from earlier commits
+        # that are no longer present
+        last_details = await self.get_build_puzzle_details(commits[-1], "generic", ("2015", "04"))
+        last_mv = last_details["multiversion"]
+        seen = results["config_keys"]["multiversion"]["values"]
+        results["config_keys"]["multiversion"]["values"] = last_mv + [v for v in seen if v not in last_mv]
+
         annotations = await self.generate_commit_annotations(commits, sem)
         if annotations:
             results["config_keys"]["commit"]["annotations"] = annotations
