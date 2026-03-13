@@ -154,11 +154,6 @@
         enabled: true
         state: started
 
-    - name: Check current tuned profile
-      ansible.builtin.command: tuned-adm active
-      register: tuned_profile
-      changed_when: false
-
     # Don't set no_balance_cores=(/isolcpus) as that would disable scheduler load balancing on those cores, which is
     # required for multithreaded benchmarks without pinning threads to specific cores.
     - name: Configure tuned cpu-partitioning profile
@@ -167,12 +162,27 @@
         regexp: '^isolated_cores=.+'
         line: 'isolated_cores={{ isolated_cores }}'
 
-    # See /usr/lib/tuned/profiles/cpu-partitioning/tuned.conf, which includes:
-    #   /usr/lib/tuned/profiles/network-latency/tuned.conf
-    #   /usr/lib/tuned/profiles/latency-performance/tuned.conf
-    - name: Enable tuned cpu-partitioning profile
-      ansible.builtin.command: tuned-adm profile cpu-partitioning
-      when: "'Current active profile: cpu-partitioning' not in tuned_profile.stdout"
+    # Custom profile inheriting cpu-partitioning but with intel_pstate re-enabled
+    # for max turbo boost. See /usr/lib/tuned/profiles/cpu-partitioning/tuned.conf
+    # which also includes network-latency and latency-performance.
+    - name: Install custom tuned aoc-bench profile
+      ansible.builtin.copy:
+        src: files/tuned.conf
+        dest: /etc/tuned/profiles/aoc-bench/
+        owner: root
+        group: root
+        mode: "0644"
+        directory_mode: "0755"
+
+    - name: Check current tuned profile
+      ansible.builtin.command: tuned-adm active
+      register: tuned_profile
+      changed_when: false
+      failed_when: false
+
+    - name: Enable tuned aoc-bench profile
+      ansible.builtin.command: tuned-adm profile aoc-bench
+      when: "'Current active profile: aoc-bench' not in tuned_profile.stdout"
       changed_when: true
 
     - name: Check kernel cmdline
@@ -180,10 +190,12 @@
       register: cmdline
       changed_when: false
 
-    - name: Reboot to apply CPU isolation
+    - name: Reboot to apply CPU isolation and tuned cmdline
       ansible.builtin.reboot:
         reboot_timeout: 600
-      when: ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
+      when: >-
+        ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
+        or "intel_pstate=disable" in cmdline.stdout
 
     - name: Disable unattended upgrades
       ansible.builtin.systemd:
