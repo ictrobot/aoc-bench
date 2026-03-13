@@ -75,6 +75,7 @@
           - smartmontools
           - nodejs
           - npm
+          - powercap-utils
         state: present
 
     - name: Change root shell

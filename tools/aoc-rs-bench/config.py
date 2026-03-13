@@ -95,7 +95,7 @@ class MatrixBuilder:
                 "threads": {
                     "values": ["1", "2", "4", "n"],
                     "presets": {
-                        "multi": ["1", "2", "4", "n"],
+                        "multi": ["2", "4", "n"],
                     }
                 },
                 "multiversion": {
@@ -166,7 +166,7 @@ class MatrixBuilder:
             combinations = [
                 len(chunk_commits),
                 len(config_keys["build"]["presets"]["all"]),
-                len(config_keys["threads"]["presets"]["multi"]) if chunk_metadata["uses_threads"] else 1,
+                len(config_keys["threads"]["presets"]["multi"]) + 1 if chunk_metadata["uses_threads"] else 1,
                 len(chunk_metadata["multiversion"]),
             ]
             self.total_combinations += math.prod(combinations)
@@ -179,30 +179,33 @@ class MatrixBuilder:
             multiversion_values = chunk_metadata["multiversion"]
             remaining_multiversion = [v for v in multiversion_values if v != "default"]
 
-            if "default" in multiversion_values:
-                variants.append({
-                    "checksum": chunk_metadata["checksum"],
-                    "config": {
-                        "commit": chunk_commits,
-                        "build": "all",
-                        "threads": ("multi" if chunk_metadata["uses_threads"] else ["1"]),
-                        "multiversion": "default",
+            def add_variant(multiversion, extra_stats=None):
+                thread_groups = [["1"], "multi"] if chunk_metadata["uses_threads"] else [["1"]]
+                for threads in thread_groups:
+                    stats = {**(extra_stats or {})}
+                    if threads == "multi":
+                        # 10s warmup to reach PL1 steady state before measurement
+                        stats["min_warmup_time_ns"] = 10_000_000_000
+                    variant = {
+                        "checksum": chunk_metadata["checksum"],
+                        "config": {
+                            "commit": chunk_commits,
+                            "build": "all",
+                            "threads": threads,
+                            "multiversion": multiversion,
+                        },
                     }
-                })
+                    if stats:
+                        variant["stats"] = stats
+                    variants.append(variant)
+
+            if "default" in multiversion_values:
+                add_variant("default")
 
             if remaining_multiversion:
                 # 1 run per series isn't ideal but is a trade-off to keep all the multiversion thread combinations while
                 # speeding up how long benchmarks for each commit take
-                variants.append({
-                    "checksum": chunk_metadata["checksum"],
-                    "config": {
-                        "commit": chunk_commits,
-                        "build": "all",
-                        "threads": ("multi" if chunk_metadata["uses_threads"] else ["1"]),
-                        "multiversion": remaining_multiversion,
-                    },
-                    "stats": {"runs_per_series": 1},
-                })
+                add_variant(remaining_multiversion, {"runs_per_series": 1})
 
         return {
             "benchmark": name,
