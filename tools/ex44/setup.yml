@@ -17,9 +17,10 @@
     bench_home_size: 128G
     # yamllint disable rule:line-length
     host_description: >-
-      [Hetzner EX44](https://www.hetzner.com/dedicated-rootserver/ex44/) instance with an
+      [aoc-rs](https://github.com/ictrobot/aoc-rs) benchmarks running on a 
+      [Hetzner EX44](https://www.hetzner.com/dedicated-rootserver/ex44/) server with an
       [Intel i5-13500](https://www.intel.com/content/www/us/en/products/sku/230580/intel-core-i513500-processor-24m-cache-up-to-4-80-ghz/specifications.html).
-      Benchmarks isolated to the 6 P-cores.
+      Benchmarks are isolated to the 6 P-cores.
     # yamllint enable rule:line-length
 
   pre_tasks:
