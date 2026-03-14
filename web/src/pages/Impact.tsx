@@ -1,13 +1,12 @@
 import { useDeferredValue, useEffect, useId, useMemo } from "react"
-import { Link } from "react-router"
 import { useUrlHostBenchmark, useUrlParam, useUrlFilters, useSetUrlParams } from "@/hooks/use-url-state.tsx"
 import { useCompactResults } from "@/hooks/queries.ts"
+import { BenchmarkConfigTable, type BenchmarkConfigTableRow } from "@/components/benchmarks/BenchmarkConfigTable.tsx"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
 import { Combobox } from "@/components/ui/combobox.tsx"
 import { shortenValue } from "@/lib/format.ts"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx"
 import { Badge } from "@/components/ui/badge.tsx"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx"
 import { formatDurationNs } from "@/lib/format.ts"
 import type { CompactResult } from "@/lib/types.ts"
 import { withQuery } from "@/lib/routes.ts"
@@ -252,11 +251,25 @@ function ImpactContent({ host }: { host: string }) {
           </div>
 
           {impact.regressions.length > 0 && (
-            <ImpactTable title="Regressions" entries={impact.regressions} host={host} variant="destructive" />
+            <ImpactTable
+              title="Regressions"
+              entries={impact.regressions}
+              host={host}
+              configKeys={configKeys}
+              comparisonKey={comparisonKey}
+              variant="destructive"
+            />
           )}
 
           {impact.improvements.length > 0 && (
-            <ImpactTable title="Improvements" entries={impact.improvements} host={host} variant="default" />
+            <ImpactTable
+              title="Improvements"
+              entries={impact.improvements}
+              host={host}
+              configKeys={configKeys}
+              comparisonKey={comparisonKey}
+              variant="default"
+            />
           )}
         </div>
       )}
@@ -268,13 +281,63 @@ function ImpactTable({
   title,
   entries,
   host,
+  configKeys,
+  comparisonKey,
   variant,
 }: {
   title: string
   entries: ImpactEntry[]
   host: string
+  configKeys: Record<string, { values: string[] }>
+  comparisonKey: string
   variant: "destructive" | "default"
 }) {
+  const configColumnKeys = Object.keys(configKeys).filter((key) => key !== comparisonKey)
+  const rows = useMemo(
+    () =>
+      entries.map((entry) => ({
+        key: buildBenchmarkConfigSignature(entry.bench, entry.config, ""),
+        benchmark: entry.bench,
+        benchmarkHref: withQuery("/benchmark", { host, bench: entry.bench }),
+        ...entry,
+      })),
+    [entries, host],
+  )
+  const metricColumns = useMemo(
+    () => [
+      {
+        key: "from",
+        header: "From",
+        headerClassName: "text-right",
+        cellClassName: "text-right",
+        compare: (a: ImpactRow, b: ImpactRow) => a.fromMean - b.fromMean,
+        render: (row: ImpactRow) => formatDurationNs(row.fromMean),
+      },
+      {
+        key: "to",
+        header: "To",
+        headerClassName: "text-right",
+        cellClassName: "text-right",
+        compare: (a: ImpactRow, b: ImpactRow) => a.toMean - b.toMean,
+        render: (row: ImpactRow) => formatDurationNs(row.toMean),
+      },
+      {
+        key: "change",
+        header: "Change",
+        headerClassName: "text-right",
+        cellClassName: "text-right",
+        compare: (a: ImpactRow, b: ImpactRow) => a.relChange - b.relChange,
+        render: (row: ImpactRow) => (
+          <span className={row.direction === "regression" ? "text-destructive" : "text-green-600"}>
+            {row.direction === "regression" ? "+" : "-"}
+            {(row.relChange * 100).toFixed(2)}%
+          </span>
+        ),
+      },
+    ],
+    [],
+  )
+
   return (
     <Card>
       <CardHeader>
@@ -286,42 +349,16 @@ function ImpactTable({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Benchmark</TableHead>
-              <TableHead>Config</TableHead>
-              <TableHead className="text-right">From</TableHead>
-              <TableHead className="text-right">To</TableHead>
-              <TableHead className="text-right">Change</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {entries.map((e, i) => (
-              <TableRow key={i}>
-                <TableCell>
-                  <Link to={withQuery("/benchmark", { host, bench: e.bench })} className="text-primary hover:underline">
-                    {e.bench}
-                  </Link>
-                </TableCell>
-                <TableCell className="text-xs text-muted-foreground">
-                  {Object.entries(e.config)
-                    .map(([k, v]) => `${k}=${v}`)
-                    .join(", ") || "\u2014"}
-                </TableCell>
-                <TableCell className="text-right">{formatDurationNs(e.fromMean)}</TableCell>
-                <TableCell className="text-right">{formatDurationNs(e.toMean)}</TableCell>
-                <TableCell className="text-right">
-                  <span className={e.direction === "regression" ? "text-destructive" : "text-green-600"}>
-                    {e.direction === "regression" ? "+" : "-"}
-                    {(e.relChange * 100).toFixed(2)}%
-                  </span>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <BenchmarkConfigTable
+          rows={rows}
+          configKeys={configKeys}
+          configColumnKeys={configColumnKeys}
+          configGroupLabel="Config"
+          metricColumns={metricColumns}
+        />
       </CardContent>
     </Card>
   )
 }
+
+interface ImpactRow extends BenchmarkConfigTableRow, ImpactEntry {}

@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react"
 import { Link } from "react-router"
 import { useUrlHostBenchmark } from "@/hooks/use-url-state.tsx"
 import { useBenchmarkResults } from "@/hooks/queries.ts"
+import { compareConfigsByOrder } from "@/lib/config-order.ts"
 import { formatDurationNs, formatCi, shortenValue } from "@/lib/format.ts"
 import { Card, CardContent } from "@/components/ui/card.tsx"
 import { withQuery } from "@/lib/routes.ts"
@@ -94,15 +95,7 @@ function BenchmarkDetailContent({
 
     // Build spark data per group
     return [...groups.entries()]
-      .sort(([, a], [, b]) => {
-        for (const key of Object.keys(a.config)) {
-          const order = index.config_keys[key]?.values ?? []
-          const ai = order.indexOf(a.config[key])
-          const bi = order.indexOf(b.config[key])
-          if (ai !== bi) return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi)
-        }
-        return 0
-      })
+      .sort(([, a], [, b]) => compareConfigsByOrder(a.config, b.config, index.config_keys))
       .map(([key, group]) => {
         // Order trendPoints by canonical order
         const pointMap = new Map(group.trendPoints.map((p) => [p.trendValue, p.mean_ns]))

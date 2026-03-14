@@ -363,6 +363,29 @@ mod tests {
         (dir, config_file, storage)
     }
 
+    fn setup_with_non_commit_timeline(host: &str) -> (TempDir, ConfigFile, HybridDiskStorage) {
+        let dir = TempDir::new().unwrap();
+
+        let json = r#"{
+            "config_keys": {
+                "compiler": { "values": ["stable", "nightly"] }
+            },
+            "timeline_key": "compiler",
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{compiler}"],
+                    "config": { "compiler": ["stable", "nightly"] }
+                }
+            ]
+        }"#;
+
+        let config_file = ConfigFile::from_str(dir.path(), Some(host), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), host).unwrap();
+
+        (dir, config_file, storage)
+    }
+
     fn mk_series(
         config_file: &ConfigFile,
         host: &str,
@@ -525,6 +548,29 @@ mod tests {
         assert_eq!(r0.bench_idx, 0);
         assert_eq!(r0.config_idx, 1); // commit=bbb, same index space as results
         assert_eq!(r0.mean_ns, 200);
+    }
+
+    #[test]
+    fn test_indexed_latest_uses_timeline_key_not_commit() {
+        let (_dir, config_file, storage) = setup_with_non_commit_timeline("h1");
+
+        let s1 = mk_series(&config_file, "h1", "bench", "compiler=stable", 100.0, 1000);
+        let s2 = mk_series(&config_file, "h1", "bench", "compiler=nightly", 200.0, 2000);
+        insert(&storage, &s1);
+        insert(&storage, &s2);
+
+        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let latest = data
+            .index
+            .latest_results
+            .as_ref()
+            .expect("should have latest");
+
+        assert_eq!(data.index.timeline_key.as_deref(), Some("compiler"));
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].bench_idx, 0);
+        assert_eq!(latest[0].config_idx, 1); // compiler=nightly, same index space as results
+        assert_eq!(latest[0].mean_ns, 200);
     }
 
     #[test]

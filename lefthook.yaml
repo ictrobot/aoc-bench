@@ -26,3 +26,6 @@ pre-commit:
     web_lint:
       run: npm run lint
       root: web/
+    web_format:
+      run: npm run format:check
+      root: web/

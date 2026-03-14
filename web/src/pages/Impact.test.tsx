@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { useLocation } from "react-router"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -158,5 +158,35 @@ describe("Impact", () => {
       expect(screen.getByTestId("location").textContent).not.toContain("f_unsupported")
       expect(screen.getByTestId("location").textContent).not.toContain("f_mode=")
     })
+  })
+
+  it("renders separate config columns for non-comparison keys", async () => {
+    const user = userEvent.setup()
+    const hostIndex = makeHostIndex({
+      config_keys: {
+        commit: { values: ["a", "b"] },
+        mode: { values: ["safe", "fast"] },
+      },
+      benchmarks: [{ name: "bench-a", result_count: 2 }],
+      timeline_key: "commit",
+    })
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "a", mode: "fast" }, mean_ns: 100, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "b", mode: "fast" }, mean_ns: 140, ci95_half_ns: 1 },
+    ])
+
+    renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })
+
+    const fromSelect = await screen.findByLabelText("From:")
+    const toSelect = screen.getByLabelText("To:")
+
+    await user.selectOptions(fromSelect, "a")
+    await user.selectOptions(toSelect, "b")
+
+    const table = await screen.findByRole("table")
+    expect(await within(table).findByRole("columnheader", { name: /mode/ })).toBeInTheDocument()
+    expect(within(table).getByText("fast")).toBeInTheDocument()
+    expect(screen.queryByText("mode=fast")).toBeNull()
   })
 })

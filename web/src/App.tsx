@@ -75,7 +75,7 @@ function AppContent() {
       <div className="min-h-screen bg-background flex flex-col">
         <Header />
         <main className="mx-auto w-full max-w-7xl px-4 py-6 flex-1">
-          <ErrorBoundary key={`${location.pathname}${location.search}`}>
+          <ErrorBoundary key={location.pathname}>
             <Suspense fallback={<div className="text-muted-foreground">Loading...</div>}>
               <Routes>
                 <Route path="/" element={<Dashboard />} />
