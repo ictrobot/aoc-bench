@@ -57,6 +57,11 @@ describe("Dashboard", () => {
     expect(screen.getByRole("columnheader", { name: /Time/ })).toBeInTheDocument()
     expect(screen.queryByRole("columnheader", { name: /Result count/ })).toBeNull()
     expect(screen.getByText((_, element) => element?.textContent === "Current commit: b")).toBeInTheDocument()
+    expect(screen.getByText("Total time")).toBeInTheDocument()
+    expect(screen.getByTestId("dashboard-total-time-value")).toHaveTextContent("50 ns")
+    expect(screen.getByText("1 matching benchmark")).toBeInTheDocument()
+    expect(screen.getByText("Slowest")).toBeInTheDocument()
+    expect(screen.queryByText("Fastest")).toBeNull()
 
     const benchARow = screen.getByRole("link", { name: "bench-a" }).closest("tr")
     const benchBRow = screen.getByRole("link", { name: "bench-b" }).closest("tr")
@@ -87,6 +92,21 @@ describe("Dashboard", () => {
     expect(within(benchARow!).getByText("50 ns")).toBeInTheDocument()
   })
 
+  it("sums matching fastest-result times in the total time panel", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "b", build: "fast" }, mean_ns: 50, ci95_half_ns: 1 },
+      { bench: "bench-b", config: { commit: "b", build: "safe" }, mean_ns: 90, ci95_half_ns: 1 },
+    ])
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
+
+    expect(await screen.findByText("Total time")).toBeInTheDocument()
+    expect(screen.getByTestId("dashboard-total-time-value")).toHaveTextContent("140 ns")
+    expect(screen.getByText("2 matching benchmarks")).toBeInTheDocument()
+  })
+
   it("falls back to the result count table when a timeline host has no latest results", async () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
@@ -100,8 +120,9 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("columnheader", { name: /^Time$/ })).toBeNull()
     expect(screen.queryByRole("columnheader", { name: /build/ })).toBeNull()
     expect(screen.queryByText(/Current commit:/)).toBeNull()
-    expect(screen.queryByText("Fastest")).toBeNull()
+    expect(screen.queryByText("Total time")).toBeNull()
     expect(screen.queryByText("Slowest")).toBeNull()
+    expect(screen.queryByText("Fastest")).toBeNull()
 
     const benchARow = screen.getByRole("link", { name: "bench-a" }).closest("tr")
     expect(benchARow).not.toBeNull()
@@ -162,6 +183,7 @@ describe("Dashboard", () => {
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&f_build=fast`] })
 
     expect(await screen.findByText((_, element) => element?.textContent === "Current commit: b")).toBeInTheDocument()
+    expect(screen.getByTestId("dashboard-total-time-value")).toHaveTextContent("50 ns")
     expect(await screen.findByRole("link", { name: "bench-a" })).toBeInTheDocument()
     expect(screen.queryByRole("link", { name: "bench-b" })).toBeNull()
     expect(screen.queryByRole("button", { name: /Open benchmark bench-b/ })).toBeNull()
@@ -184,6 +206,7 @@ describe("Dashboard", () => {
 
     expect(await screen.findByText((_, element) => element?.textContent === "Current commit: b")).toBeInTheDocument()
     expect(screen.getByText("No rows to display.")).toBeInTheDocument()
+    expect(screen.queryByText("Total time")).toBeNull()
     expect(screen.queryByRole("link", { name: "bench-a" })).toBeNull()
     expect(screen.getByTestId("location")).toHaveTextContent(`/?host=${HOST}&f_build=fast`)
   })
@@ -277,8 +300,9 @@ describe("Dashboard", () => {
 
     expect(screen.queryByRole("columnheader", { name: /Fastest config/ })).toBeNull()
     expect(screen.queryByRole("columnheader", { name: /^Time$/ })).toBeNull()
-    expect(screen.queryByText("Fastest")).toBeNull()
+    expect(screen.queryByText("Total time")).toBeNull()
     expect(screen.queryByText("Slowest")).toBeNull()
+    expect(screen.queryByText("Fastest")).toBeNull()
 
     const benchARow = screen.getByRole("link", { name: "bench-a" }).closest("tr")
     expect(benchARow).not.toBeNull()

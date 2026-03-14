@@ -4,7 +4,7 @@ import { useLatestResults } from "@/hooks/queries.ts"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx"
 import { BenchmarkConfigTable, type BenchmarkConfigTableRow } from "@/components/benchmarks/BenchmarkConfigTable.tsx"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
-import { BenchmarkLeaderboard } from "@/components/benchmarks/BenchmarkLeaderboard.tsx"
+import { DashboardInsights } from "@/components/benchmarks/DashboardInsights.tsx"
 import { compareConfigsByOrder } from "@/lib/config-order.ts"
 import { formatDurationNs, shortenValue } from "@/lib/format.ts"
 import type { CompactResult } from "@/lib/types.ts"
@@ -38,9 +38,14 @@ export function Dashboard() {
     return selectFastestByBenchmark(latestResults ?? [], dashboardFilters, configKeys)
   }, [showFastestColumns, latestResults, dashboardFilters, configKeys])
 
-  const leaderboardEntries = useMemo(
-    () => [...fastestByBenchmark.entries()].map(([name, result]) => ({ name, mean_ns: result.mean_ns })),
-    [fastestByBenchmark],
+  const insightEntries = useMemo(
+    () =>
+      [...fastestByBenchmark.entries()].map(([name, result]) => ({
+        name,
+        mean_ns: result.mean_ns,
+        href: withQuery("/benchmark", { host, bench: name }),
+      })),
+    [fastestByBenchmark, host],
   )
 
   useEffect(() => {
@@ -64,7 +69,6 @@ export function Dashboard() {
       {decodeError && <div className="text-destructive">Error: {decodeError.message}</div>}
       {!decodeError && (
         <>
-          <StatCards benchmarks={benchmarks} configKeys={configKeys} />
           <DashboardFilters
             timelineKey={timelineKey}
             currentTimelineValue={currentTimelineValue}
@@ -90,48 +94,9 @@ export function Dashboard() {
               />
             </CardContent>
           </Card>
-          {leaderboardEntries.length > 0 && <BenchmarkLeaderboard entries={leaderboardEntries} host={host} />}
+          {insightEntries.length > 0 && <DashboardInsights entries={insightEntries} />}
         </>
       )}
-    </div>
-  )
-}
-
-function StatCards({
-  benchmarks,
-  configKeys,
-}: {
-  benchmarks: { name: string; result_count: number }[]
-  configKeys: Record<string, { values: string[] }>
-}) {
-  const totalResults = benchmarks.reduce((s, b) => s + b.result_count, 0)
-
-  return (
-    <div className="flex flex-wrap gap-3">
-      <Card className="py-3 min-w-28 flex-1">
-        <CardContent className="px-4">
-          <div className="text-sm font-medium">Benchmarks</div>
-          <div className="text-2xl font-bold">{benchmarks.length}</div>
-          <div className="text-xs text-muted-foreground">total</div>
-        </CardContent>
-      </Card>
-      <Card className="py-3 min-w-28 flex-1">
-        <CardContent className="px-4">
-          <div className="text-sm font-medium">Results</div>
-          <div className="text-2xl font-bold">{totalResults.toLocaleString()}</div>
-          <div className="text-xs text-muted-foreground">total</div>
-        </CardContent>
-      </Card>
-      <div className="w-px self-stretch bg-border mx-1" />
-      {Object.entries(configKeys).map(([key, { values }]) => (
-        <Card key={key} className="py-3 min-w-28 flex-1">
-          <CardContent className="px-4">
-            <div className="text-sm font-medium">{key}</div>
-            <div className="text-2xl font-bold">{values.length}</div>
-            <div className="text-xs text-muted-foreground">values</div>
-          </CardContent>
-        </Card>
-      ))}
     </div>
   )
 }
