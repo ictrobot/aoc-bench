@@ -11,6 +11,10 @@
     bench_repo_branch: master
     cloudflare_env_file: "/home/{{ bench_user }}/.config/aoc-bench/cloudflare.env"
     isolated_cores: "0-11"
+    bench_home_dir: "/home/{{ bench_user }}"
+    bench_home_lv: benchhome
+    bench_home_vg: vg0
+    bench_home_size: 128G
     # yamllint disable rule:line-length
     host_description: >-
       [Hetzner EX44](https://www.hetzner.com/dedicated-rootserver/ex44/) instance with an
@@ -76,6 +80,8 @@
           - nodejs
           - npm
           - powercap-utils
+          - btrfs-progs
+          - btrfs-compsize
         state: present
 
     - name: Change root shell
@@ -203,6 +209,35 @@
         name: apt-daily-upgrade.timer
         enabled: false
         state: stopped
+
+    # Compressed BTRFS LV for bench user
+    - name: Create benchmark home logical volume
+      community.general.lvol:
+        vg: "{{ bench_home_vg }}"
+        lv: "{{ bench_home_lv }}"
+        size: "{{ bench_home_size }}"
+        shrink: false
+        state: present
+
+    - name: Format benchmark home volume as btrfs
+      community.general.filesystem:
+        dev: "/dev/{{ bench_home_vg }}/{{ bench_home_lv }}"
+        fstype: btrfs
+        resizefs: true
+
+    - name: Ensure benchmark home directory exists
+      ansible.builtin.file:
+        path: "{{ bench_home_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Mount benchmark home volume
+      ansible.posix.mount:
+        path: "{{ bench_home_dir }}"
+        src: "/dev/{{ bench_home_vg }}/{{ bench_home_lv }}"
+        fstype: btrfs
+        opts: defaults,compress=zstd:3,noatime
+        state: mounted
 
     # User setup
     - name: Ensure bench user exists
