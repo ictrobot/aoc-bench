@@ -11,7 +11,11 @@ Group={{ bench_user }}
 WorkingDirectory=/home/{{ bench_user }}/aoc-bench
 Environment=HOME=/home/{{ bench_user }}
 Environment=PATH=/home/{{ bench_user }}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/{{ bench_user }}/aoc-bench/tools/ex44/bench-all.sh
+Environment="AOC_BENCH_PROFILES={{ bench_profiles | default([]) | join(',') }}"
+Environment="AOC_BENCH_THREADS={{ bench_threads | default([]) | join(',') }}"
+Environment="AOC_BENCH_MULTIVERSION={{ bench_multiversion | default([]) | join(',') }}"
+Environment="AOC_BENCH_ENABLE_WEB_EXPORT={{ bench_enable_web_export | ternary('true', 'false') }}"
+ExecStart=/home/{{ bench_user }}/aoc-bench/tools/bench-host/bench-all.sh
 Restart=always
 RestartSec=20
 

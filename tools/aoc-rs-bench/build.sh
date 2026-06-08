@@ -30,12 +30,11 @@ framework_revisions=(
     "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Year crates reexported from aoc, nested macro repeats for year and day
 )
 
-profiles=(
+known_profiles=(
     "generic"
     "native"
-    # LTO profiles have been disabled in favour of building per benchmark binaries as doing both would be very slow
-    # "generic_lto"
-    # "native_lto"
+    "generic_lto"
+    "native_lto"
 )
 
 # Changes to these files will rebuild all the binaries
@@ -47,10 +46,38 @@ checksum_files=(
 )
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
-    "${profiles[@]}"
+    "${known_profiles[@]}"
     "commits.txt"
     ".cache.json" # config.py cache
 )
+
+read_profiles() {
+    local raw="${AOC_BENCH_PROFILES:-generic,native}"
+    local profile
+    local -A enabled_profiles=()
+    local -a raw_profiles
+
+    mapfile -t raw_profiles < <(
+        printf '%s\n' "$raw" \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    )
+
+    for profile in "${raw_profiles[@]}"; do
+        if ! printf '%s\n' "${known_profiles[@]}" | grep -qx -- "$profile"; then
+            echo "error: unknown build profile '$profile'" >&2
+            exit 1
+        fi
+        enabled_profiles[$profile]=1
+    done
+
+    profiles=()
+    for profile in "${known_profiles[@]}"; do
+        if [[ -v "enabled_profiles[$profile]" ]]; then
+            profiles+=("$profile")
+        fi
+    done
+}
 
 check_checksum() {
     current_checksum="$(sha256sum "${checksum_files[@]}")"
@@ -224,6 +251,7 @@ build_binary() (
     mv "$build.tmp" "$build"
 )
 
+read_profiles
 mkdir -p "$builds_dir"
 check_checksum
 

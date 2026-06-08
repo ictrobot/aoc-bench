@@ -15,4 +15,4 @@ improved/restructured/optimized by hand.
 - [DESIGN.md](DESIGN.md) – architecture and design spec
 - [TASKS.md](TASKS.md) – implementation roadmap and status
 - [tools/aoc-rs-bench](tools/aoc-rs-bench/) – `aoc-rs` benchmarking glue and config generation
-- [tools/ex44/](tools/ex44/) – benchmark host configuration
+- [tools/bench-host/](tools/bench-host/) – benchmark host configuration

@@ -47,6 +47,11 @@ maybe_sync_and_deploy() {
     local now last_deploy_epoch age snapshot_id last_snapshot_id
     local command
 
+    if [[ "${AOC_BENCH_ENABLE_WEB_EXPORT:-true}" != "true" ]]; then
+        echo "Web export/deploy disabled, skipping deploy attempt" >&2
+        return 0
+    fi
+
     if [[ ! -f "$CLOUDFLARE_ENV_FILE" ]]; then
         echo "Cloudflare env file '$CLOUDFLARE_ENV_FILE' not found, skipping deploy attempt" >&2
         return 0

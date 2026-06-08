@@ -1,0 +1,24 @@
+---
+bench_home_vg: vg-nvme
+bench_home_size: 128G
+
+bench_enable_tuned_cpu_partitioning: false
+
+bench_profiles:
+  - generic
+bench_threads:
+  - "1"
+  - n
+bench_multiversion:
+  - default
+  - Scalar
+  - Array128
+  - Array256
+  - Array4096
+
+bench_enable_web_export: false
+
+# yamllint disable rule:line-length
+host_description: >-
+  [aoc-rs](https://github.com/ictrobot/aoc-rs) benchmarks running on an AMD Athlon 64 X2 3800+.
+# yamllint enable rule:line-length

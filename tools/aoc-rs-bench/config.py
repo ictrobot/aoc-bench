@@ -14,17 +14,33 @@ from typing import TypedDict
 
 
 class BuildPuzzleDetails(TypedDict):
+    checksum: str
     uses_threads: bool
     multiversion: list[str]
 
 
 class MatrixBuilder:
-    BUILDS = ["generic", "native"]
+    DEFAULT_BUILDS = ["generic", "native"]
+    KNOWN_BUILDS = {"generic", "native", "generic_lto", "native_lto"}
+    DEFAULT_THREADS = ["1", "2", "4", "n"]
+    KNOWN_THREADS = set(DEFAULT_THREADS)
 
-    def __init__(self, data_dir: Path, inputs_dir: Path):
+    def __init__(
+            self,
+            data_dir: Path,
+            inputs_dir: Path,
+            builds: list[str],
+            threads: list[str],
+            multiversion: list[str] | None,
+    ):
         self.data_dir = data_dir
         self.inputs_dir = inputs_dir
         self.builds_dir = data_dir / "builds"
+        self.builds = builds
+        self.threads = threads
+        self.multi_threads = [thread for thread in threads if thread != "1"]
+        self.multiversion = set(multiversion) if multiversion is not None else None
+        self.seen_multiversions = set()
         self.required_inputs = {}
         self.input_cache = {}
         self.total_combinations = 0
@@ -69,16 +85,27 @@ class MatrixBuilder:
         missing = []
 
         for commit in commits:
-            for kind in MatrixBuilder.BUILDS:
+            for kind in self.builds:
                 f = self.builds_dir / kind / commit / "2015-01"
                 if not f.is_file():
                     missing.append(str(f))
 
         if missing:
-            raise RuntimeError(f"error: missing builds:\n{"\n".join("  " + s for s in missing)}")
+            missing_lines = "\n".join("  " + s for s in missing)
+            raise RuntimeError(f"error: missing builds:\n{missing_lines}")
 
     async def process_all(self, commits: list[str]):
         sem = asyncio.Semaphore(8)
+
+        multiversion_values = []
+        multiversion_presets = {}
+        if self.multiversion is None or "default" in self.multiversion:
+            multiversion_values.append("default")
+            multiversion_presets["default"] = ["default"]
+
+        thread_presets = {}
+        if self.multi_threads:
+            thread_presets["multi"] = self.multi_threads
 
         results = {
             "config_keys": {
@@ -87,22 +114,18 @@ class MatrixBuilder:
                     "presets": {}
                 },
                 "build": {
-                    "values": MatrixBuilder.BUILDS,
+                    "values": self.builds,
                     "presets": {
-                        "all": MatrixBuilder.BUILDS,
+                        "all": self.builds,
                     },
                 },
                 "threads": {
-                    "values": ["1", "2", "4", "n"],
-                    "presets": {
-                        "multi": ["2", "4", "n"],
-                    }
+                    "values": self.threads,
+                    "presets": thread_presets,
                 },
                 "multiversion": {
-                    "values": ["default"],
-                    "presets": {
-                        "default": ["default"],
-                    }
+                    "values": multiversion_values,
+                    "presets": multiversion_presets,
                 }
             },
             "benchmarks": nested_defaultdict(),
@@ -110,7 +133,7 @@ class MatrixBuilder:
 
         tasks = []
         for commit in commits:
-            for kind in MatrixBuilder.BUILDS:
+            for kind in self.builds:
                 tasks.append(self.process_build(commit, kind, sem, results))
 
         # Use return_exceptions=True to avoid built-in cancellation
@@ -122,8 +145,8 @@ class MatrixBuilder:
         # Reorder multiversion values: use the last commit's 2015-04 generic build ordering as canonical
         # (from cache, so no subprocess is spawned), then append any values from earlier commits
         # that are no longer present
-        last_details = await self.get_build_puzzle_details(commits[-1], "generic", ("2015", "04"))
-        last_mv = last_details["multiversion"]
+        last_details = await self.get_build_puzzle_details(commits[-1], self.builds[0], ("2015", "04"))
+        last_mv = last_details["multiversion"] if last_details is not None else []
         seen = results["config_keys"]["multiversion"]["values"]
         results["config_keys"]["multiversion"]["values"] = last_mv + [v for v in seen if v not in last_mv]
 
@@ -143,6 +166,8 @@ class MatrixBuilder:
             puzzles = self.get_build_puzzles(commit, kind)
             for puzzle in puzzles:
                 details = await self.get_build_puzzle_details(commit, kind, puzzle)
+                if details is None:
+                    continue
                 for v in details["multiversion"]:
                     if v not in results["config_keys"]["multiversion"]["values"]:
                         results["config_keys"]["multiversion"]["values"].append(v)
@@ -166,7 +191,7 @@ class MatrixBuilder:
             combinations = [
                 len(chunk_commits),
                 len(config_keys["build"]["presets"]["all"]),
-                len(config_keys["threads"]["presets"]["multi"]) + 1 if chunk_metadata["uses_threads"] else 1,
+                len(self.threads) if chunk_metadata["uses_threads"] else 1,
                 len(chunk_metadata["multiversion"]),
             ]
             self.total_combinations += math.prod(combinations)
@@ -180,7 +205,9 @@ class MatrixBuilder:
             remaining_multiversion = [v for v in multiversion_values if v != "default"]
 
             def add_variant(multiversion, extra_stats=None):
-                thread_groups = [["1"], "multi"] if chunk_metadata["uses_threads"] else [["1"]]
+                thread_groups = [["1"]]
+                if chunk_metadata["uses_threads"] and self.multi_threads:
+                    thread_groups.append("multi")
                 for threads in thread_groups:
                     stats = {**(extra_stats or {})}
                     if threads == "multi":
@@ -236,7 +263,8 @@ class MatrixBuilder:
 
         return puzzles
 
-    async def get_build_puzzle_details(self, commit: str, kind: str, puzzle: tuple[str, str]) -> BuildPuzzleDetails:
+    async def get_build_puzzle_details(self, commit: str, kind: str,
+                                       puzzle: tuple[str, str]) -> BuildPuzzleDetails | None:
         year, day = puzzle
         cache = self.cache[commit][kind][year][day]
         if not cache:
@@ -256,7 +284,19 @@ class MatrixBuilder:
             cache["checksum"] = matches.group(1)
             cache["multiversion"] = matches.group(2).split(",")
             cache["uses_threads"] = trace != b''
-        return cache
+
+        for version in cache["multiversion"]:
+            self.seen_multiversions.add(version)
+
+        if self.multiversion is None:
+            return cache
+
+        multiversion = [v for v in cache["multiversion"] if v in self.multiversion]
+        if not multiversion:
+            return None
+        details = cache.copy()
+        details["multiversion"] = multiversion
+        return details
 
     def get_input_hash(self, year: str, day: str) -> str:
         if (year, day) in self.input_cache:
@@ -282,7 +322,7 @@ class MatrixBuilder:
         if cached:
             return cached
 
-        binary = self.build_path(commit, MatrixBuilder.BUILDS[0], ("2015", "01"))
+        binary = self.build_path(commit, self.builds[0], ("2015", "01"))
         if not binary.is_file():
             return None
 
@@ -389,14 +429,48 @@ def nested_defaultdict_hook(pairs):
     return d
 
 
+def csv_env(
+        name: str,
+        default: list[str] | None = None,
+) -> list[str] | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return list(default) if default is not None else None
+    return sorted({part.strip() for part in raw.split(",")})
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("data", type=Path, help="Data directory containing a builds directory")
     p.add_argument("inputs", type=Path, help="Directory to copy puzzle inputs from")
     args = p.parse_args()
 
-    builder = MatrixBuilder(args.data, args.inputs)
+    builds = csv_env("AOC_BENCH_PROFILES", MatrixBuilder.DEFAULT_BUILDS)
+    assert builds is not None
+    unknown_builds = set(builds) - MatrixBuilder.KNOWN_BUILDS
+    if unknown_builds:
+        raise RuntimeError(f"error: unknown build profiles: {', '.join(sorted(unknown_builds))}")
+
+    threads = csv_env("AOC_BENCH_THREADS", MatrixBuilder.DEFAULT_THREADS)
+    assert threads is not None
+    unknown_threads = set(threads) - MatrixBuilder.KNOWN_THREADS
+    if unknown_threads:
+        raise RuntimeError(f"error: unknown thread values: {', '.join(sorted(unknown_threads))}")
+    if "1" not in threads:
+        raise RuntimeError("error: thread values must include 1")
+
+    multiversion = csv_env("AOC_BENCH_MULTIVERSION")
+
+    builder = MatrixBuilder(args.data, args.inputs, builds, threads, multiversion)
     builder.build()
+
+    if multiversion is not None:
+        unknown_multiversions = set(multiversion) - builder.seen_multiversions
+        if unknown_multiversions:
+            raise RuntimeError(
+                f"error: unknown multiversion values: {', '.join(sorted(unknown_multiversions))}"
+            )
+
     print("total combinations:", builder.total_combinations, file=sys.stderr)
 
 

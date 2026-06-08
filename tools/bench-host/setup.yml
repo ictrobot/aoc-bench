@@ -10,24 +10,14 @@
     bench_repo_url: "https://github.com/ictrobot/aoc-bench.git"
     bench_repo_branch: master
     cloudflare_env_file: "/home/{{ bench_user }}/.config/aoc-bench/cloudflare.env"
-    isolated_cores: "0-11"
     bench_home_dir: "/home/{{ bench_user }}"
     bench_home_lv: benchhome
-    bench_home_vg: vg0
-    bench_home_size: 128G
-    # yamllint disable rule:line-length
-    host_description: >-
-      [aoc-rs](https://github.com/ictrobot/aoc-rs) benchmarks running on a 
-      [Hetzner EX44](https://www.hetzner.com/dedicated-rootserver/ex44/) server with an
-      [Intel i5-13500](https://www.intel.com/content/www/us/en/products/sku/230580/intel-core-i513500-processor-24m-cache-up-to-4-80-ghz/specifications.html).
-      Benchmarks are isolated to the 6 P-cores.
-    # yamllint enable rule:line-length
 
   pre_tasks:
     - name: Set timezone to UTC
       become: true
       community.general.timezone:
-        name: UTC
+        name: Etc/UTC
 
     - name: Ensure APT cache is up to date
       ansible.builtin.apt:
@@ -61,6 +51,7 @@
           - htop
           - screen
           - lm-sensors
+          - lvm2
           - linux-perf
           - strace
           - hwloc-nox
@@ -161,6 +152,7 @@
         name: tuned
         enabled: true
         state: started
+      when: bench_enable_tuned_cpu_partitioning | bool
 
     # Don't set no_balance_cores=(/isolcpus) as that would disable scheduler load balancing on those cores, which is
     # required for multithreaded benchmarks without pinning threads to specific cores.
@@ -169,18 +161,28 @@
         path: /etc/tuned/cpu-partitioning-variables.conf
         regexp: '^isolated_cores=.+'
         line: 'isolated_cores={{ isolated_cores }}'
+      when: bench_enable_tuned_cpu_partitioning | bool
 
     # Custom profile inheriting cpu-partitioning but with intel_pstate re-enabled
     # for max turbo boost. See /usr/lib/tuned/profiles/cpu-partitioning/tuned.conf
     # which also includes network-latency and latency-performance.
+    - name: Ensure tuned aoc-bench profile directory exists
+      ansible.builtin.file:
+        path: /etc/tuned/profiles/aoc-bench
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: bench_enable_tuned_cpu_partitioning | bool
+
     - name: Install custom tuned aoc-bench profile
       ansible.builtin.copy:
         src: files/tuned.conf
-        dest: /etc/tuned/profiles/aoc-bench/
+        dest: /etc/tuned/profiles/aoc-bench/tuned.conf
         owner: root
         group: root
         mode: "0644"
-        directory_mode: "0755"
+      when: bench_enable_tuned_cpu_partitioning | bool
 
     - name: Check current tuned profile
       ansible.builtin.command: tuned-adm active
@@ -190,20 +192,33 @@
 
     - name: Enable tuned aoc-bench profile
       ansible.builtin.command: tuned-adm profile aoc-bench
-      when: "'Current active profile: aoc-bench' not in tuned_profile.stdout"
       changed_when: true
+      when:
+        - bench_enable_tuned_cpu_partitioning | bool
+        - "'Current active profile: aoc-bench' not in tuned_profile.stdout"
+
+    - name: Disable stale tuned aoc-bench profile when CPU partitioning is disabled
+      ansible.builtin.command: tuned-adm off
+      changed_when: true
+      when:
+        - not bench_enable_tuned_cpu_partitioning | bool
+        - "'Current active profile: aoc-bench' in tuned_profile.stdout"
 
     - name: Check kernel cmdline
       ansible.builtin.command: cat /proc/cmdline
       register: cmdline
       changed_when: false
+      when: bench_enable_tuned_cpu_partitioning | bool
 
     - name: Reboot to apply CPU isolation and tuned cmdline
       ansible.builtin.reboot:
         reboot_timeout: 600
       when: >-
-        ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
-        or "intel_pstate=disable" in cmdline.stdout
+        bench_enable_tuned_cpu_partitioning | bool
+        and (
+          ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
+          or "intel_pstate=disable" in cmdline.stdout
+        )
 
     - name: Disable unattended upgrades
       ansible.builtin.systemd:
@@ -247,6 +262,14 @@
         shell: "{{ user_shell }}"
         create_home: true
         state: present
+
+    - name: Ensure benchmark home ownership
+      ansible.builtin.file:
+        path: "{{ bench_home_dir }}"
+        state: directory
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0700"
 
     - name: Add SSH key for bench user
       ansible.posix.authorized_key:
@@ -318,7 +341,8 @@
       vars:
         host_config: >-
           {{
-            {'cpu_affinity': isolated_cores}
+            {}
+            | combine({'cpu_affinity': isolated_cores} if isolated_cores is defined else {})
             | combine({'description': host_description} if host_description is defined else {})
           }}
 
@@ -342,6 +366,7 @@
       ansible.builtin.stat:
         path: "{{ cloudflare_env_file }}"
       register: cloudflare_env
+      when: bench_enable_web_export | bool
 
     - name: Ensure Cloudflare env file has strict permissions when present
       ansible.builtin.file:
@@ -350,17 +375,22 @@
         owner: "{{ bench_user }}"
         group: "{{ bench_user }}"
         mode: "0600"
-      when: cloudflare_env.stat.exists | default(false)
+      when:
+        - bench_enable_web_export | bool
+        - cloudflare_env.stat.exists | default(false)
 
     - name: Check wrangler version
       ansible.builtin.command: wrangler --version
       register: wrangler_version
       changed_when: false
       failed_when: false
+      when: bench_enable_web_export | bool
 
     - name: Install wrangler v4 globally
       ansible.builtin.command: npm install -g wrangler@4
-      when: wrangler_version.rc != 0 or (wrangler_version.stdout is not search('^4\\.'))
+      when:
+        - bench_enable_web_export | bool
+        - (wrangler_version.rc | default(1)) != 0 or (wrangler_version.stdout | default('') is not search('^4\\.'))
       changed_when: true
 
     - name: Install aoc-bench systemd unit
