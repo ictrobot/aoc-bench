@@ -43,6 +43,7 @@
       ansible.builtin.apt:
         name:
           - fish
+          - acl
           - ufw
           - build-essential
           - git
