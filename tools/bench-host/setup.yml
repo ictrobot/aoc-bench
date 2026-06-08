@@ -148,6 +148,14 @@
         reload: true
 
     # CPU partitioning and tuning
+    - name: Validate CPU isolation config
+      ansible.builtin.assert:
+        that:
+          - isolated_cores is defined
+          - isolated_cores | length > 0
+        fail_msg: "Define isolated_cores when bench_enable_tuned_cpu_partitioning is true."
+      when: bench_enable_tuned_cpu_partitioning | bool
+
     - name: Enabled tuned service
       ansible.builtin.systemd:
         name: tuned
@@ -198,27 +206,47 @@
         - bench_enable_tuned_cpu_partitioning | bool
         - "'Current active profile: aoc-bench' not in tuned_profile.stdout"
 
-    - name: Disable stale tuned aoc-bench profile when CPU partitioning is disabled
+    - name: Disable active tuned profile when CPU partitioning is disabled
       ansible.builtin.command: tuned-adm off
       changed_when: true
       when:
         - not bench_enable_tuned_cpu_partitioning | bool
-        - "'Current active profile: aoc-bench' in tuned_profile.stdout"
+        - "'Current active profile:' in tuned_profile.stdout"
+
+    - name: Disable tuned service when CPU partitioning is disabled
+      ansible.builtin.systemd:
+        name: tuned
+        enabled: false
+        state: stopped
+      when:
+        - not bench_enable_tuned_cpu_partitioning | bool
 
     - name: Check kernel cmdline
       ansible.builtin.command: cat /proc/cmdline
       register: cmdline
       changed_when: false
-      when: bench_enable_tuned_cpu_partitioning | bool
+      check_mode: false
 
-    - name: Reboot to apply CPU isolation and tuned cmdline
+    - name: Reboot to apply CPU isolation state
       ansible.builtin.reboot:
         reboot_timeout: 600
       when: >-
-        bench_enable_tuned_cpu_partitioning | bool
-        and (
-          ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
-          or "intel_pstate=disable" in cmdline.stdout
+        (
+          bench_enable_tuned_cpu_partitioning | bool
+          and (
+            ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
+            or "intel_pstate=disable" in cmdline.stdout
+          )
+        )
+        or (
+          not bench_enable_tuned_cpu_partitioning | bool
+          and (
+            "nohz_full=" in cmdline.stdout
+            or "rcu_nocbs=" in cmdline.stdout
+            or "tuned.non_isolcpus=" in cmdline.stdout
+            or "isolcpus=" in cmdline.stdout
+            or "intel_pstate=disable" in cmdline.stdout
+          )
         )
 
     - name: Disable unattended upgrades
