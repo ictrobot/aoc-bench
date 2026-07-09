@@ -210,6 +210,20 @@ build_binary() (
     # Remap paths to $tmp_clone and $tmp_crate to avoid the temporary paths being included in binaries
     export RUSTFLAGS="--remap-path-prefix $tmp_clone=/aoc-rs/ --remap-path-prefix $tmp_crate=/aoc-rs-bench/"
 
+    # Align the start of every function to 64 bytes (2^6), the instruction cache line size.
+    #
+    # Even with one binary per benchmark and stable metadata (see above), code layout still shifts between commits.
+    # When any function changes size, every function placed after it moves, which changes where unchanged code lands
+    # in cache lines and how its branches map into the branch predictor.
+    #
+    # Rebuilding 2015-12 at nine points that leave the day and everything it calls untouched produces cycles/iteration
+    # measurements up to 6.3% apart. The builds mostly fall into one of two groups ~5.7% apart, depending on where the
+    # two hot functions start within a cache line. With this flag the same nine builds are within 0.7%.
+    #
+    # The LLVM flag is used as rustc's equivalent, -Z min-function-alignment, is still nightly-only as of 1.97, while
+    # the LLVM flag is accepted by every pinned toolchain from 1.75.
+    export RUSTFLAGS="$RUSTFLAGS -C llvm-args=-align-all-functions=6"
+
     if [[ "$profile" == "native"* ]]; then
         export RUSTFLAGS="$RUSTFLAGS -C target_cpu=native"
     fi
