@@ -246,6 +246,12 @@ build_binary() (
     # the same nine builds measure within ~0.3%.
     export RUSTFLAGS="$RUSTFLAGS -C symbol-mangling-version=v0 -C link-arg=-Wl,-T,$tmp_crate/layout.ld"
 
+    # The build id is a hash of the whole file, including the symbol table, and is placed in a loaded section. Two
+    # builds with identical code can therefore still differ in loaded content. Removing it, together with the
+    # objcopy below which strips the unstably numbered symbols, means rebuilds which produce the same code often
+    # produce byte-identical files.
+    export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,--build-id=none"
+
     if [[ "$profile" == "native"* ]]; then
         export RUSTFLAGS="$RUSTFLAGS -C target_cpu=native"
     fi
@@ -268,7 +274,12 @@ build_binary() (
         if [[ $executable =~ /release/([0-9]{4})-([0-9]{2})$ ]]; then
             year="${BASH_REMATCH[1]}"
             day="${BASH_REMATCH[2]}"
-            mv "$executable" "$build.tmp/$year-$day"
+
+            # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which are
+            # the only symbols that do. Together with --build-id=none above, rebuilds which produce the same code then
+            # often produce byte-identical files. All the function symbols are kept for perf and gdb.
+            objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/$year-$day"
+
             binaries=$((binaries - 1))
         else
             echo "Unknown binary $executable when building $commit" 1>&2
