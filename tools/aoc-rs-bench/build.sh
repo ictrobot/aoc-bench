@@ -43,6 +43,7 @@ checksum_files=(
     "Cargo.toml"
     "build.sh"
     "rustc-wrapper-strip-metadata.sh"
+    "layout.ld"
 )
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
@@ -117,6 +118,7 @@ build_binary() (
     cp "src/lib.rs" "$tmp_crate/src/lib.rs"
     cp "Cargo.toml" "$tmp_crate/Cargo.toml"
     cp "rustc-wrapper-strip-metadata.sh" "$tmp_crate/rustc-wrapper-strip-metadata.sh"
+    cp "layout.ld" "$tmp_crate/layout.ld"
     cd "$tmp_crate"
 
     rust_version="$(
@@ -223,6 +225,26 @@ build_binary() (
     # The LLVM flag is used as rustc's equivalent, -Z min-function-alignment, is still nightly-only as of 1.97, while
     # the LLVM flag is accepted by every pinned toolchain from 1.75.
     export RUSTFLAGS="$RUSTFLAGS -C llvm-args=-align-all-functions=6"
+
+    # Place each crate's functions in a fixed page aligned section using a linker script.
+    #
+    # Function alignment pins where code sits within a cache line but not the order of functions or which page they
+    # share, so a change in one crate still moves every other crate's code. layout.ld gives each crate a page aligned
+    # section with the functions sorted by name, and keeps the start of the read-only and writable data fixed within
+    # a page. A change can then only move other sections by whole pages and unchanged functions in other crates keep
+    # their cache line and page offsets.
+    #
+    # The script adds to the linker's built-in script and works with both GNU ld and rust-lld, which rustc uses by
+    # default from 1.90.
+    #
+    # Crates are matched by name in the mangled symbols, which v0 mangling makes much easier and more reliable. In
+    # particular, legacy mangling hides generic type arguments in a hash, so a std function instantiated for one of
+    # a crate's types could not be matched to that crate. Both flags are accepted by every toolchain from 1.75
+    # to 1.97.
+    #
+    # With the above alignment flag alone the nine builds above still measure up to 0.7% apart. Adding this script
+    # the same nine builds measure within ~0.3%.
+    export RUSTFLAGS="$RUSTFLAGS -C symbol-mangling-version=v0 -C link-arg=-Wl,-T,$tmp_crate/layout.ld"
 
     if [[ "$profile" == "native"* ]]; then
         export RUSTFLAGS="$RUSTFLAGS -C target_cpu=native"
