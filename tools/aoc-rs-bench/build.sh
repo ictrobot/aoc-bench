@@ -48,6 +48,7 @@ checksum_files=(
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
     "${known_profiles[@]}"
+    "by-hash"
     "commits.txt"
     ".cache.json" # config.py cache
 )
@@ -278,7 +279,20 @@ build_binary() (
             # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which are
             # the only symbols that do. Together with --build-id=none above, rebuilds which produce the same code then
             # often produce byte-identical files. All the function symbols are kept for perf and gdb.
-            objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/$year-$day"
+            objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
+
+            # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave most
+            # binaries unchanged, so this saves space and makes checking whether two commits produced the same binary
+            # cheap, as unchanged binaries share an inode. The stored files are made read-only as a write through any
+            # link would change the content for every commit sharing it.
+            hash="$(sha256sum "$build.tmp/.$year-$day.tmp" | cut -d' ' -f1)"
+            if [[ -e "$builds_dir/by-hash/$hash" ]]; then
+                rm -f "$build.tmp/.$year-$day.tmp"
+            else
+                chmod a-w "$build.tmp/.$year-$day.tmp"
+                mv "$build.tmp/.$year-$day.tmp" "$builds_dir/by-hash/$hash"
+            fi
+            ln -f "$builds_dir/by-hash/$hash" "$build.tmp/$year-$day"
 
             binaries=$((binaries - 1))
         else
@@ -301,6 +315,7 @@ build_binary() (
 read_profiles
 mkdir -p "$builds_dir"
 check_checksum
+mkdir -p "$builds_dir/by-hash"
 
 tmp_clone="$(mktemp -d)"
 trap 'rm -rf "$tmp_clone"' EXIT
