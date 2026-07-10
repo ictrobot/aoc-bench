@@ -227,7 +227,7 @@ build_binary() (
     # the LLVM flag is accepted by every pinned toolchain from 1.75.
     export RUSTFLAGS="$RUSTFLAGS -C llvm-args=-align-all-functions=6"
 
-    # Place each crate's functions in a fixed page aligned section using a linker script.
+    # Place each workspace crate's functions in a fixed page aligned section using a linker script.
     #
     # Function alignment pins where code sits within a cache line but not the order of functions or which page they
     # share, so a change in one crate still moves every other crate's code. layout.ld gives each crate a page aligned
