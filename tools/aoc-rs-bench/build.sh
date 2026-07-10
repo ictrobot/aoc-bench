@@ -44,6 +44,7 @@ checksum_files=(
     "build.sh"
     "rustc-wrapper-strip-metadata.sh"
     "layout.ld"
+    "prune.py"
 )
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
@@ -120,6 +121,7 @@ build_binary() (
     cp "Cargo.toml" "$tmp_crate/Cargo.toml"
     cp "rustc-wrapper-strip-metadata.sh" "$tmp_crate/rustc-wrapper-strip-metadata.sh"
     cp "layout.ld" "$tmp_crate/layout.ld"
+    cp "prune.py" "$tmp_crate/prune.py"
     cd "$tmp_crate"
 
     rust_version="$(
@@ -142,11 +144,13 @@ build_binary() (
     fi
 
     binaries=0
+    declare -A day_bins=()
     while read -r path; do
         if [[ $path =~ ^crates/year([0-9]{4})/src/day([0-9]{2})\.rs$ ]]; then
             year="${BASH_REMATCH[1]}"
             day="${BASH_REMATCH[2]}"
             echo "::aoc_rs_bench::main!{year$year Day$day}" > "$tmp_crate/src/bin/$year-$day.rs"
+            day_bins[$day]+=" --bin $year-$day"
             binaries=$((binaries + 1))
         fi
     done < <(git -C "$tmp_clone" ls-tree -r --name-only "$commit")
@@ -178,7 +182,9 @@ build_binary() (
     # dependencies (where the checkout is a path inside ~/.cargo), but does cause each crate to have an unstable
     # SourceId due to the `$tmp_clone` path being different each build.
     # However, this is mitigated by the RUSTC_WRAPPER (see below).
-    git -C "$tmp_clone" checkout "$commit" -q
+    #
+    # --force discards the previous commit's pruned lib.rs files
+    git -C "$tmp_clone" checkout --force "$commit" -q
     for crate in "${patch_crates[@]}"; do
         args+=(
             "--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\""
@@ -266,43 +272,64 @@ build_binary() (
     # Copy output executables into temporary dir, then atomically rename dir when complete
     mkdir -p "$build.tmp"
 
-    while read -r executable; do
-        if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
-            echo "No such binary $executable after building $commit" >&2
-            exit 1
-        fi
+    # Build the binaries in batches, with the year crates pruned down to one day number per batch.
+    #
+    # Each crate is compiled as a single unit (codegen-units = 1), so without pruning a change to one day still
+    # changes every other binary in its year. Some leftover pieces of the other days, like their constants, survive
+    # into every binary, and the changed code shifts the addresses of things unchanged code points at, which changes
+    # its instruction bytes too. Pruning removes the other days from compilation entirely, so a binary only changes
+    # when code it actually uses changes.
+    #
+    # Batching by day number compiles utils and the other dependencies once and the small year crates once per day
+    # number, which measured around 3x the unpruned build time, compared to around 30x for building one binary at a
+    # time.
+    for day_number in $(printf '%s\n' "${!day_bins[@]}" | sort); do
+        python3 ./prune.py "$tmp_clone" "$day_number"
+        read -ra day_args <<< "${day_bins[$day_number]}"
 
-        if [[ $executable =~ /release/([0-9]{4})-([0-9]{2})$ ]]; then
-            year="${BASH_REMATCH[1]}"
-            day="${BASH_REMATCH[2]}"
-
-            # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which are
-            # the only symbols that do. Together with --build-id=none above, rebuilds which produce the same code then
-            # often produce byte-identical files. All the function symbols are kept for perf and gdb.
-            objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
-
-            # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave most
-            # binaries unchanged, so this saves space and makes checking whether two commits produced the same binary
-            # cheap, as unchanged binaries share an inode. The stored files are made read-only as a write through any
-            # link would change the content for every commit sharing it.
-            hash="$(sha256sum "$build.tmp/.$year-$day.tmp" | cut -d' ' -f1)"
-            if [[ -e "$builds_dir/by-hash/$hash" ]]; then
-                rm -f "$build.tmp/.$year-$day.tmp"
-            else
-                chmod a-w "$build.tmp/.$year-$day.tmp"
-                mv "$build.tmp/.$year-$day.tmp" "$builds_dir/by-hash/$hash"
+        while read -r executable; do
+            if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
+                echo "No such binary $executable after building $commit" >&2
+                exit 1
             fi
-            ln -f "$builds_dir/by-hash/$hash" "$build.tmp/$year-$day"
 
-            binaries=$((binaries - 1))
-        else
-            echo "Unknown binary $executable when building $commit" 1>&2
-            exit 1
-        fi
-    done < <(
-        rustup run --install "$rust_version" cargo build --release "${args[@]}" --message-format=json-render-diagnostics \
-          | jq --unbuffered -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
-    )
+            if [[ $executable =~ /release/([0-9]{4})-([0-9]{2})$ ]]; then
+                year="${BASH_REMATCH[1]}"
+                day="${BASH_REMATCH[2]}"
+
+                # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which
+                # are the only symbols that do. Together with --build-id=none above, rebuilds which produce the same
+                # code then often produce byte-identical files. All the function symbols are kept for perf and gdb.
+                objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
+
+                # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave
+                # most binaries unchanged, so this saves space and makes checking whether two commits produced the
+                # same binary cheap, as unchanged binaries share an inode. The stored files are made read-only as a
+                # write through any link would change the content for every commit sharing it.
+                hash="$(sha256sum "$build.tmp/.$year-$day.tmp" | cut -d' ' -f1)"
+                if [[ -e "$builds_dir/by-hash/$hash" ]]; then
+                    rm -f "$build.tmp/.$year-$day.tmp"
+                else
+                    chmod a-w "$build.tmp/.$year-$day.tmp"
+                    mv "$build.tmp/.$year-$day.tmp" "$builds_dir/by-hash/$hash"
+                fi
+                ln -f "$builds_dir/by-hash/$hash" "$build.tmp/$year-$day"
+
+                binaries=$((binaries - 1))
+            else
+                echo "Unknown binary $executable when building $commit" 1>&2
+                exit 1
+            fi
+        done < <(
+            rustup run --install "$rust_version" cargo build --release "${args[@]}" "${day_args[@]}" \
+                --message-format=json-render-diagnostics \
+              | jq --unbuffered -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
+        )
+
+        # set -e does not see failures inside the process substitution, so wait on it to propagate a failed build
+        # even if every expected binary was already emitted
+        wait "$!"
+    done
 
     if (( binaries != 0 )); then
         echo "Incorrect number of binaries when building $commit" 1>&2
