@@ -30,6 +30,12 @@ close_loop_fds() {
     set -e
 }
 
+run_on_all_cores() {
+    # The builds and config generation aren't ran at the same time as benchmarks, so opt in to running on every core,
+    # including the isolated benchmark cores, for speed.
+    taskset -c "$(cat /sys/devices/system/cpu/online)" "$@"
+}
+
 read_last_deploy_epoch() {
     local value
     value=0
@@ -173,11 +179,11 @@ main() {
         echo "Repository updated by git pull, restarting script to use latest version" >&2
         exec "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
     fi
-    cargo build --release
+    run_on_all_cores cargo build --release
 
     cd "$AOC_RS_BENCH_DIR"
-    ./build.sh "$DATA_DIR/"
-    ./config.py "$DATA_DIR/" "$INPUTS_DIR/"
+    run_on_all_cores ./build.sh "$DATA_DIR/"
+    run_on_all_cores ./config.py "$DATA_DIR/" "$INPUTS_DIR/"
 
     cd "$REPO_DIR"
 
