@@ -30,8 +30,14 @@ const TARGET_SAMPLE_DURATIONS: [Duration; 18] = [
 
 const EWMA_ALPHA: f64 = 0.2;
 
-pub fn main<P1, P2, E>(puzzle_fn: fn(&str) -> Result<(P1, P2), E>)
-where
+pub fn main<P1, P2, E>(
+    puzzle_fn: fn(&str) -> Result<(P1, P2), E>,
+    multiversion_used: fn() -> bool,
+    get_supported_versions: fn() -> Vec<String>,
+    set_override: fn(&str),
+    set_thread_count: fn(NonZeroUsize),
+    multithreading: bool,
+) where
     P1: ToString,
     P2: ToString,
     E: Display,
@@ -51,7 +57,7 @@ where
         ),
         // Print InputError display implementation
         Err(err) => {
-            std::eprintln!("{}", err);
+            eprintln!("{}", err);
             std::process::exit(1);
         }
     };
@@ -63,23 +69,26 @@ where
             let (part1, part2) = bench_fn();
             println!("Checksum: {}", checksum(&part1, &part2));
 
-            if multiversion_glue::multiversion_used() {
+            if multiversion_used() {
                 println!(
                     "Multiversion: default,{}",
-                    multiversion_glue::get_supported_versions().join(",")
+                    get_supported_versions().join(",")
                 )
             } else {
                 println!("Multiversion: default")
             }
+
+            // config.py checks this against whether the check run actually created threads
+            println!("Multithreading: {multithreading}");
         }
         ["bench", threads, multiversion] => {
             if *threads != "n" {
                 let threads: usize = threads.parse().unwrap();
                 let threads = NonZeroUsize::new(threads).unwrap();
-                multithreading_glue::set_thread_count(threads);
+                set_thread_count(threads);
             }
             if *multiversion != "default" {
-                multiversion_glue::set_override(multiversion);
+                set_override(multiversion);
             }
 
             println!("META\tversion=1");
@@ -87,7 +96,7 @@ where
             let mut iters_per_sample = 1;
             let mut ewma_iter_seconds = 0.0;
             for i in 0.. {
-                let (duration, (part1, part2)) = sample(&bench_fn, iters_per_sample);
+                let (duration, (part1, part2)) = sample(bench_fn, iters_per_sample);
                 let checksum = checksum(&part1, &part2);
 
                 if writeln!(
@@ -162,11 +171,94 @@ fn fnv1a64(data: &[u8]) -> u64 {
     hash
 }
 
+// The optional trailing identifiers select the real multiversion or multithreading glue instead of
+// the stub implementations. build.sh builds every binary with the stub implementation first and
+// then rebuilds any binaries where the built binary shows the day's own code pulls in the
+// multiversion/multithreading logic.
 #[macro_export]
 macro_rules! main {
     ($year:ident $day:ident) => {
+        $crate::main!(@multiversion_stub);
+        $crate::main!(@multithreading_stub);
+        $crate::main!(@impl $year $day);
+    };
+    ($year:ident $day:ident multiversion) => {
+        $crate::main!(@multiversion_glue);
+        $crate::main!(@multithreading_stub);
+        $crate::main!(@impl $year $day);
+    };
+    ($year:ident $day:ident multithreading) => {
+        $crate::main!(@multiversion_stub);
+        $crate::main!(@multithreading_glue);
+        $crate::main!(@impl $year $day);
+    };
+    ($year:ident $day:ident multiversion multithreading) => {
+        $crate::main!(@multiversion_glue);
+        $crate::main!(@multithreading_glue);
+        $crate::main!(@impl $year $day);
+    };
+    (@multiversion_stub) => {
+        fn get_supported_versions() -> Vec<String> {
+            panic!("built with multiversion stub, cannot list supported versions");
+        }
+
+        fn multiversion_used() -> bool {
+            false
+        }
+
+        fn set_override(version: &str) {
+            panic!("built with multiversion stub, cannot set override to {version}");
+        }
+    };
+    (@multiversion_glue) => {
+        #[cfg(feature = "glue-v5")]
+        use ::aoc::utils::multiversion::{Version, VERSIONS};
+        #[cfg(not(feature = "glue-v5"))]
+        use ::utils::multiversion::{Version, VERSIONS};
+
+        fn get_supported_versions() -> Vec<String> {
+            VERSIONS.iter().map(|v| format!("{v:?}")).collect()
+        }
+
+        // This can only be used once, and returns if the override was set or get prior.
+        fn multiversion_used() -> bool {
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let result = std::panic::catch_unwind(|| Version::set_override(Version::Scalar));
+            std::panic::set_hook(default_hook);
+            result.is_err()
+        }
+
+        fn set_override(version: &str) {
+            Version::set_override(version.parse().unwrap());
+        }
+    };
+    (@multithreading_stub) => {
+        const MULTITHREADING: bool = false;
+
+        fn set_thread_count(threads: std::num::NonZeroUsize) {
+            // config.py sets one thread by default
+            assert_eq!(threads.get(), 1, "built with multithreading stub, cannot set thread count");
+        }
+    };
+    (@multithreading_glue) => {
+        const MULTITHREADING: bool = true;
+
+        #[cfg(feature = "glue-v5")]
+        use ::aoc::utils::multithreading::set_thread_count;
+        #[cfg(not(feature = "glue-v5"))]
+        use ::utils::multithreading::set_thread_count;
+    };
+    (@impl $year:ident $day:ident) => {
         fn main() {
-            $crate::main(puzzle_fn);
+            $crate::main(
+                puzzle_fn,
+                multiversion_used,
+                get_supported_versions,
+                set_override,
+                set_thread_count,
+                MULTITHREADING,
+            );
         }
 
         #[inline(never)]
@@ -204,71 +296,4 @@ pub mod puzzle_glue {
     pub use ::aoc::*;
 
     pub use ::aoc::utils::input::{InputError, InputType};
-}
-
-#[cfg(not(any(
-    feature = "glue-v2",
-    feature = "glue-v3",
-    feature = "glue-v4",
-    feature = "glue-v5"
-)))]
-mod multiversion_glue {
-    pub fn get_supported_versions() -> Vec<String> {
-        Vec::new()
-    }
-
-    pub fn multiversion_used() -> bool {
-        false
-    }
-
-    pub fn set_override(_: &str) {}
-}
-
-#[cfg(any(
-    feature = "glue-v2",
-    feature = "glue-v3",
-    feature = "glue-v4",
-    feature = "glue-v5"
-))]
-mod multiversion_glue {
-    #[cfg(feature = "glue-v5")]
-    use ::aoc::utils::multiversion::{Version, VERSIONS};
-    #[cfg(any(feature = "glue-v2", feature = "glue-v3", feature = "glue-v4"))]
-    use ::utils::multiversion::{Version, VERSIONS};
-    use std::panic;
-
-    pub fn get_supported_versions() -> Vec<String> {
-        VERSIONS
-            .iter()
-            .map(|v| format!("{v:?}"))
-            .collect::<Vec<_>>()
-    }
-
-    // This can only be used once, and returns if the override was set or get prior to this point.
-    // The override cannot be set again after this point.
-    // This is a hack, but works from the first commit multiversion overrides were added.
-    pub fn multiversion_used() -> bool {
-        // Prevent the default hook from logging the below expected panic
-        let default_hook = panic::take_hook();
-        panic::set_hook(Box::new(|_| {}));
-
-        let result = panic::catch_unwind(|| Version::set_override(Version::Scalar));
-
-        panic::set_hook(default_hook);
-
-        result.is_err()
-    }
-
-    pub fn set_override(version: &str) {
-        Version::set_override(version.parse().unwrap());
-    }
-}
-
-mod multithreading_glue {
-    #[cfg(feature = "glue-v5")]
-    pub use ::aoc::utils::multithreading::set_thread_count;
-    #[cfg(any(feature = "glue-v3", feature = "glue-v4"))]
-    pub use ::utils::multithreading::set_thread_count;
-    #[cfg(not(any(feature = "glue-v3", feature = "glue-v4", feature = "glue-v5")))]
-    pub fn set_thread_count(_: std::num::NonZeroUsize) {}
 }

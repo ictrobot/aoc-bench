@@ -30,6 +30,10 @@ framework_revisions=(
     "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Year crates reexported from aoc, nested macro repeats for year and day
 )
 
+# First framework version whose glue can drive each feature
+multiversion_framework=2
+multithreading_framework=3
+
 known_profiles=(
     "generic"
     "native"
@@ -107,7 +111,7 @@ check_checksum() {
     fi
 }
 
-build_binary() (
+build_binaries() (
     # (...) used instead of {...} so the following commands always run in a subshell, allowing it to have a separate
     # trap EXIT command
 
@@ -144,7 +148,7 @@ build_binary() (
     fi
 
     binaries=0
-    declare -A day_bins=()
+    declare -A day_bins=() base_uses=()
     while read -r path; do
         if [[ $path =~ ^crates/year([0-9]{4})/src/day([0-9]{2})\.rs$ ]]; then
             year="${BASH_REMATCH[1]}"
@@ -219,6 +223,11 @@ build_binary() (
     # Remap paths to $tmp_clone and $tmp_crate to avoid the temporary paths being included in binaries
     export RUSTFLAGS="--remap-path-prefix $tmp_clone=/aoc-rs/ --remap-path-prefix $tmp_crate=/aoc-rs-bench/"
 
+    # Cap lints to allow. Cargo silences lints in dependencies, but the year crates are patched to local paths which
+    # causes cargo to print their warnings. Pruning removes days from a year crate, leaving functions in shared modules
+    # the remaining days no longer call, so this avoids dead code warnings.
+    export RUSTFLAGS="$RUSTFLAGS --cap-lints=allow"
+
     # Align the start of every function to 64 bytes (2^6), the instruction cache line size.
     #
     # Even with one binary per benchmark and stable metadata (see above), code layout still shifts between commits.
@@ -269,10 +278,102 @@ build_binary() (
         export CARGO_PROFILE_RELEASE_LTO="false"
     fi
 
+    cargo_build_bins() {
+        rustup run --install "$rust_version" cargo build --release "${args[@]}" "$@" \
+            --message-format=json-render-diagnostics \
+          | jq --unbuffered -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
+    }
+
+    # Build one batch of binaries. The first argument specifies either the base or rebuild pass, and the rest are the
+    # --bin arguments.
+    #
+    # Every binary is first built against the stub glue in the base pass, which avoids references to utils::multiversion
+    # or utils::multithreading, so any of those module names appearing in the binary's symbol table means the day's own
+    # code pulls the relevant logic in. Those binaries have their generated source rewritten to enable the multiversion
+    # and/or multithreading glue and are then rebuilt in a second batch. Everything else keeps its first base binary,
+    # avoiding glue-only references causing every binary to change when the multiversion/multithreading modules change.
+    run_batch() {
+        local pass="$1" uses glue
+        shift
+        rebuild_args=()
+        rebuild_days=()
+
+        while read -r executable; do
+            if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
+                echo "No such binary $executable after building $commit" >&2
+                exit 1
+            fi
+            if [[ ! $executable =~ /release/([0-9]{4})-([0-9]{2})$ ]]; then
+                echo "Unknown binary $executable when building $commit" 1>&2
+                exit 1
+            fi
+            year="${BASH_REMATCH[1]}"
+            day="${BASH_REMATCH[2]}"
+
+            # A string dump of the binary's symbol name table, so only symbol names can match, each on its own
+            # line. The pattern is anchored to the v0 mangling grammar: a v0 symbol from its _R prefix uses only
+            # [0-9a-zA-Z_], a crate root is C plus an optional s<base-62>_ disambiguator, and the length
+            # prefixed identifiers can only be utils followed by the module name. The second grep reduces the
+            # matches to the module names. Only the greps finding no matches is tolerated, so with pipefail the
+            # readelf failing is still fatal.
+            uses="$(readelf -p .strtab "$executable" \
+                | { LC_ALL=C grep -oE '(^|[^0-9a-zA-Z_])_R[0-9a-zA-Z_]*C(s[0-9a-zA-Z]*_)?5utils(12multiversion|14multithreading)' || true; } \
+                | { LC_ALL=C grep -oE '5utils(12multiversion|14multithreading)' || true; } \
+                | sort -u)"
+
+            if [[ "$pass" == "base" ]]; then
+                glue=""
+                if [[ "$uses" == *multiversion* ]] && (( framework_version >= multiversion_framework )); then
+                    glue+=" multiversion"
+                fi
+                if [[ "$uses" == *multithreading* ]] && (( framework_version >= multithreading_framework )); then
+                    glue+=" multithreading"
+                fi
+                if [[ -n "$glue" ]]; then
+                    echo "::aoc_rs_bench::main!{year$year Day$day$glue}" > "$tmp_crate/src/bin/$year-$day.rs"
+                    rebuild_args+=("--bin" "$year-$day")
+                    rebuild_days+=("$year-$day")
+                    base_uses[$year-$day]="$uses"
+                    continue
+                fi
+            elif [[ "$uses" != "${base_uses[$year-$day]}" ]]; then
+                # Double check the binary still references the same modules after being rebuilt.
+                echo "Expected $year-$day to still use ${base_uses[$year-$day]//$'\n'/ } when building $commit" 1>&2
+                exit 1
+            fi
+
+            # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which
+            # are the only symbols that do. Together with --build-id=none above, rebuilds which produce the same
+            # code then often produce byte-identical files. All the function symbols are kept for perf and gdb.
+            objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
+
+            # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave
+            # most binaries unchanged, so this saves space and makes checking whether two commits produced the
+            # same binary cheap, as unchanged binaries share an inode. The stored files are made read-only as a
+            # write through any link would change the content for every commit sharing it.
+            hash="$(sha256sum "$build.tmp/.$year-$day.tmp" | cut -d' ' -f1)"
+            if [[ -e "$builds_dir/by-hash/$hash" ]]; then
+                rm -f "$build.tmp/.$year-$day.tmp"
+            else
+                chmod a-w "$build.tmp/.$year-$day.tmp"
+                mv "$build.tmp/.$year-$day.tmp" "$builds_dir/by-hash/$hash"
+            fi
+            ln -f "$builds_dir/by-hash/$hash" "$build.tmp/$year-$day"
+
+            echo "Built $year-$day for $commit ($pass)"
+
+            binaries=$((binaries - 1))
+        done < <(cargo_build_bins "$@")
+
+        # set -e does not see failures inside the process substitution, so wait on it to propagate a failed build
+        # even if every expected binary was already emitted
+        wait "$!"
+    }
+
     # Copy output executables into temporary dir, then atomically rename dir when complete
     mkdir -p "$build.tmp"
 
-    # Build the binaries in batches, with the year crates pruned down to one day number per batch.
+    # Build the binaries in day batches, with the year crates pruned down to one day number per batch.
     #
     # Each crate is compiled as a single unit (codegen-units = 1), so without pruning a change to one day still
     # changes every other binary in its year. Some leftover pieces of the other days, like their constants, survive
@@ -287,52 +388,26 @@ build_binary() (
         python3 ./prune.py "$tmp_clone" "$day_number"
         read -ra day_args <<< "${day_bins[$day_number]}"
 
-        while read -r executable; do
-            if [[ -z "$executable" || ! -f "$executable" || ! -x "$executable" ]]; then
-                echo "No such binary $executable after building $commit" >&2
-                exit 1
-            fi
-
-            if [[ $executable =~ /release/([0-9]{4})-([0-9]{2})$ ]]; then
-                year="${BASH_REMATCH[1]}"
-                day="${BASH_REMATCH[2]}"
-
-                # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which
-                # are the only symbols that do. Together with --build-id=none above, rebuilds which produce the same
-                # code then often produce byte-identical files. All the function symbols are kept for perf and gdb.
-                objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
-
-                # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave
-                # most binaries unchanged, so this saves space and makes checking whether two commits produced the
-                # same binary cheap, as unchanged binaries share an inode. The stored files are made read-only as a
-                # write through any link would change the content for every commit sharing it.
-                hash="$(sha256sum "$build.tmp/.$year-$day.tmp" | cut -d' ' -f1)"
-                if [[ -e "$builds_dir/by-hash/$hash" ]]; then
-                    rm -f "$build.tmp/.$year-$day.tmp"
-                else
-                    chmod a-w "$build.tmp/.$year-$day.tmp"
-                    mv "$build.tmp/.$year-$day.tmp" "$builds_dir/by-hash/$hash"
-                fi
-                ln -f "$builds_dir/by-hash/$hash" "$build.tmp/$year-$day"
-
-                binaries=$((binaries - 1))
-            else
-                echo "Unknown binary $executable when building $commit" 1>&2
-                exit 1
-            fi
-        done < <(
-            rustup run --install "$rust_version" cargo build --release "${args[@]}" "${day_args[@]}" \
-                --message-format=json-render-diagnostics \
-              | jq --unbuffered -r 'select(.reason=="compiler-artifact" and .executable) | .executable'
-        )
-
-        # set -e does not see failures inside the process substitution, so wait on it to propagate a failed build
-        # even if every expected binary was already emitted
-        wait "$!"
+        run_batch "base" "${day_args[@]}"
+        if (( ${#rebuild_args[@]} > 0 )); then
+            echo "Rebuilding ${rebuild_days[*]} with glue for $commit"
+            run_batch "rebuild" "${rebuild_args[@]}"
+        fi
     done
 
     if (( binaries != 0 )); then
         echo "Incorrect number of binaries when building $commit" 1>&2
+        exit 1
+    fi
+
+    # Every commit since multiversion support was added has at least one binary using it, and every commit since
+    # multithreading support was added has at least one binary using that.
+    if (( framework_version >= multiversion_framework )) && [[ "${base_uses[*]:-}" != *multiversion* ]]; then
+        echo "No binaries used multiversion when building $commit" 1>&2
+        exit 1
+    fi
+    if (( framework_version >= multithreading_framework )) && [[ "${base_uses[*]:-}" != *multithreading* ]]; then
+        echo "No binaries used multithreading when building $commit" 1>&2
         exit 1
     fi
 
@@ -357,7 +432,7 @@ for profile in "${profiles[@]}"; do
     while read -r commit <&3; do
         build="$builds_dir/$profile/$commit"
         if [[ ! -d "$build" ]]; then
-            build_binary
+            build_binaries
         fi
     done 3< "$builds_commit_list"
 done

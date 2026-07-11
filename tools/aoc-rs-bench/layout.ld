@@ -1,11 +1,16 @@
 /* Place each workspace crate's functions in its own page aligned section, sorted by name, so code changes in one
    crate cannot move another crate's functions within a cache line or page. Requires v0 symbol mangling, see build.sh.
 
-   Patterns like _R*_8year20* match an underscore followed by a length prefixed name, which is any identifier that
+   Patterns like _R*_5utils match an underscore followed by a length prefixed name, which is any identifier that
    carries a disambiguator. Disambiguators are base62 numbers ending in an underscore, and in practice crate roots
    always have a disambiguator while modules and functions usually do not. For example in
    _RINvMNtCsguYIsVMFEgP_5utils5input... the utils crate root matches _5utils but its input module appears as 5input,
    without an underscore, so the patterns match crates rather than modules or functions with the same name.
+
+   The year crates are named year20YY and the per benchmark binary crates YYYY-DD, which mangle as a length seven
+   name 20YY_DD (the leading underscore is the separator v0 requires before a name starting with a digit). Their
+   digits are matched with [0-9] classes so the patterns only match those exact shapes, keeping the binary crate
+   with the bench code rather than left in the standard library .text.
 
    Cold (.text.unlikely.*) functions are kept at the end of their crate's section, which measured more stable than
    giving them separate sections.
@@ -25,16 +30,21 @@
 
 SECTIONS {
   .text.year  : ALIGN(4096) {
-    *(SORT_BY_NAME(.text._R*_8year20*))
-    *(SORT_BY_NAME(.text.unlikely._R*_8year20*))
+    *(SORT_BY_NAME(.text._R*_8year20[0-9][0-9]*))
+    *(SORT_BY_NAME(.text.unlikely._R*_8year20[0-9][0-9]*))
   }
   .text.utils : ALIGN(4096) {
     *(SORT_BY_NAME(.text._R*_5utils*))
     *(SORT_BY_NAME(.text.unlikely._R*_5utils*))
   }
   .text.bench : ALIGN(4096) {
-    *(SORT_BY_NAME(.text._R*_12aoc_rs_bench*)) *(SORT_BY_NAME(.text._R*_3aoc*))
-    *(SORT_BY_NAME(.text.unlikely._R*_12aoc_rs_bench*)) *(SORT_BY_NAME(.text.unlikely._R*_3aoc*))
+    *(SORT_BY_NAME(.text._R*_3aoc*))
+    *(SORT_BY_NAME(.text._R*_12aoc_rs_bench*))
+    *(SORT_BY_NAME(.text._R*_7_20[0-9][0-9]_[0-9][0-9]*))
+
+    *(SORT_BY_NAME(.text.unlikely._R*_3aoc*))
+    *(SORT_BY_NAME(.text.unlikely._R*_12aoc_rs_bench*))
+    *(SORT_BY_NAME(.text.unlikely._R*_7_20[0-9][0-9]_[0-9][0-9]*))
   }
   .pad.text   : ALIGN(4096) {
     BYTE(0)

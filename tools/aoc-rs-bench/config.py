@@ -277,13 +277,21 @@ class MatrixBuilder:
             if code != 0 or stderr != "":
                 raise RuntimeError(f"error: running {build} on {puzzle} failed with exit code {code}:\n{stderr}")
 
-            matches = re.fullmatch(r'^Checksum: ([a-f0-9]+)\r?\nMultiversion: ([a-zA-z0-9_,]+)\r?\n?$', stdout)
+            matches = re.fullmatch(
+                r'^Checksum: ([a-f0-9]+)\r?\nMultiversion: ([a-zA-z0-9_,]+)\r?\nMultithreading: (true|false)\r?\n?$',
+                stdout)
             if not matches:
                 raise RuntimeError(f"error: unexpected output from {build} on {puzzle}: {stdout}")
 
             cache["checksum"] = matches.group(1)
             cache["multiversion"] = matches.group(2).split(",")
             cache["uses_threads"] = trace != b''
+
+            multithreading = matches.group(3) == "true"
+            if multithreading != cache["uses_threads"]:
+                raise RuntimeError(f"error: {build} on {puzzle} was built "
+                                   f"{'with' if multithreading else 'without'} multithreading, but "
+                                   f"{'did not create' if multithreading else 'created'} threads")
 
         for version in cache["multiversion"]:
             self.seen_multiversions.add(version)
