@@ -13,22 +13,23 @@ Key ideas:
 
 * A **runner protocol** (`SAMPLE <iters> <total_ns> ...`) that any benchmark implementation can emit.
 * A **stats engine** that turns those samples into "mean time per iteration ± CI".
-* A **storage model** that keeps one "stable result" per `(benchmark, config)` pair and updates it when
-  environment changes are detected.
+* A **storage model** that separates logical cases, reusable workloads, and immutable measurements.
+  Stable/drift state belongs to the workload that was actually measured.
 
 ## CLI Commands
 
 The `aoc-bench` tool provides the following subcommands:
 
-* **`run-all`** - Execute all matching benchmarks by spawning commands from the config file
+* **`run-all`** - Execute every matching benchmark group
     * Reads benchmark definitions and command templates from config file
     * Substitutes `{key}` placeholders with config values
-    * Spawns child processes and collects SAMPLE output
+    * Groups shared cases that currently resolve to the same executable and input
+    * Runs each selected workload and collects SAMPLE output
     * Performs run series and stores results
 
-* **`run`** - Periodically re-run benchmarks for drift detection
-    * Automatically selects (bench, config) pairs to re-run
-    * Prioritizes configs without results or with oldest timestamps
+* **`run`** - Periodically process new groups and re-run measured workloads
+    * Applies separate limits to new groups and oldest rerun candidates
+    * New groups may inherit an exact measured workload without re-running the workload
     * Useful for nightly/periodic runs to detect environment changes
 
 * **`export`** - Query and export benchmark results
@@ -66,6 +67,12 @@ The `aoc-bench` tool provides the following subcommands:
 
 All benchmark data and configuration is stored in a single `data/` directory with the following structure:
 
+Two storage versions may coexist. **V1** is the original case-oriented format: one run-series JSON
+per `(benchmark, config, timestamp)` plus `run_series` and `results` metadata tables. **V2** is the
+current workload-oriented format: UUID-addressed measurement JSON plus the normalized schema in
+section 9. These labels describe stored measurements, not the runner protocol version or SQL
+migration number. Appendix A summarizes V1 and its migration.
+
 * **`data/config.json`** (required): Benchmark configuration file defining available config keys, benchmarks, and
   commands
 * **`data/inputs/`** (user-managed): Input files for benchmarks (e.g., `2015-04.txt`)
@@ -77,7 +84,8 @@ All benchmark data and configuration is stored in a single `data/` directory wit
     - Example: `data/builds/native/abc1234` could be an executable referenced by a command template
 * **`data/results/`** (auto-created by tool): Benchmark results organized by host
     - **`results/{host}/metadata.db`**: SQLite database with indexed results for fast queries
-    - **`results/{host}/runs/`**: Immutable JSON files containing full run series data
+    - **`results/{host}/runs/by-measurement/`**: Sharded immutable V2 measurement JSON
+    - Existing V1 run-series files remain in their reconstructible paths after migration
 * **`data/hosts/{host}.json`** (optional): Host-specific runner settings
     - `cpu_affinity`: cpuset string (e.g., `"0-3,6"`) or omitted/`null` for all CPUs
     - `disable_aslr`: bool, defaults to `true` on Linux to reduce noise
@@ -94,14 +102,16 @@ All benchmark data and configuration is stored in a single `data/` directory wit
   {"commit":"abc1234","host":"pi5","profile":"release","threads":"1"}
   ```
 
-  The config contains all variable dimensions (commit, host, build settings, etc.) but **not** the benchmark name.
-  Together, `(benchmark, config)` uniquely identifies a benchmark execution variant.
+  The config contains variable dimensions (commit, build settings, etc.) but **not** the benchmark
+  name. `host` is synthesized for queries; durable case identity uses the hostless config because
+  each database already belongs to one host. Together, `(benchmark, hostless config)` identifies a
+  logical case within a host database.
 
   **Character constraints**: To ensure filesystem safety and portability:
     - Keys: Must match regex `[a-z][a-z0-9_]+` (lowercase alphanumeric + underscores, must start with letter)
     - Values and benchmark names: Must match regex `[a-zA-Z0-9_-]+` (alphanumeric + underscores + hyphens)
     - Length limits: keys ≤ 64 bytes; values/benchmark names ≤ 128 bytes
-    - These constraints ensure config strings can be used directly in file paths on all platforms
+    - These constraints keep generated labels safe in command and path contexts
 
   **Well-known keys** (by convention, not required):
     - `commit`: Git commit hash (typically 7 characters, e.g., `"abc1234"`)
@@ -127,18 +137,31 @@ All benchmark data and configuration is stored in a single `data/` directory wit
   One full benchmark execution producing a mean + CI using sample-based estimation.
 
 * **Run Series**
-  A set of repeated runs for the same `(bench, config)` executed back-to-back (normally **3 runs**).
-  Each run series is uniquely identified by `(bench, config, timestamp)` and produces a representative
-  result via median-of-means. You can re-run the same (bench, config) combination multiple times
-  (e.g., to check variance or after environment changes).
+  The repeated runs collected during one measurement (normally **3 runs**). Their median run is the
+  representative value used for stable-result and comparison logic.
+
+* **Case**
+  A logical `(benchmark, canonical hostless config)` pair. A case stores the workload whose stable
+  result it currently displays. Several cases may point to one workload.
+
+* **Group**
+  A process-local scheduling unit. A shared group contains cases with the same benchmark, invocation
+  specification, and current executable/input inodes. An isolated benchmark contributes one group
+  per case. Inode observations are never persisted.
+
+* **Workload**
+  The durable identity of measured work. A shared workload hashes the benchmark, executable content,
+  optional stdin content, expanded arguments, checksum, statistics options, and runner semantics. An
+  isolated workload is case-specific and has no content hashes. Stable/drift state belongs here.
+
+* **Measurement**
+  One recorded workload run series, identified by UUIDv7, containing its runs and raw samples. It
+  owns immutable V2 JSON and may be visible in the histories of several cases.
 
 * **Stable Result**
-  For each unique `(bench, config)` pair, the stable result is the current representative measurement shown to users.
-  This is derived from a run series's representative **median run**.
-  When a (bench, config) is re-run and results are within noise, the stable result doesn't change (preventing
-  microscopic drift).
-  When new run series are significantly different (3 consecutive times), the stable result is replaced.
-  This happens independently per (bench, config) pair.
+  The workload measurement currently shown to every associated case. Measurements within noise leave
+  it unchanged; three consecutive significant changes replace it. Different workload identities have
+  independent stable/drift state.
 
 * **Sample**
   One `SAMPLE` line: `(total_ns, iters)` from one in-process batch.
@@ -164,17 +187,15 @@ The system is composed of:
         * bootstrap CI,
         * stop when CI is small enough.
     * Performs **multiple runs back-to-back** to form a run series.
-    * Produces **one run series JSON** containing all runs and the median result.
+    * Produces one measurement containing the complete run series.
 
 3. **Store / Stable Result Manager**
 
-    * Per `(benchmark, config)` pair:
+    * Interns cases and workload identities.
+    * Stores immutable measurements and case-visible history.
+    * Maintains stable/last measurement pointers and drift counters per workload.
 
-        * Maintains a stable result timestamp.
-        * Stores all run summaries for full history.
-        * Detects when new runs are "too different" → updates stable result.
-
-4. **Viewer / Exporter** (later)
+4. **Viewer / Exporter**
 
     * Reads summaries from disk.
     * Produces JSON/TSV/plots: "time vs commit" using each commit's stable result.
@@ -259,6 +280,7 @@ All commands and paths specified in the config are relative to the `data/` direc
   "benchmarks": [
     {
       "benchmark": "2015-04",
+      "dedupe": "inode-content",
       "command": [
         "builds/{build}/{commit}",
         "bench",
@@ -318,6 +340,8 @@ collection of mutually-exclusive variants that share an identifier.
 Common fields:
 
 - **`benchmark`**: Benchmark name/identifier (string)
+- **`dedupe`** *(optional)*: Selects the benchmark's dedupe mode. Currently the only explicit mode
+  is `"inode-content"`; omit the field for an isolated benchmark. See **Dedupe modes** below.
 - **`command`**: Required command template expressed *as an argv array*, e.g.
   `"command": ["builds/{build}/{commit}", "bench", "2024", "04", "{threads}"]`. The first element is the
   executable relative to `data/`, the rest are arguments. Every `{key}` placeholder must match a key defined in the
@@ -329,6 +353,31 @@ Common fields:
   When variants are present, each variant may have its own `stats` block; for each field the lookup order is variant →
   benchmark → system default.
 
+### Dedupe modes
+
+#### Isolated (`dedupe` omitted)
+
+Each case is scheduled, executed, and stored independently. Executable and stdin contents are not
+hashed for workload sharing, so this mode also supports programs whose behaviour depends on paths or
+other state outside the declared invocation.
+
+#### `inode-content`
+
+This mode has two layers of identity:
+
+* Before applying scheduling limits, current cases are grouped cheaply by benchmark, invocation
+  spec, and executable/stdin file identity (device and inode).
+* After a group is selected, its artifacts are content-hashed. The durable workload identity uses
+  those hashes together with the benchmark and complete invocation spec, allowing measurements to
+  be inherited when the same workload identity reappears.
+
+Cases with identical executable and input contents must refer to the same underlying files, normally
+by linking paths into a content-addressed artifact store. If byte-identical copies use different
+inodes, the scheduler treats them as separate groups: they may consume multiple slots, run the same
+workload more than once in one command, and update its drift state more than once. Content reuse
+still works when old workload bytes reappear later on a new inode; this requirement applies only to
+cases configured at the same time.
+
 ### Single-variant entries
 
 Structure:
@@ -336,6 +385,7 @@ Structure:
 ```json
 {
   "benchmark": "2024-04",
+  "dedupe": "inode-content",
   "command": [
     "builds/{build}/{commit}",
     "bench",
@@ -398,6 +448,11 @@ Structure:
       }
     },
     {
+      "command": [
+        "builds/{build}/{commit}",
+        "bench",
+        "{threads}"
+      ],
       "config": {
         "build": [
           "generic"
@@ -405,6 +460,10 @@ Structure:
         "commit": [
           "abc1234",
           "def5678"
+        ],
+        "threads": [
+          "1",
+          "8"
         ]
       }
     }
@@ -416,6 +475,7 @@ Rules:
 
 - The top-level `config` must be omitted and each variant must supply its own `config` map.
 - Variant entries may override `command`, `input`, and `checksum`. When omitted, the system uses the top-level fallback.
+- Every variant must declare the same config keys; value subsets may differ.
 - At least one variant must be present, and their config products must be disjoint (the system rejects overlaps).
 
 ### Config specification
@@ -594,7 +654,7 @@ If present, the child process is pinned using a `pre_exec` hook that calls `sche
 * Particularly important for multithreaded benchmarks where thread placement affects performance
 * Can optionally be used to run the benchmark on dedicatecd cores (e.g. `isolcpus` kernel boot parameter)
 
-## 6.4 ASLR (Linux)
+## 6.5 ASLR (Linux)
 
 The `disable_aslr` host config option is optional and specifies whether to disable ASLR for the child process to reduce
 run-to-run variance.
@@ -883,78 +943,57 @@ TREND_CORRELATION_THRESHOLD`). Outlier counts are recorded but no longer trigger
 
 ---
 
-# 8. Run Series Summary and Storage Format
+# 8. Measurement Format
 
-Each benchmark run series produces:
+Each successful workload run series produces one immutable V2 measurement JSON followed by one
+SQLite transaction. The JSON contains identity and execution provenance in addition to the complete
+series described in section 7. V1 files are retained only for migrated measurements (Appendix A).
 
-1. **One immutable JSON file** (source of truth)
-2. **Database updates** (for fast queries)
+## 8.1 V2 measurement JSON
 
-## 8.1 Run Series JSON format
-
-Each timestamped run series file (e.g., `2025-11-12T18-53-21.json`) contains:
+The following is abridged; each `runs` entry uses the complete structure from section 7.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
+  "measurement_id": "0195f4c1-3a4b-7abc-8123-456789abcdef",
   "bench": "2015-04",
-  "config": {
-    "commit": "abc1234",
-    "host": "pi5",
-    "profile": "release",
-    "threads": "1"
+  "workload_sha256": "...",
+  "group_spec": {
+    "argv": ["bench", "2015", "04", "1"],
+    "checksum": "8f024a8e...",
+    "stats": { "...": "..." },
+    "semantics_version": 1
   },
-  "timestamp": 1731437601,
-  "runs": [
-    {
-      "timestamp": 1731437602,
-      "mean_ns_per_iter": 30920000,
-      "ci95_half_width_ns": 31000,
-      "mode": "per_iter",
-      "intercept_ns": null,
-      "outlier_count": 0,
-      "temporal_correlation": 0.03,
-      "samples": [
-        {
-          "iters": 10000000,
-          "total_ns": 30920000000
-        },
-        ...
-      ]
-    },
-    ...
-    // N runs total, sorted by mean_ns_per_iter
+  "executable_sha256": "...",
+  "stdin_sha256": "...",
+  "executed_case": { "commit": "abc1234", "threads": "1" },
+  "covered_cases": [
+    { "commit": "abc1234", "threads": "1" },
+    { "commit": "def5678", "threads": "1" }
   ],
-  "checksum": "8f024a8e..."
+  "timestamp": 1731437601,
+  "checksum": "8f024a8e...",
+  "runs": [{ "...": "..." }]
 }
 ```
 
-**Fields:**
+`measurement_id` is a time-sortable UUIDv7. Shared measurements include the full workload identity;
+isolated measurements omit `group_spec` and content hashes. `executed_case` and `covered_cases` are
+immutable execution provenance. Cases that inherit later are linked in SQLite and are not appended
+to the file.
 
-* `schema`: format version (currently 1)
-* `bench`: benchmark name/identifier (what to run)
-* `config`: JSON object with configuration dimensions (commit, host, profile, threads, etc.) - how to run it
-* `timestamp`: when this run series was performed (unix timestamp, seconds since epoch, start time)
-* `runs`: array of individual run results, **sorted by mean_ns_per_iter**
-    * Each run contains: `timestamp`, `mean_ns_per_iter`, `ci95_half_width_ns`, `mode`, `intercept_ns`, `outlier_count`,
-      `temporal_correlation`, `samples`
-* `checksum`: output correctness validation
+V2 files live at
+`results/{host}/runs/by-measurement/{shard-1}/{shard-2}/{measurement-id}.json`, with shards derived
+from random UUID bytes. V1 run-series JSON remains in place for migrated data but is not written for
+new measurements. Normal result and history queries use SQLite summaries rather than decoding raw
+JSON.
 
-**Display format:**
+The median run remains the representative display and drift value, for example:
 
-The result is displayed as:
-
+```text
+106.3 µs/iter ±0.4% (median of 3 run means)
 ```
-106.3 µs/iter (±0.4%, 95% CI, median of 3 run means)
-```
-
-or more compact:
-
-```
-106.3 µs/iter ±0.4%  (median of 3 run means)
-```
-
-**These JSON files are immutable** - once written, they are never modified. They are the authoritative source of truth.
 
 ---
 
@@ -962,214 +1001,122 @@ or more compact:
 
 ## 9.1 Dual Storage Model
 
-The system uses a **dual storage approach**:
+Each host uses two complementary stores:
 
-1. **Immutable JSON files** (source of truth): All raw run series data
-2. **SQLite database** (fast queries): Metadata and stable results
+1. **Immutable JSON files** contain raw runs, samples, workload identity, and execution provenance.
+2. **SQLite** indexes cases, workloads, measurements, current stable state, and case-visible history.
 
 ```text
 data/
-  config.json                       # Benchmark configuration (required at this location)
-  inputs/                           # Input files for benchmarks
-    2015-04.txt                     # Referenced by benchmark "input" field
-    2015-05.txt
-    ...
-  builds/                           # Example: compiled benchmark binaries (user-managed)
-    native/
-      abc1234                       # Executables referenced by commands
-      def5678
-    generic/
-      abc1234
-  results/                          # Benchmark results (auto-created by tool)
-    pi5/                            # One directory per host
-      metadata.db                   # SQLite database for this host
-      runs/                         # Immutable JSON files
-        2015-04/                    # Benchmark name (top-level organization)
-          commit=abc1234/
-            profile=release/
-              threads=1/
-                2025-11-12T18-53-21.json  # Timestamped run series files
-                2025-11-12T19-05-33.json
-              threads=32/
-                2025-11-13T09-22-10.json
-        2015-05/
-          commit=def5678/
-            profile=debug/
-              threads=1/
-                2025-11-13T10-15-00.json
+  config.json
+  inputs/
+  builds/
+  results/
+    pi5/
+      metadata.db
+      runs/
+        by-measurement/<h1>/<h2>/<measurement-id>.json
+        <benchmark>/<key=value>/.../<timestamp>.json  # migrated V1 files
 ```
 
-**Path encoding rules:**
+V2 paths are reconstructed from `measurement_id`; V1 paths are reconstructed from benchmark,
+hostless config, and timestamp. Paths are never stored in SQLite, so databases remain relocatable and
+cross-host reads resolve files under the reader's live data root.
 
-* Benchmark directory: The `bench` value becomes a top-level directory under `runs/`
-    - Example: `{"bench":"2015-04", ...}` → `runs/2015-04/`
-    - Organizes samples by benchmark first, making it easy to find all configs for a given benchmark
-    - Character constraints (documented in section 2) ensure filesystem safety
-* Config subdirectories: One directory per `key=value` pair (without the `bench` key and `host` key), nested in
-  canonical key order
-    - Keys are sorted alphabetically (same as canonical JSON ordering)
-    - Format: `runs/{bench}/key1=value1/key2=value2/.../{timestamp}.json`
-    - The `host` key is excluded since it's represented by the top-level host directory
-    - Example: `{"bench":"2015-04","commit":"abc1234","host":"silicon","profile":"release","threads":"1"}` →
-      `runs/2015-04/commit=abc1234/profile=release/threads=1/{timestamp}.json`
-    - Human-readable and easy to glob for specific dimensions (`runs/*/commit=abc1234/**`)
-    - Using per-key directories allows more key-value pairs to be stored compared to packing the config into a single
-      directory name, as most filesystems limit a single name to ~255 bytes, while the limit for total path length is
-      typically higher.
+JSON is written before its database metadata. A database failure may leave an unindexed JSON file,
+but a committed database row never points to an unwritten file. There is currently no automatic
+JSON-to-database rebuild, and JSON alone cannot recover inherited case links or stable/drift state;
+normal verified database backups remain required.
 
-* Timestamps in filenames: ISO 8601 compact format with hyphens (e.g., `2025-11-12T18-53-21`) for human readability
-* Timestamps in database/JSON: Unix timestamps (64-bit integer seconds since epoch) for efficiency
-
-**Host-level organization:**
-
-* Each host has its own directory under `data/results/` (e.g., `data/results/silicon/`)
-* The `host` key is still part of the config JSON for consistency
-* Physical separation by host enables independent environment tracking per machine
+SQLite uses WAL mode, `synchronous=NORMAL`, foreign keys, a 30-second busy timeout, and one persistent
+connection per `HybridDiskStorage`. The benchmark lock prevents concurrent writers, and each
+measurement update uses one immediate transaction.
 
 ## 9.2 SQLite Schema
 
-Each host has its own `metadata.db` with two core tables:
+Each host's `metadata.db` has four normalized tables:
 
-**`run_series`**: One row per run series (collection of runs)
+| Table | Role |
+| --- | --- |
+| `cases` | One row per `(benchmark, canonical hostless config)` and its current `workload_id` |
+| `workloads` | Durable shared/isolated identity plus stable/last measurement pointers and drift counters |
+| `measurements` | One row per workload run series, with timestamp, V1/V2 schema version, checksum, and median-run summary |
+| `measurement_cases` | Append-only case-visible measurement history |
 
-- Primary key: `(bench, config, timestamp)` where bench is the benchmark name and config is the JSON (excluding bench)
-- Stores: bench, config (JSON), timestamp, mean_ns_per_iter, ci95_half_width_ns
-    - All statistical values are from the **median run** of the series
-- Immutable: rows are never updated after insertion
-- Links to: JSON file at `runs/{bench}/{key1=val1/...}/{timestamp}.json` where keys/values follow canonical order
-  key=value format (excluding `bench` and `host`)
-- `WITHOUT ROWID` table for efficiency
+Important invariants:
 
-**`results`**: One row per (bench, config) pair
+* `workload_sha256` is unique. A hash hit is accepted only after the stored benchmark, executable
+  digest, stdin digest, and complete group spec match.
+* Shared workloads have an executable digest; isolated workloads have neither executable nor stdin
+  digests. Stdin can be present only for a shared workload.
+* Stable and last pointers are either both null or both point to measurements belonging to that
+  workload.
+* A case changes workload only inside the transaction that records or inherits a valid measured
+  workload. Previous `measurement_cases` history is never deleted.
+* Commit ordering comes from `config_keys.commit.values`, not the database.
 
-- Primary key: `(bench, config)`
-- Stores: which run series is the stable result, which run series is the most recent
-- Fields: bench, config, stable_series_timestamp, last_series_timestamp, matched_count, suspicious_count, replaced_count
-- Mutable: updated as new run series arrive and drift is detected
-- Generated virtual columns: `commit`, `host` (extracted from config JSON for fast filtering)
-- Partial indexes on generated columns for fast filtering
-
-**Commit ordering**: Commit relationships and ordering are defined in the configuration file (section 4), not in the
-database. The config file's `config_keys.commit.values` array defines the canonical commit order, which can be used for
-timeline views and commit-based queries
-
-**Critical rule: Always write JSON before updating the database.**
-
-**Why this ordering:**
-
-- JSON files are the source of truth
-- If DB write fails, JSON exists and can be re-indexed
-- If process crashes after JSON write but before DB commit, recovery can scan for unindexed JSONs
-- Never have DB entries pointing to non-existent JSON files
-
-**SQLite transaction semantics:**
-
-- Use `BEGIN IMMEDIATE` to acquire write lock upfront
-- Set `journal_mode=WAL` for better concurrency (multiple readers during write)
-- Set `synchronous=NORMAL` for durability with good performance
-- Each run storage is one transaction (atomic all-or-nothing)
+Migration 03 creates this schema and copies V1 `results`/`run_series` rows into isolated workloads
+inside the same transaction. Migration 04 drops those V1 metadata tables. V1 JSON stays in its
+reconstructible path for future recovery or reanalysis tooling.
 
 ## 9.3 Stable result update detection
 
-When a new run series arrives for a `config`:
+Stable/drift state is updated once per workload measurement:
 
-1. Query the `results` table for this config (exact match on canonical JSON).
+1. The first measurement becomes both stable and last.
+2. Every later measurement becomes last and is compared with the stable measurement using median-run
+   confidence intervals and relative mean difference.
+3. Overlapping intervals or a difference below 3% count as a match: increment `matched_count` and
+   reset `suspicious_count`.
+4. A non-overlapping difference of at least 3% increments `suspicious_count`. The third consecutive
+   suspicious measurement becomes stable, resets matched/suspicious counts, and increments
+   `replaced_count`.
+5. `--force-update-stable` promotes the new measurement immediately.
 
-2. If no row exists (first run series for this config):
-    * This run series becomes both the stable and last run series
-    * Insert into `run_series` table with median run values
-    * Insert into `results` table with `config`, `stable_series_timestamp = last_series_timestamp = timestamp`
-    * Done
+Because this state belongs to a workload, a binary or invocation change creates independent drift
+state. Measurements of W2 are never compared with W1 merely because the same case moved between
+them.
 
-3. Otherwise, load the stable result from the `results` table and compare using **median run values**:
+## 9.4 Workload sharing and inheritance
 
-   ```text
-   μ_stable = stable_run.median_run_mean_ns   (median mean from stable series)
-   h_stable = stable_run.median_run_ci95_half_ns  (CI from median run of stable series)
-   μ_new = new_series.median_run_mean_ns      (median mean from new series)
-   h_new = new_series.median_run_ci95_half_ns (CI from median run of new series)
+Suppose cases A and B have different configs but currently resolve to the same hardlinked executable
+and the same invocation spec:
 
-   CI_stable = [μ_stable - h_stable, μ_stable + h_stable]
-   CI_new = [μ_new - h_new, μ_new + h_new]
+```text
+selected group [A, B] --hash--> workload W1 --run--> measurement M1
 
-   overlap = not (CI_stable[1] < CI_new[0] or CI_new[1] < CI_stable[0])
-   rel_diff = |μ_new - μ_stable| / μ_stable
-   ```
+cases:              A -> W1, B -> W1
+workload state:     W1 stable=M1, last=M1
+visible history:    M1 -> [A, B]
+JSON provenance:    M1 covered_cases=[A, B]
+```
 
-4. Check if this run series is suspicious:
+Now the config adds C, which resolves to another hardlink to the same executable and has the same
+invocation spec. The next command forms the inode group `[A, B, C]`; it classifies as new because C
+has no recorded workload, then hashes to W1 and inherits it without re-running the workload:
 
-   ```text
-   const STABLE_RESULT_CHANGE_REL_THRESHOLD = 0.03  // 3% difference
-   const STABLE_RESULT_CHANGE_REQUIRED_COUNT = 3    // consecutive suspicious run series
+```text
+cases:              A -> W1, B -> W1, C -> W1
+visible history:    M1 -> [A, B, C]
+JSON provenance:    M1 covered_cases=[A, B]  # immutable; C inherited later
+```
 
-   is_suspicious = (not overlap) and (rel_diff >= STABLE_RESULT_CHANGE_REL_THRESHOLD)
-   ```
+Inheritance adds W1's current stable and latest measurements to C's visible history (one row when
+they are the same) but does not backfill older measurements. Historical measurement rows retain
+their workload and binary identity; JSON `covered_cases` distinguishes direct execution coverage
+from later inheritance.
 
-5. Update suspicious series counter:
+If `[A, B, C]` is deliberately rerun, the new M2 is linked to every case in the group:
 
-    * If `is_suspicious`:
-        * `suspicious_count += 1`
-    * Else:
-        * `suspicious_count = 0`
-        * `matched_count += 1`
+```text
+visible history:    M1 -> [A, B, C], M2 -> [A, B, C]
+JSON provenance:    M2 covered_cases=[A, B, C]
+```
 
-6. If `suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT`:
-
-   **Replace the stable result** (environment has changed):
-
-    * Insert new run series into `run_series` table (using median run values)
-    * Update `results` table: set `stable_series_timestamp = timestamp`, `last_series_timestamp = timestamp`, reset
-      `matched_count = 0`, `suspicious_count = 0`, increment `replaced_count`
-
-7. Otherwise (stable result unchanged):
-
-    * Insert new run series into `run_series` table (using median run values)
-    * Update `results` table: set `last_series_timestamp = timestamp`, update `suspicious_count`
-    * Stable result remains unchanged
-
-**Key insights:**
-
-- Each unique (benchmark, config) tracks its own stable result independently
-- All run series are kept for historical analysis (full run series JSON files on disk)
-- The "current" result shown to users is **always** the stable run series (specifically, the median run from it)
-- The **median run** from each series is used as the representative value for drift detection
-- Re-running within noise doesn't change the displayed result (no microscopic drift)
-- Users can override with `--force-update-stable` if needed
-- One *series* counts as one "run" in the suspicious result counting logic
-
-## 9.4 Database Recovery
-
-The database can always be rebuilt from run series JSON files and the config file if corrupted.
-
-On startup, if the database is corrupted or missing, the system will attempt to rebuild it from the JSON files.
-
-**Algorithm:**
-
-1. Delete or backup corrupted `metadata.db`
-2. Create new database apply migrations
-3. Scan `runs/` directory recursively for all JSON files
-4. For each JSON file:
-    * Parse and validate (check for `schema` version 1)
-    * Extract the median run values
-    * Insert into `run_series` table
-5. For each unique config (exact canonical JSON match):
-    * Find all run series sorted by timestamp
-    * Use latest run series as both stable and last run series
-    * Insert into `results` table with `suspicious_count = 0`, `matched_count = 0`, `replaced_count = 0`
-
-**What is lost in recovery:**
-
-- Suspicious counts (partial state toward next stable update)
-- Matched and replacement counts
-- Original stable result designations (assumes latest = stable)
-
-Note: Full history is preserved in the timestamped JSON files themselves.
-
-**What is preserved:**
-
-- All raw run series data (from JSON files, including all individual runs)
-- All statistics and measurements (median values and individual run values)
-- Complete temporal history
+If rebuilding replaces A/B's paths with hardlinks to a new executable while C retains the old
+artifact, that change is noticed only when the A/B group is selected and hashed. The execution
+records a distinct W2 and moves A/B to it; C remains on W1. W2 starts independent stable/drift state
+unless that exact workload was already measured.
 
 ---
 
@@ -1195,57 +1142,46 @@ The system must handle errors gracefully and fail safely. Here are the specified
 
 * **Disk full / write error**: Fail loudly, do not corrupt existing data.
 * **Missing directories**: Create automatically (with proper error handling).
-* **Corrupted database**: Fail loudly, do not corrupt existing data. Database can be rebuilt manually.
-* **Corrupted run JSON**: Fail loudly, skip that file during rebuild.
+* **Corrupted database**: Fail loudly and restore a verified backup; no automatic rebuild is implemented.
+* **Corrupted measurement JSON**: Fail loudly when the measurement is read.
 * **Database locked**: SQLite will automatically wait up to `busy_timeout` (default 30s), then fail with SQLITE_BUSY.
 
 # 11. Schedulers and Workflows
 
-## 11.1 Per-commit benchmarking
+Both run commands first build `RunGroup`s. Shared benchmarks resolve all in-scope cases and group
+hardlinks with the same invocation spec before applying limits. Isolated benchmarks contribute one
+lazy group per case. A config filter makes a group eligible when any member matches; processing a
+selected shared group still covers every member.
 
-Typical workflow (for AoC):
+For `inode-content`, both schedulers rely on the layout contract above: they do not hash every
+current artifact or coalesce byte-identical files on different inodes before applying limits.
 
-1. You commit new code.
+## 11.1 Periodic `run`
 
-2. You build your AoC benchmark runner and regenerate the benchmark config.
+`run` classifies groups without reading executable or stdin bytes:
 
-3. You run:
+* A shared group is **new** if a case has no recorded workload, members disagree on their workload,
+  the association is isolated, or the current group spec differs from the recorded workload.
+* Otherwise it is a **rerun**, ordered by the workload's last measurement time.
+* An isolated case is new without a recorded workload and otherwise a rerun.
 
-   ```bash
-   # run all matching configs for a benchmark
-   aoc-bench run-all 2015-04 --config commit=abc123,threads=1
+Groups are shuffled before the read transaction, and the first `--new-limit` new classifications are
+retained. A bounded max-heap retains only the oldest `--rerun-limit` reruns; preserving global
+oldest-first semantics requires scanning every eligible group when reruns are requested. Only
+selected shared groups are content-hashed. A reuse completes its selected new-group slot; the
+scheduler does not select a replacement.
 
-   # run all configs for a benchmark
-   aoc-bench run-all 2015-04
-   
-   # run all benchmarks
-   aoc-bench run-all
-   ```
+New selections allow reuse: an exact measured workload is inherited without re-running the workload.
+Deliberate rerun selections always execute and update that workload's drift state. Because
+classification is content-free, changing a binary on disk does not itself move a previously recorded
+group into the new pool; the change is discovered when the group is selected as a rerun and hashed.
 
-The `aoc-bench run-all` command:
+## 11.2 `run-all`
 
-- Reads the benchmark definition from the configuration file
-- Finds the `command` template for the specified benchmark
-- For each matching configuration (the `--config` options allow for partial matches):
-    - Substitutes `{key}` placeholders in the command with values from the config (config values are validated to match
-      `[a-zA-Z0-9_-]+` ensuring safe substitution without escaping)
-    - Spawns the resulting command as a child process
-    - Reads SAMPLE lines from the child process's stdout
-    - Applies the statistics engine to produce run statistics
-    - Repeats multiple times to produce a run series, and stores results
-    - If the command/run errors, it is automatically retried up to 5 times
-
-## 11.2 Periodic runs (to detect env drift per config)
-
-Each host should periodically (e.g. nightly) run **a subset of configs** using the `aoc-bench run` command, which:
-
-* Chooses some (bench, config) pairs to run. These are selected from pairs without existing results, and the results
-  table entries with the oldest `last_series_timestamp`.
-* Runs them similarly to the `run-all` command (see above).
-* Stable result logic will automatically update if the environment has changed enough for that config.
-* The median-of-means approach makes these drift checks more robust to transient noise.
-
-Over time, you can detect environment changes by seeing when stable results update across multiple configs.
+`run-all` selects every eligible group with deliberate-run intent. It never uses an existing
+measurement to suppress execution. Hardlinked shared cases still form one group and therefore one
+workload execution; isolated cases execute separately. Process failures are retried up to five times,
+except timeouts, and `run-all` fails fast when a group cannot be resolved or processed.
 
 ---
 
@@ -1267,10 +1203,10 @@ Benchmark configurations use a key-value system:
 
 * Configs are specified as comma-separated key=value pairs, e.g., `profile=release,threads=1`,
   `profile=dev,threads=32,simd=avx2`
-* Keys and values are alphanumeric with underscores only
+* Keys are lowercase alphanumeric with underscores; values may also contain uppercase letters and hyphens
 * Configs must be canonically sorted by key (alphabetically) for consistent storage and comparison
-* Different configurations have their own independent stable results for each commit
-* All stored in the same database, distinguished by the `config` column
+* Configurations remain distinct cases even when several cases share one workload and stable result
+* Cases are stored in the same host database with canonical hostless config JSON
 * Partial matching is supported: you can query with a subset of keys (e.g., `profile=release`) to compare all configs
   that match those key-value pairs
 
@@ -1302,8 +1238,8 @@ aoc-bench export --host silicon --config commit=abc1234,profile=release,threads=
 The `export` command outputs TSV suitable for plotting:
 
 ```text
-host    bench   cfg_commit  cfg_profile cfg_threads     stable_timestamp  median_run_mean_ns  median_run_ci95_half_ns
-abc1234 2015-04 abc1234     release     1               1731437601        30930000          30000
+host    bench   cfg_commit  cfg_profile cfg_threads  stable_timestamp  stable_measurement_id                 median_run_mean_ns  median_run_ci95_half_ns
+silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-3a4b-7abc-8123-456789abcdef  30930000            30000
 ...
 ```
 
@@ -1410,20 +1346,24 @@ The web UI is a static SPA that loads exported snapshot JSON from `aoc-bench exp
     - Compare two values of a selected config key
     - Group regressions, improvements, and unchanged results with threshold control
 
+Web export schema 2 records the config keys used by each benchmark and encodes configs in a
+benchmark-local index space. Within one host snapshot, equal positive measurement tokens mean two
+rows display the exact same shared measurement; zero identifies isolated measurements. Timeline
+merges only contiguous rows with the same positive token and matching metrics/fixed config.
+
 ---
 
 # 14. Extensibility / Future Ideas
 
 These are *not* required now, but the design leaves room for them:
 
-* Add **inner and outer CIs** (per-run noise vs across-runs variability). The run series JSON already contains all
+* Add **inner and outer CIs** (per-run noise vs across-runs variability). Measurement JSON contains all
   individual runs, making this analysis possible.
 * **Variance analysis across runs**: Use the stored individual runs in each series to compute cross-run variance
   metrics.
 * Use **daily roll-ups** for heavy usage (materialized views in database).
-* Extend the **web UI** with additional time-series and analysis views.
-* **Multi-host aggregation**: Collect databases from multiple hosts for cross-machine comparison.
-* **Automatic re-run scheduling**: Cron job that re-runs old commits to detect drift.
+* Add richer workload/artifact diagnostics to the web UI if equality-only measurement tokens prove
+  insufficient.
 
 ---
 
@@ -1441,13 +1381,47 @@ This design gives you:
     * Uses median-of-means to eliminate run-to-run variance (ASLR, cache state, etc.)
     * Stores all runs for later analysis and variance detection
 * A **dual storage architecture**:
-    * Immutable JSON files (source of truth, all raw data including all runs in each series)
-    * SQLite database per host (fast queries, stable result tracking using median of means)
-    * JSON-first writes ensure recoverability
-* A **per-config stable result system** to handle **environment changes** without environment hashing:
-    * Each unique config tracks its own stable result independently.
-    * If new run series are "too different" (3 consecutive, non-overlapping CIs + % threshold), update the stable
-      result.
-    * All run series are kept for historical analysis.
-    * Database corruption is recoverable by rebuilding from JSON files.
+    * Immutable versioned JSON with raw runs, samples, identity, and execution provenance
+    * Normalized SQLite tables for cases, workloads, measurements, history, and stable state
+    * JSON-first writes ensure committed rows never point to unwritten files
+* A **workload identity system** that:
+    * Groups safe hardlinked cases before limits and reuses byte-identical measured workloads
+    * Keeps isolated benchmarks case-specific
+    * Preserves the workload and measurement behind each case-visible historical result
+* A **per-workload stable result system** for environment drift:
+    * Measurements within noise retain the stable pointer
+    * Three consecutive significant changes replace it
+    * Binary or invocation identity changes start independent drift state
 * **Simple querying**: SQL for ad-hoc queries, CLI tools for common operations, easy export for visualization.
+
+---
+
+# Appendix A: V1 Storage and Migration
+
+V1 stored each logical case independently. Its immutable JSON contained `schema: 1`, benchmark,
+config, timestamp, checksum, and runs. Files used the human-readable path
+`runs/{benchmark}/{key=value}/.../{timestamp}.json`. SQLite duplicated each file's median-run summary
+in `run_series`, while `results` held that case's stable/latest timestamps and drift counters.
+
+| Concern | V1 | V2 |
+| --- | --- | --- |
+| Recorded unit | One case run series | One workload measurement covering one or more cases |
+| Durable identity | Benchmark + config + timestamp | Measurement UUID and complete workload identity |
+| JSON path | Benchmark/config/timestamp | UUID random-tail shards |
+| Mutable state | Per case in `results` | Per workload in `workloads` |
+| Case history | Implied by V1 run-series ownership | Explicit `measurement_cases` links |
+| Sharing | None | Shared workloads with executable/stdin content hashes |
+
+Migration 03 converts V1 metadata transactionally:
+
+1. Each V1 `(benchmark, config)` becomes a `case` and a case-specific isolated workload.
+2. Each `run_series` row becomes a `measurements` row with `schema_version = 1` and a deterministic
+   UUIDv7 using the recorded timestamp and a hash of the benchmark and canonical `key=value` config.
+3. The measurement is linked to its original case, and stable/latest pointers and counters are copied
+   from `results` onto the isolated workload.
+4. After that transaction commits, migration 04 drops `run_series` and `results`. V1 JSON remains in
+   its reconstructible path; current result and history queries use the migrated SQLite summaries.
+
+Migration cannot infer historical executable or stdin content, so V1 workloads remain isolated. If
+a dedupe-enabled group is later selected, current content hashing may move its cases to a measured
+shared workload or record a new one; the original V1 measurements remain in case-visible history.

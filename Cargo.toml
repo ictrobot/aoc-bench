@@ -20,10 +20,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2.0"
 ahash = "0.8"
 tempfile = "3.23.0"
-which = "8.0.0"
 hostname = "0.4"
 once_cell = { version = "1.21.3" }
 sha2 = "0.10"
+uuid = { version = "1", features = ["v7"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

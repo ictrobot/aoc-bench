@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Benchmark, BenchmarkId, BenchmarkVariant, ConfigError, ConfigFile, ConfigProduct, Key,
-    KeyValuesSubset,
+    Benchmark, BenchmarkId, BenchmarkVariant, ConfigError, ConfigFile, ConfigProduct,
+    DedupeStrategy, Key, KeyValuesSubset,
 };
 use crate::stats::StatsOptions;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -96,6 +96,8 @@ struct BenchmarkDef<'a> {
     config: Option<HashMap<&'a str, ConfigSpec<'a>>>,
     #[serde(borrow, default)]
     variants: Option<Vec<BenchmarkVariantDef<'a>>>,
+    #[serde(borrow, default)]
+    dedupe: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -197,15 +199,29 @@ fn parse_benchmarks<'a>(
             .map(|name| resolve_input_path(data_dir, name))
             .transpose()?;
 
+        let dedupe = bench_def
+            .dedupe
+            .map(|name| {
+                DedupeStrategy::from_name(name).ok_or_else(|| ConfigError::UnknownDedupeStrategy {
+                    benchmark: benchmark_id.to_string(),
+                    strategy: name.to_string(),
+                })
+            })
+            .transpose()?;
+
         let benchmark = match (bench_def.config, bench_def.command, bench_def.variants) {
             // Single benchmark
-            (Some(config), Some(command), None) => Benchmark::new(
-                benchmark_id,
-                build_config_product(key_lookup, config)?,
-                command.into_iter().map(Cow::into_owned).collect::<Vec<_>>(),
-                base_input,
-                bench_def.checksum.map(str::to_string),
-                bench_stats,
+            (Some(config), Some(command), None) => Benchmark::new_with_variants(
+                benchmark_id.clone(),
+                vec![BenchmarkVariant::new(
+                    benchmark_id,
+                    build_config_product(key_lookup, config)?,
+                    command.into_iter().map(Cow::into_owned).collect::<Vec<_>>(),
+                    base_input,
+                    bench_def.checksum.map(str::to_string),
+                    bench_stats,
+                )?],
+                dedupe,
             )?,
             // Multi benchmark
             (None, base_command, Some(variants)) => Benchmark::new_with_variants(
@@ -234,6 +250,7 @@ fn parse_benchmarks<'a>(
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?,
+                dedupe,
             )?,
             _ => {
                 return Err(ConfigError::InvalidBenchmarkOptions(

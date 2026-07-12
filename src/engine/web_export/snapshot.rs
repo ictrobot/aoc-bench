@@ -12,7 +12,7 @@ use std::path::Path;
 use tempfile::{Builder, NamedTempFile, TempDir};
 use tracing::info;
 
-const WEB_INDEX_SCHEMA_VERSION: u32 = 1;
+const WEB_INDEX_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct WebSnapshotExport {
@@ -144,6 +144,13 @@ fn write_snapshot_payload(
         let host_config = HostConfig::load(config_file.data_dir(), host_name)?;
         data.index.description = host_config.description;
 
+        // Host metadata participates in snapshot identity even though it is embedded in the
+        // top-level index rather than written inside the snapshot directory.
+        manifest_entries.push(json_manifest_entry(
+            &format!("{host_name}/host-index.json"),
+            &data.index,
+        )?);
+
         host_index_map.insert(host_name.clone(), data.index);
     }
 
@@ -265,6 +272,18 @@ fn write_json_hashed<T: Serialize>(
     })
 }
 
+fn json_manifest_entry<T: Serialize>(
+    relative_path: &str,
+    data: &T,
+) -> Result<SnapshotManifestEntry, WebSnapshotExportError> {
+    let json = serde_json::to_vec(data).map_err(WebSnapshotExportError::Json)?;
+    Ok(SnapshotManifestEntry {
+        path: relative_path.to_string(),
+        file_size: json.len() as u64,
+        file_hash_sha256: hash_bytes_sha256(&json),
+    })
+}
+
 fn snapshot_id_from_manifest(
     entries: &[SnapshotManifestEntry],
 ) -> Result<String, WebSnapshotExportError> {
@@ -321,7 +340,7 @@ mod tests {
     use crate::config::ConfigFile;
     use crate::run::Run;
     use crate::stats::{EstimationMode, Sample, StatsResult};
-    use crate::storage::{HybridDiskStorage, ResultsRow, Storage};
+    use crate::storage::{HybridDiskStorage, ResultsRow};
     use jiff::Timestamp;
 
     fn setup_storage(host: &str) -> (TempDir, ConfigFile, HybridDiskStorage) {
@@ -381,24 +400,19 @@ mod tests {
     }
 
     fn insert(storage: &HybridDiskStorage, series: &crate::run::RunSeries) {
-        storage.write_run_series_json(series.clone()).unwrap();
-        storage
-            .write_transaction(|tx| {
-                storage.insert_run_series(tx, series)?;
-                storage.upsert_results(
-                    tx,
-                    &ResultsRow {
-                        bench: series.bench.clone(),
-                        config: series.config.clone(),
-                        stable_series_timestamp: series.timestamp,
-                        last_series_timestamp: series.timestamp,
-                        suspicious_count: 0,
-                        matched_count: 0,
-                        replaced_count: 0,
-                    },
-                )
-            })
-            .unwrap();
+        crate::storage::seed_measurement(storage, series);
+        crate::storage::seed_result(
+            storage,
+            &ResultsRow {
+                bench: series.bench.clone(),
+                config: series.config.clone(),
+                stable_measurement_timestamp: series.timestamp,
+                last_measurement_timestamp: series.timestamp,
+                suspicious_count: 0,
+                matched_count: 0,
+                replaced_count: 0,
+            },
+        );
     }
 
     #[test]

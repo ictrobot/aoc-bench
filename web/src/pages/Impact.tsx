@@ -95,6 +95,12 @@ function ImpactContent({ host }: { host: string }) {
       const fromResult = fromMap.get(key)
       if (!fromResult) continue
 
+      // The same positive token is the exact same shared measurement, not merely equal metrics.
+      if (toResult.measurement_token !== 0 && toResult.measurement_token === fromResult.measurement_token) {
+        unchanged++
+        continue
+      }
+
       const relChange = relativeChange(toResult.mean_ns, fromResult.mean_ns)
       if (relChange === null) continue
 

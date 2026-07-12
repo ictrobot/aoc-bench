@@ -32,8 +32,8 @@ function makeHostIndex(resultsPath: string): HostIndex {
       input: { values: ["small"] },
     },
     benchmarks: [
-      { name: BENCH, result_count: 1 },
-      { name: BENCH_2, result_count: 1 },
+      { name: BENCH, result_count: 1, config_keys: [0, 1] },
+      { name: BENCH_2, result_count: 1, config_keys: [0, 1] },
     ],
     timeline_key: "compiler",
     results_path: resultsPath,
@@ -43,7 +43,7 @@ function makeHostIndex(resultsPath: string): HostIndex {
 
 function makeIndex(snapshotId: string, hostIndex: HostIndex): GlobalIndex {
   return {
-    schema_version: 1,
+    schema_version: 2,
     snapshot_id: snapshotId,
     hosts: { [HOST]: hostIndex },
   }
@@ -81,11 +81,12 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: IndexedResults = { results: [[0, 0, 100, 5]] }
+    const rawData: IndexedResults = { results: [[0, 0, 0, 100, 5]] }
     const decoded = [
       {
         bench: BENCH,
         config: { compiler: "stable", input: "small" },
+        measurement_token: 0,
         mean_ns: 100,
         ci95_half_ns: 5,
       },
@@ -113,8 +114,8 @@ describe("useBenchmarkResults", () => {
     const hostIndexB = makeHostIndex("results-b.json")
     const indexA = makeIndex("snapshot-a", hostIndexA)
     const indexB = makeIndex("snapshot-b", hostIndexB)
-    const rawDataA: IndexedResults = { results: [[0, 0, 111, 3]] }
-    const rawDataB: IndexedResults = { results: [[0, 0, 222, 7]] }
+    const rawDataA: IndexedResults = { results: [[0, 0, 0, 111, 3]] }
+    const rawDataB: IndexedResults = { results: [[0, 0, 0, 222, 7]] }
 
     mockLoadIndex.mockResolvedValueOnce(indexA).mockResolvedValueOnce(indexB)
     mockLoadResults.mockResolvedValueOnce(rawDataA).mockResolvedValueOnce(rawDataB)
@@ -122,8 +123,9 @@ describe("useBenchmarkResults", () => {
       {
         bench,
         config: { source: index.results_path },
-        mean_ns: data.results[0][2],
-        ci95_half_ns: data.results[0][3],
+        measurement_token: 0,
+        mean_ns: data.results[0][3],
+        ci95_half_ns: data.results[0][4],
       },
     ])
 
@@ -149,11 +151,12 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: IndexedResults = { results: [[0, 0, 333, 2]] }
+    const rawData: IndexedResults = { results: [[0, 0, 0, 333, 2]] }
     const decoded = [
       {
         bench: BENCH,
         config: { compiler: "stable", input: "small" },
+        measurement_token: 0,
         mean_ns: 333,
         ci95_half_ns: 2,
       },
@@ -201,7 +204,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: IndexedResults = { results: [[0, 0, 100, 5]] }
+    const rawData: IndexedResults = { results: [[0, 0, 0, 100, 5]] }
 
     mockLoadIndex.mockResolvedValue(index)
     mockLoadResults.mockResolvedValue(rawData)
@@ -209,6 +212,7 @@ describe("useBenchmarkResults", () => {
       {
         bench,
         config: { compiler: "stable", input: "small" },
+        measurement_token: 0,
         mean_ns: bench === BENCH ? 100 : 200,
         ci95_half_ns: 5,
       },
@@ -236,7 +240,7 @@ describe("useBenchmarkHistory", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawHistory: IndexedHistory = { series: [[0, 1_000, 100, 5, 10]] }
+    const rawHistory: IndexedHistory = { series: [[0, 0, 1_000, 100, 5, 10]] }
 
     const configA = { compiler: "stable", input: "small" }
     const configB = { compiler: "stable", input: "large" }
@@ -244,9 +248,10 @@ describe("useBenchmarkHistory", () => {
 
     mockLoadIndex.mockResolvedValue(index)
     mockLoadHistory.mockResolvedValue(rawHistory)
-    mockDecodeHistory.mockImplementation((_index, _data, config) => [
+    mockDecodeHistory.mockImplementation((_index, _data, _bench, config) => [
       {
         config: { ...config },
+        measurement_token: 0,
         timestamp: config.input === "small" ? 1_000 : 2_000,
         median_run_mean_ns: config.input === "small" ? 100 : 200,
         median_run_ci95_half_ns: 5,
@@ -274,6 +279,6 @@ describe("useBenchmarkHistory", () => {
 
     expect(mockLoadHistory).toHaveBeenCalledTimes(1)
     expect(mockDecodeHistory).toHaveBeenCalledTimes(2)
-    expect(mockDecodeHistory.mock.calls.map((call) => call[2])).toEqual([configA, configB])
+    expect(mockDecodeHistory.mock.calls.map((call) => call[3])).toEqual([configA, configB])
   })
 })

@@ -1,6 +1,7 @@
 // Runner: process spawning, SAMPLE collection, run series execution
 
 use crate::config::{BenchmarkId, BenchmarkVariant, Config};
+use crate::group::{GroupError, HashedArtifacts, ResolvedCase, resolve_case};
 use crate::host_config::{CpuAffinity, HostConfig};
 use crate::protocol::{
     ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
@@ -8,11 +9,11 @@ use crate::protocol::{
 use crate::run::{Run, RunSeries};
 use crate::stats::{StatsAccumulator, StatsError, StatsOptions, StatsState};
 use jiff::Timestamp;
+use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
-use std::{fs, io};
 use tempfile::TempDir;
 use tracing::{Span, info, info_span, trace, trace_span, warn};
 
@@ -23,7 +24,7 @@ const MAX_RETRIES: usize = 5; // Maximum retries on failure
 
 #[derive(Debug, Clone)]
 pub struct Runner {
-    executable: which::CanonicalPath,
+    executable: PathBuf,
     args: Vec<String>,
     expected_checksum: Option<String>,
     stdin_input: Option<Vec<u8>>,
@@ -40,34 +41,52 @@ impl Runner {
         config: Config,
         host_config: HostConfig,
     ) -> Result<Self, RunError> {
-        let mut args = config.expand_templates(benchmark.command_template())?;
+        let resolved = resolve_case(data_dir, benchmark, &config)?;
+        Self::from_resolved(&resolved, config, host_config)
+    }
 
-        let executable = args.remove(0);
-        let executable =
-            which::CanonicalPath::new_in(&executable, std::env::var_os("PATH"), data_dir)
-                .map_err(|error| RunError::ExecutableNotFound { executable, error })?;
+    /// Prepare an isolated resolved case for execution by reading its asserted stdin file.
+    ///
+    /// `config` is the config recorded on the produced [`RunSeries`] (typically the resolved case's
+    /// hostless config).
+    pub fn from_resolved(
+        resolved: &ResolvedCase,
+        config: Config,
+        host_config: HostConfig,
+    ) -> Result<Self, RunError> {
+        let stdin_input = resolved.read_stdin()?;
+        Ok(Self::build(resolved, stdin_input, config, host_config))
+    }
 
-        let stdin_input = if let Some(path) = benchmark.input() {
-            Some(
-                fs::read(path).map_err(|error| RunError::ReadingInputFailed {
-                    path: path.into(),
-                    error,
-                })?,
-            )
-        } else {
-            None
-        };
+    /// Construct a shared-workload runner from the exact stdin bytes hashed for its identity.
+    #[must_use]
+    pub fn from_hashed(
+        resolved: &ResolvedCase,
+        artifacts: HashedArtifacts,
+        config: Config,
+        host_config: HostConfig,
+    ) -> Self {
+        let stdin_input = artifacts.into_stdin_input();
+        Self::build(resolved, stdin_input, config, host_config)
+    }
 
-        Ok(Runner {
-            executable,
-            args,
-            expected_checksum: benchmark.checksum().map(str::to_string),
+    fn build(
+        resolved: &ResolvedCase,
+        stdin_input: Option<Vec<u8>>,
+        config: Config,
+        host_config: HostConfig,
+    ) -> Self {
+        assert_eq!(resolved.stdin_path.is_some(), stdin_input.is_some());
+        Runner {
+            executable: resolved.executable.clone(),
+            args: resolved.group_spec.argv.clone(),
+            expected_checksum: resolved.group_spec.checksum.clone(),
             stdin_input,
-            benchmark_id: benchmark.benchmark_id().clone(),
+            benchmark_id: resolved.benchmark.clone(),
             benchmark_config: config,
             host_config,
-            stats: benchmark.stats_options(),
-        })
+            stats: resolved.group_spec.stats,
+        }
     }
 
     /// Execute a complete run series (fixed 3 runs) with no retries on timeout
@@ -331,20 +350,8 @@ impl Runner {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    #[error("failed to build command from config: {0}")]
-    ConfigError(#[from] crate::config::ConfigError),
-    #[error("failed to find executable '{executable}': {error}")]
-    ExecutableNotFound {
-        executable: String,
-        #[source]
-        error: which::Error,
-    },
-    #[error("failed to read input file '{path:?}': {error}")]
-    ReadingInputFailed {
-        path: PathBuf,
-        #[source]
-        error: io::Error,
-    },
+    #[error("failed to resolve benchmark: {0}")]
+    Resolve(#[from] GroupError),
     #[error("failed to spawn process: {0}")]
     SpawnFailed(#[from] io::Error),
     #[error("process crashed with exit code: {0:?}")]
@@ -472,7 +479,7 @@ mod tests {
         let benchmark = Benchmark::new(
             "yes".try_into().unwrap(),
             ConfigProduct::default(),
-            vec!["yes".into(), "SAMPLE\t1000\t20000000".into()],
+            vec!["/usr/bin/yes".into(), "SAMPLE\t1000\t20000000".into()],
             None,
             None,
             StatsOptions::default(),
@@ -533,7 +540,7 @@ mod tests {
             let benchmark = Benchmark::new(
                 "yes-5".try_into().unwrap(),
                 ConfigProduct::default(),
-                vec!["yes".into(), "SAMPLE\t1\t1000000000".into()],
+                vec!["/usr/bin/yes".into(), "SAMPLE\t1\t1000000000".into()],
                 None,
                 None,
                 stats,
@@ -566,7 +573,7 @@ mod tests {
         let benchmark = Benchmark::new(
             "yes".try_into().unwrap(),
             ConfigProduct::default(),
-            vec!["yes".into(), "SAMPLE\t1000\t20000".into()],
+            vec!["/usr/bin/yes".into(), "SAMPLE\t1000\t20000".into()],
             None,
             None,
             stats,
@@ -594,7 +601,7 @@ mod tests {
             Benchmark::new(
                 "cat".try_into().unwrap(),
                 ConfigProduct::default(),
-                vec!["cat".into()],
+                vec!["/usr/bin/cat".into()],
                 input,
                 None,
                 StatsOptions::default(),
@@ -643,7 +650,7 @@ mod tests {
         let benchmark = Benchmark::new(
             "false".try_into().unwrap(),
             ConfigProduct::default(),
-            vec!["false".into()],
+            vec!["/usr/bin/false".into()],
             None,
             None,
             StatsOptions::default(),

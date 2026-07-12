@@ -3,8 +3,8 @@ use super::format::{
     HistoryRow, ResultRow, WebBenchmarkEntry, WebConfigKey, WebHostIndex, WebIndexedHistory,
     WebIndexedResults,
 };
-use crate::config::{BenchmarkId, Config, ConfigFile, Key, KeyValue};
-use crate::storage::{HybridDiskStorage, ResultsRowWithStats, StorageRead};
+use crate::config::{Benchmark, BenchmarkId, Config, ConfigFile, Key, KeyValue};
+use crate::storage::{HybridDiskStorage, MeasurementId, ResultsRowWithStats, StorageRead};
 use ahash::{HashMap, HashMapExt as _};
 use jiff::Timestamp;
 use std::collections::BTreeMap;
@@ -26,7 +26,12 @@ where
     let storage = HybridDiskStorage::new(config_file.clone(), host_name)
         .map_err(|e| E::from(WebExportError::Storage(e)))?;
 
-    let all_results = collect_all_results(&storage).map_err(E::from)?;
+    let mut all_results = collect_all_results(&storage).map_err(E::from)?;
+    all_results.retain(|row| {
+        config_file
+            .benchmark_by_id(&row.row.bench)
+            .is_some_and(|benchmark| benchmark.valid_config(&row.row.config))
+    });
 
     // Group results by benchmark (HashMap: only used for lookups, order comes from config file)
     let mut by_benchmark: HashMap<BenchmarkId, Vec<&ResultsRowWithStats>> = HashMap::new();
@@ -41,38 +46,53 @@ where
     let timeline_key = config_file.timeline_key();
 
     // Build benchmark list (ordered by config file order, filtering to those with results)
-    let benchmarks: Vec<BenchmarkId> = config_file
+    let benchmarks: Vec<&Benchmark> = config_file
         .benchmarks()
         .iter()
         .filter(|b| by_benchmark.contains_key(b.id()))
-        .map(|b| b.id().clone())
         .collect();
 
-    // Build config index excluding host key
-    let config_index = ConfigIndex::from_config_file(config_file, host_key);
+    // Config indices are benchmark-local; the host table only supplies value ordering.
+    let config_indexes: Vec<ConfigIndex> = benchmarks
+        .iter()
+        .map(|benchmark| ConfigIndex::from_benchmark(benchmark))
+        .collect();
+    let mut measurement_tokens = MeasurementTokens::default();
 
     // Build indexed results
-    let results = build_indexed_results(&all_results, &benchmarks, &config_index);
+    let results = build_indexed_results(
+        &all_results,
+        &benchmarks,
+        &config_indexes,
+        &mut measurement_tokens,
+    );
 
     // Build latest results (same config index as everything else)
-    let latest_results = timeline_key
-        .as_ref()
-        .and_then(|tk| build_indexed_latest(&all_results, tk, &benchmarks, &config_index));
+    let latest_results = timeline_key.as_ref().and_then(|tk| {
+        build_indexed_latest(
+            &all_results,
+            tk,
+            &benchmarks,
+            &config_indexes,
+            &mut measurement_tokens,
+        )
+    });
 
     let index = build_host_index(
         config_file,
         &all_results,
         &by_benchmark,
-        &config_index,
+        host_key,
         latest_results,
     );
 
     let compact = WebIndexedResults { results };
 
     // Build and emit history one benchmark at a time to avoid holding all history in memory.
-    for bench_id in &benchmarks {
-        let h = build_indexed_history(&storage, bench_id, &config_index).map_err(E::from)?;
-        on_history(bench_id, h)?;
+    for (benchmark, config_index) in benchmarks.iter().zip(&config_indexes) {
+        let h = build_indexed_history(&storage, benchmark, config_index, &mut measurement_tokens)
+            .map_err(E::from)?;
+        on_history(benchmark.id(), h)?;
     }
 
     Ok(HostExportData { index, compact })
@@ -95,42 +115,59 @@ pub struct HostExportData {
     pub compact: WebIndexedResults,
 }
 
-/// Maps config key-value combinations to a single integer index using mixed-radix encoding.
+/// Maps one benchmark's config combinations to an integer using host-wide value ordinals.
 struct ConfigIndex {
     keys: Vec<Key>,
-    values: Vec<Vec<String>>,
     strides: Vec<usize>,
 }
 
 impl ConfigIndex {
-    fn from_config_file(config_file: &ConfigFile, exclude: &Key) -> Self {
-        let mut keys = Vec::new();
-        let mut values = Vec::new();
-
-        for k in config_file.config_keys() {
-            if k == exclude {
-                continue;
-            }
-            keys.push(k.clone());
-            values.push(k.values().map(|v| v.value_name().to_string()).collect());
-        }
+    fn from_benchmark(benchmark: &Benchmark) -> Self {
+        let keys: Vec<Key> = benchmark.config_keys().cloned().collect();
+        let values: Vec<Vec<String>> = keys
+            .iter()
+            .map(|key| {
+                key.values()
+                    .map(|value| value.value_name().to_string())
+                    .collect()
+            })
+            .collect();
 
         let strides = compute_strides(&values);
-        ConfigIndex {
-            keys,
-            values,
-            strides,
-        }
+        ConfigIndex { keys, strides }
     }
 
     fn encode(&self, config: &Config) -> usize {
         let mut idx = 0;
         for (i, key) in self.keys.iter().enumerate() {
-            // Missing keys are encoded as 0. This supports benchmarks that don't vary over all keys.
-            let value_idx = config.get(key).map_or(0, KeyValue::value_index);
+            let value_idx = config
+                .get(key)
+                .expect("config was validated against the current benchmark")
+                .value_index();
             idx += value_idx * self.strides[i];
         }
         idx
+    }
+}
+
+/// Opaque equality tokens for shared measurements in one host snapshot.
+#[derive(Default)]
+struct MeasurementTokens {
+    by_id: HashMap<MeasurementId, u32>,
+}
+
+impl MeasurementTokens {
+    fn token(&mut self, measurement_id: MeasurementId, is_shared: bool) -> u32 {
+        if !is_shared {
+            return 0;
+        }
+        if let Some(token) = self.by_id.get(&measurement_id) {
+            return *token;
+        }
+        let token = u32::try_from(self.by_id.len() + 1)
+            .expect("one host export has more than u32::MAX shared measurements");
+        self.by_id.insert(measurement_id, token);
+        token
     }
 }
 
@@ -147,9 +184,19 @@ fn build_host_index(
     config_file: &ConfigFile,
     all_results: &[ResultsRowWithStats],
     by_benchmark: &HashMap<BenchmarkId, Vec<&ResultsRowWithStats>>,
-    config_index: &ConfigIndex,
+    host_key: &Key,
     latest_results: Option<Vec<ResultRow>>,
 ) -> WebHostIndex {
+    let host_config_keys: Vec<&Key> = config_file
+        .config_keys()
+        .iter()
+        .filter(|key| *key != host_key)
+        .collect();
+    let key_indexes: HashMap<&Key, usize> = host_config_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (*key, index))
+        .collect();
     let benchmarks: Vec<WebBenchmarkEntry> = config_file
         .benchmarks()
         .iter()
@@ -158,24 +205,23 @@ fn build_host_index(
             Some(WebBenchmarkEntry {
                 name: b.id().clone(),
                 result_count: rows.len(),
+                config_keys: b.config_keys().map(|key| key_indexes[key]).collect(),
             })
         })
         .collect();
 
     let last_updated = all_results
         .iter()
-        .map(|r| r.row.last_series_timestamp.as_second())
+        .map(|r| r.row.last_measurement_timestamp.as_second())
         .max()
         .unwrap_or_else(|| Timestamp::now().as_second());
 
     WebHostIndex {
         last_updated,
         description: None,
-        config_keys: config_index
-            .keys
+        config_keys: host_config_keys
             .iter()
-            .zip(config_index.values.iter())
-            .map(|(k, v)| {
+            .map(|k| {
                 let annotations: BTreeMap<String, String> = k
                     .annotations()
                     .map(|(kv, ann)| (kv.value_name().to_string(), ann.to_string()))
@@ -183,7 +229,10 @@ fn build_host_index(
                 (
                     k.name().to_string(),
                     WebConfigKey {
-                        values: v.clone(),
+                        values: k
+                            .values()
+                            .map(|value| value.value_name().to_string())
+                            .collect(),
                         annotations,
                     },
                 )
@@ -197,23 +246,25 @@ fn build_host_index(
 
 fn build_indexed_results(
     all_results: &[ResultsRowWithStats],
-    benchmarks: &[BenchmarkId],
-    config_index: &ConfigIndex,
+    benchmarks: &[&Benchmark],
+    config_indexes: &[ConfigIndex],
+    measurement_tokens: &mut MeasurementTokens,
 ) -> Vec<ResultRow> {
     let bench_idx_map: HashMap<&str, usize> = benchmarks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.as_str(), i))
+        .map(|(i, b)| (b.id().as_str(), i))
         .collect();
 
     all_results
         .iter()
         .filter_map(|r| {
             let bench_idx = *bench_idx_map.get(r.row.bench.as_str())?;
-            let config_idx = config_index.encode(&r.row.config);
+            let config_idx = config_indexes[bench_idx].encode(&r.row.config);
             Some(ResultRow {
                 bench_idx,
                 config_idx,
+                measurement_token: measurement_tokens.token(r.stable_measurement_id, r.is_shared),
                 mean_ns: round_ns(r.stable_stats.median_run_mean_ns),
                 ci95_half_ns: round_ns(r.stable_stats.median_run_ci95_half_ns),
             })
@@ -224,15 +275,16 @@ fn build_indexed_results(
 fn build_indexed_latest(
     all_results: &[ResultsRowWithStats],
     timeline_key: &Key,
-    benchmarks: &[BenchmarkId],
-    config_index: &ConfigIndex,
+    benchmarks: &[&Benchmark],
+    config_indexes: &[ConfigIndex],
+    measurement_tokens: &mut MeasurementTokens,
 ) -> Option<Vec<ResultRow>> {
     let latest_value = timeline_key.values().last()?;
 
     let bench_idx_map: HashMap<&str, usize> = benchmarks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.as_str(), i))
+        .map(|(i, b)| (b.id().as_str(), i))
         .collect();
 
     let results: Vec<ResultRow> = all_results
@@ -243,10 +295,11 @@ fn build_indexed_latest(
         })
         .filter_map(|r| {
             let bench_idx = *bench_idx_map.get(r.row.bench.as_str())?;
-            let config_idx = config_index.encode(&r.row.config);
+            let config_idx = config_indexes[bench_idx].encode(&r.row.config);
             Some(ResultRow {
                 bench_idx,
                 config_idx,
+                measurement_token: measurement_tokens.token(r.stable_measurement_id, r.is_shared),
                 mean_ns: round_ns(r.stable_stats.median_run_mean_ns),
                 ci95_half_ns: round_ns(r.stable_stats.median_run_ci95_half_ns),
             })
@@ -258,23 +311,30 @@ fn build_indexed_latest(
 
 fn build_indexed_history(
     storage: &HybridDiskStorage,
-    bench_id: &BenchmarkId,
+    benchmark: &Benchmark,
     config_index: &ConfigIndex,
+    measurement_tokens: &mut MeasurementTokens,
 ) -> Result<WebIndexedHistory, WebExportError> {
     let mut series: Vec<HistoryRow> = Vec::new();
 
     storage.read_transaction(|tx| {
-        storage.for_each_run_series(tx, bench_id, |rows| {
-            series.extend(rows.iter().map(|r| {
-                let config_idx = config_index.encode(&r.config);
-                HistoryRow {
-                    config_idx,
-                    timestamp_s: r.timestamp.as_second(),
-                    mean_ns: round_ns(r.median_run_mean_ns),
-                    ci95_half_ns: round_ns(r.median_run_ci95_half_ns),
-                    run_count: r.run_count,
-                }
-            }));
+        storage.for_each_measurement_history(tx, benchmark.id(), |rows| {
+            series.extend(
+                rows.iter()
+                    .filter(|r| benchmark.valid_config(&r.config))
+                    .map(|r| {
+                        let config_idx = config_index.encode(&r.config);
+                        HistoryRow {
+                            config_idx,
+                            measurement_token: measurement_tokens
+                                .token(r.measurement_id, r.is_shared),
+                            timestamp_s: r.timestamp.as_second(),
+                            mean_ns: round_ns(r.median_run_mean_ns),
+                            ci95_half_ns: round_ns(r.median_run_ci95_half_ns),
+                            run_count: r.run_count,
+                        }
+                    }),
+            );
             ControlFlow::Continue(())
         })
     })?;
@@ -308,8 +368,9 @@ mod tests {
     use super::*;
     use crate::config::ConfigFile;
     use crate::run::Run;
-    use crate::stats::{EstimationMode, Sample, StatsResult};
-    use crate::storage::{ResultsRow, Storage};
+    use crate::stats::{EstimationMode, Sample, StatsOptions, StatsResult};
+    use crate::storage::{MeasurementRecord, MeasurementStats, ResultsRow, Storage, WorkloadState};
+    use crate::workload::{GroupSpec, Sha256, WorkloadIdentity};
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
@@ -421,24 +482,19 @@ mod tests {
     }
 
     fn insert(storage: &HybridDiskStorage, series: &crate::run::RunSeries) {
-        storage.write_run_series_json(series.clone()).unwrap();
-        storage
-            .write_transaction(|tx| {
-                storage.insert_run_series(tx, series)?;
-                storage.upsert_results(
-                    tx,
-                    &ResultsRow {
-                        bench: series.bench.clone(),
-                        config: series.config.clone(),
-                        stable_series_timestamp: series.timestamp,
-                        last_series_timestamp: series.timestamp,
-                        suspicious_count: 0,
-                        matched_count: 0,
-                        replaced_count: 0,
-                    },
-                )
-            })
-            .unwrap();
+        crate::storage::seed_measurement(storage, series);
+        crate::storage::seed_result(
+            storage,
+            &ResultsRow {
+                bench: series.bench.clone(),
+                config: series.config.clone(),
+                stable_measurement_timestamp: series.timestamp,
+                last_measurement_timestamp: series.timestamp,
+                suspicious_count: 0,
+                matched_count: 0,
+                replaced_count: 0,
+            },
+        );
     }
 
     #[test]
@@ -458,8 +514,10 @@ mod tests {
         assert_eq!(data.index.benchmarks.len(), 2);
         assert_eq!(data.index.benchmarks[0].name.as_str(), "bench");
         assert_eq!(data.index.benchmarks[0].result_count, 2);
+        assert_eq!(data.index.benchmarks[0].config_keys, vec![0]);
         assert_eq!(data.index.benchmarks[1].name.as_str(), "bench2");
         assert_eq!(data.index.benchmarks[1].result_count, 1);
+        assert_eq!(data.index.benchmarks[1].config_keys, vec![0]);
         assert!(data.index.config_keys.contains_key("build"));
         assert!(!data.index.config_keys.contains_key("host"));
         assert_eq!(data.index.timeline_key, None);
@@ -516,6 +574,7 @@ mod tests {
         let r0 = &data.compact.results[0];
         assert_eq!(r0.bench_idx, 0);
         assert_eq!(r0.config_idx, 0); // x=0
+        assert_eq!(r0.measurement_token, 0); // isolated
         assert_eq!(r0.mean_ns, 101); // round(100.5)
         assert_eq!(r0.ci95_half_ns, 1); // round(1.0)
 
@@ -523,6 +582,7 @@ mod tests {
         let r1 = &data.compact.results[1];
         assert_eq!(r1.bench_idx, 0);
         assert_eq!(r1.config_idx, 1); // y=1
+        assert_eq!(r1.measurement_token, 0); // isolated
         assert_eq!(r1.mean_ns, 201); // round(200.7)
     }
 
@@ -597,6 +657,7 @@ mod tests {
         // Ordered by timestamp
         let s0 = &history.series[0];
         assert_eq!(s0.config_idx, 0); // build=x
+        assert_eq!(s0.measurement_token, 0); // isolated
         assert_eq!(s0.timestamp_s, 1000);
         assert_eq!(s0.run_count, 1);
 
@@ -607,6 +668,52 @@ mod tests {
         let s2 = &history.series[2];
         assert_eq!(s2.config_idx, 0); // build=x
         assert_eq!(s2.timestamp_s, 2000);
+    }
+
+    #[test]
+    fn export_omits_cases_outside_the_current_benchmark_config() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["x", "y"] },
+                "old": { "values": ["z"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["x"] }
+                }
+            ]
+        }"#;
+        let config_file = ConfigFile::from_str(dir.path(), Some("h1"), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
+
+        let valid = mk_series(&config_file, "h1", "bench", "build=x", 100.0, 1000);
+        let missing_key = mk_series(&config_file, "h1", "bench", "old=z", 200.0, 2000);
+        let extra_key = mk_series(&config_file, "h1", "bench", "build=x,old=z", 300.0, 3000);
+        let excluded_value = mk_series(&config_file, "h1", "bench", "build=y", 400.0, 4000);
+        for series in [&valid, &missing_key, &extra_key, &excluded_value] {
+            insert(&storage, series);
+        }
+
+        let mut history = None;
+        let data = export_host(&config_file, "h1", |_, rows| {
+            history = Some(rows);
+            Ok::<(), WebExportError>(())
+        })
+        .unwrap();
+
+        assert_eq!(data.index.last_updated, 1000);
+        assert_eq!(data.index.benchmarks.len(), 1);
+        assert_eq!(data.index.benchmarks[0].result_count, 1);
+        assert_eq!(data.compact.results.len(), 1);
+        assert_eq!(data.compact.results[0].config_idx, 0);
+
+        let history = history.unwrap();
+        assert_eq!(history.series.len(), 1);
+        assert_eq!(history.series[0].config_idx, 0);
+        assert_eq!(history.series[0].timestamp_s, 1000);
     }
 
     #[test]
@@ -626,5 +733,113 @@ mod tests {
         assert_eq!(data.compact.results.len(), 1);
         assert!(data.index.latest_results.is_none());
         assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn measurement_tokens_reuse_shared_ids_and_reserve_zero_for_isolated() {
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+        let first = MeasurementId::for_v1(&bench, "", Timestamp::from_second(1).unwrap());
+        let second = MeasurementId::for_v1(&bench, "", Timestamp::from_second(2).unwrap());
+        let mut tokens = MeasurementTokens::default();
+
+        assert_eq!(tokens.token(first, false), 0);
+        assert_eq!(tokens.token(first, true), 1);
+        assert_eq!(tokens.token(first, true), 1);
+        assert_eq!(tokens.token(second, true), 2);
+        assert_eq!(tokens.token(second, false), 0);
+    }
+
+    #[test]
+    fn shared_measurement_uses_one_token_across_results_and_history() {
+        let (_dir, config_file, storage) = setup_storage("h1");
+        let bench: BenchmarkId = "bench".try_into().unwrap();
+        let configs = ["build=x", "build=y"].map(|value| {
+            config_file
+                .config_from_string(value)
+                .unwrap()
+                .without_host_key()
+        });
+        let identity = WorkloadIdentity::shared(
+            bench.clone(),
+            Sha256::hash_bytes(b"executable"),
+            None,
+            &GroupSpec::new(Vec::new(), None, StatsOptions::default()),
+        );
+        let timestamp = Timestamp::from_second(1234).unwrap();
+        let measurement_id = MeasurementId::for_v1(&bench, "shared", timestamp);
+
+        storage
+            .write_transaction(|tx| {
+                let workload = storage.intern_workload(tx, &identity)?;
+                let cases: Vec<_> = configs
+                    .iter()
+                    .map(|config| {
+                        storage.get_or_create_case(
+                            tx,
+                            bench.as_str(),
+                            &serde_json::to_string(config).unwrap(),
+                        )
+                    })
+                    .collect::<Result<_, _>>()?;
+                storage.insert_measurement(
+                    tx,
+                    &MeasurementRecord {
+                        measurement_id,
+                        workload_id: workload,
+                        timestamp,
+                        schema_version: 2,
+                        stats: MeasurementStats {
+                            run_count: 1,
+                            median_run_mean_ns: 10.0,
+                            median_run_ci95_half_ns: 1.0,
+                            median_run_outlier_count: 0,
+                            median_run_sample_count: 1,
+                        },
+                        checksum: None,
+                    },
+                )?;
+                storage.link_measurement_cases(tx, measurement_id, &cases)?;
+                storage.set_workload_state(
+                    tx,
+                    &WorkloadState {
+                        workload_id: workload,
+                        stable_measurement_id: measurement_id,
+                        last_measurement_id: measurement_id,
+                        matched_count: 0,
+                        suspicious_count: 0,
+                        replaced_count: 0,
+                    },
+                )?;
+                for case in cases {
+                    storage.set_case_workload(tx, case, workload)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let mut history = None;
+        let data = export_host(&config_file, "h1", |_, rows| {
+            history = Some(rows);
+            Ok::<(), WebExportError>(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            data.compact
+                .results
+                .iter()
+                .map(|row| row.measurement_token)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        assert_eq!(
+            history
+                .unwrap()
+                .series
+                .iter()
+                .map(|row| row.measurement_token)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
     }
 }

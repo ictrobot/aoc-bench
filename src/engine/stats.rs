@@ -1,7 +1,7 @@
 use crate::config::{BenchmarkId, Config, ConfigFile, Key, KeyValue};
 use crate::stable::{Change, ChangeDirection, significant_change_with_threshold};
 use crate::storage::{
-    HybridDiskStorage, MultiHostError, MultiHostStorage, ResultsRowWithStats, RunSeriesStats,
+    HybridDiskStorage, MeasurementStats, MultiHostError, MultiHostStorage, ResultsRowWithStats,
     StorageRead,
 };
 use jiff::Timestamp;
@@ -47,7 +47,7 @@ impl StatsEngine {
         }
         writeln!(
             writer,
-            "\tstable_timestamp\tmedian_run_mean_ns\tmedian_run_ci95_half_ns"
+            "\tstable_timestamp\tstable_measurement_id\tmedian_run_mean_ns\tmedian_run_ci95_half_ns"
         )
         .map_err(StatsEngineError::OutputError)?;
 
@@ -67,8 +67,9 @@ impl StatsEngine {
 
             writeln!(
                 writer,
-                "\t{}\t{}\t{}",
-                row.row.stable_series_timestamp.as_second(),
+                "\t{}\t{}\t{}\t{}",
+                row.row.stable_measurement_timestamp.as_second(),
+                row.stable_measurement_id,
                 row.stable_stats.median_run_mean_ns,
                 row.stable_stats.median_run_ci95_half_ns
             )?;
@@ -220,7 +221,7 @@ impl StatsEngine {
                     comparison_value,
                     config: row.row.config,
                     stats: row.stable_stats,
-                    stable_timestamp: row.row.stable_series_timestamp,
+                    stable_timestamp: row.row.stable_measurement_timestamp,
                 }
             })
             .collect();
@@ -297,8 +298,8 @@ impl StatsEngine {
             });
         };
 
-        let mut current: BTreeMap<(BenchmarkId, Config), RunSeriesStats> = BTreeMap::new();
-        let mut previous: BTreeMap<(BenchmarkId, Config), RunSeriesStats> = BTreeMap::new();
+        let mut current: BTreeMap<(BenchmarkId, Config), MeasurementStats> = BTreeMap::new();
+        let mut previous: BTreeMap<(BenchmarkId, Config), MeasurementStats> = BTreeMap::new();
 
         let with_current = config_filter.with(comparison_value.clone());
         self.storage.read_transaction(|tx| {
@@ -394,14 +395,14 @@ impl StatsEngine {
 pub struct FastestResult {
     pub bench: BenchmarkId,
     pub config: Config,
-    pub stable_stats: RunSeriesStats,
+    pub stable_stats: MeasurementStats,
 }
 
 #[derive(Debug, Clone)]
 pub struct TimelinePoint {
     pub comparison_value: KeyValue,
     pub config: Config,
-    pub stats: RunSeriesStats,
+    pub stats: MeasurementStats,
     pub stable_timestamp: Timestamp,
 }
 
@@ -427,8 +428,8 @@ pub struct TimelineSummary {
 pub struct ImpactEntry {
     pub bench: BenchmarkId,
     pub config: Config,
-    pub previous_stats: RunSeriesStats,
-    pub current_stats: RunSeriesStats,
+    pub previous_stats: MeasurementStats,
+    pub current_stats: MeasurementStats,
     pub change: Change,
 }
 
@@ -480,7 +481,7 @@ mod tests {
     use crate::run::Run;
     use crate::stable::ChangeDirection;
     use crate::stats::{EstimationMode, Sample, StatsResult};
-    use crate::storage::{HybridDiskStorage, Storage};
+    use crate::storage::HybridDiskStorage;
     use tempfile::TempDir;
 
     fn setup_storage(host: &str) -> (TempDir, StatsEngine) {
@@ -542,24 +543,19 @@ mod tests {
         ];
 
         for s in series {
-            storage.write_run_series_json(s.clone()).unwrap();
-            storage
-                .write_transaction(|tx| {
-                    storage.insert_run_series(tx, &s)?;
-                    storage.upsert_results(
-                        tx,
-                        &crate::storage::ResultsRow {
-                            bench: s.bench.clone(),
-                            config: s.config.clone(),
-                            stable_series_timestamp: s.timestamp,
-                            last_series_timestamp: s.timestamp,
-                            suspicious_count: 0,
-                            matched_count: 0,
-                            replaced_count: 0,
-                        },
-                    )
-                })
-                .unwrap();
+            crate::storage::seed_measurement(&storage, &s);
+            crate::storage::seed_result(
+                &storage,
+                &crate::storage::ResultsRow {
+                    bench: s.bench.clone(),
+                    config: s.config.clone(),
+                    stable_measurement_timestamp: s.timestamp,
+                    last_measurement_timestamp: s.timestamp,
+                    suspicious_count: 0,
+                    matched_count: 0,
+                    replaced_count: 0,
+                },
+            );
         }
 
         let engine = StatsEngine::new(config_file);
@@ -620,24 +616,19 @@ mod tests {
         ];
 
         for s in series {
-            storage.write_run_series_json(s.clone()).unwrap();
-            storage
-                .write_transaction(|tx| {
-                    storage.insert_run_series(tx, &s)?;
-                    storage.upsert_results(
-                        tx,
-                        &crate::storage::ResultsRow {
-                            bench: s.bench.clone(),
-                            config: s.config.clone(),
-                            stable_series_timestamp: s.timestamp,
-                            last_series_timestamp: s.timestamp,
-                            suspicious_count: 0,
-                            matched_count: 0,
-                            replaced_count: 0,
-                        },
-                    )
-                })
-                .unwrap();
+            crate::storage::seed_measurement(&storage, &s);
+            crate::storage::seed_result(
+                &storage,
+                &crate::storage::ResultsRow {
+                    bench: s.bench.clone(),
+                    config: s.config.clone(),
+                    stable_measurement_timestamp: s.timestamp,
+                    last_measurement_timestamp: s.timestamp,
+                    suspicious_count: 0,
+                    matched_count: 0,
+                    replaced_count: 0,
+                },
+            );
         }
 
         let engine = StatsEngine::new(config_file);
@@ -659,21 +650,19 @@ mod tests {
         assert_eq!(
             lines.next(),
             Some(
-                "host\tbench\tcfg_build\tstable_timestamp\tmedian_run_mean_ns\tmedian_run_ci95_half_ns"
+                "host\tbench\tcfg_build\tstable_timestamp\tstable_measurement_id\tmedian_run_mean_ns\tmedian_run_ci95_half_ns"
             )
         );
-        assert_eq!(
-            lines.next(),
-            Some("h1\tbench\tx\t1700000000\t1700000010\t1")
-        );
-        assert_eq!(
-            lines.next(),
-            Some("h1\tbench\ty\t1700000100\t1700000110\t1")
-        );
-        assert_eq!(
-            lines.next(),
-            Some("h1\tbench2\tx\t1700000200\t1700000210\t1")
-        );
+        for expected in [
+            ["h1", "bench", "x", "1700000000", "1700000010", "1"],
+            ["h1", "bench", "y", "1700000100", "1700000110", "1"],
+            ["h1", "bench2", "x", "1700000200", "1700000210", "1"],
+        ] {
+            let fields: Vec<_> = lines.next().unwrap().split('\t').collect();
+            assert_eq!(&fields[..4], &expected[..4]);
+            fields[4].parse::<crate::storage::MeasurementId>().unwrap();
+            assert_eq!(&fields[5..], &expected[4..]);
+        }
         assert_eq!(lines.next(), None);
     }
 
@@ -765,24 +754,19 @@ mod tests {
         ];
 
         for s in series {
-            storage.write_run_series_json(s.clone()).unwrap();
-            storage
-                .write_transaction(|tx| {
-                    storage.insert_run_series(tx, &s)?;
-                    storage.upsert_results(
-                        tx,
-                        &crate::storage::ResultsRow {
-                            bench: s.bench.clone(),
-                            config: s.config.clone(),
-                            stable_series_timestamp: s.timestamp,
-                            last_series_timestamp: s.timestamp,
-                            suspicious_count: 0,
-                            matched_count: 0,
-                            replaced_count: 0,
-                        },
-                    )
-                })
-                .unwrap();
+            crate::storage::seed_measurement(&storage, &s);
+            crate::storage::seed_result(
+                &storage,
+                &crate::storage::ResultsRow {
+                    bench: s.bench.clone(),
+                    config: s.config.clone(),
+                    stable_measurement_timestamp: s.timestamp,
+                    last_measurement_timestamp: s.timestamp,
+                    suspicious_count: 0,
+                    matched_count: 0,
+                    replaced_count: 0,
+                },
+            );
         }
 
         let engine = StatsEngine::new(config_file);
@@ -846,24 +830,19 @@ mod tests {
         ];
 
         for s in series {
-            storage.write_run_series_json(s.clone()).unwrap();
-            storage
-                .write_transaction(|tx| {
-                    storage.insert_run_series(tx, &s)?;
-                    storage.upsert_results(
-                        tx,
-                        &crate::storage::ResultsRow {
-                            bench: s.bench.clone(),
-                            config: s.config.clone(),
-                            stable_series_timestamp: s.timestamp,
-                            last_series_timestamp: s.timestamp,
-                            suspicious_count: 0,
-                            matched_count: 0,
-                            replaced_count: 0,
-                        },
-                    )
-                })
-                .unwrap();
+            crate::storage::seed_measurement(&storage, &s);
+            crate::storage::seed_result(
+                &storage,
+                &crate::storage::ResultsRow {
+                    bench: s.bench.clone(),
+                    config: s.config.clone(),
+                    stable_measurement_timestamp: s.timestamp,
+                    last_measurement_timestamp: s.timestamp,
+                    suspicious_count: 0,
+                    matched_count: 0,
+                    replaced_count: 0,
+                },
+            );
         }
 
         let engine = StatsEngine::new(config_file);

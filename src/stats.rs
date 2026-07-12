@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, trace, warn};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct StatsOptions {
     /// Minimum post-warmup samples required before convergence checks

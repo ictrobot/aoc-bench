@@ -236,6 +236,7 @@ class MatrixBuilder:
 
         return {
             "benchmark": name,
+            "dedupe": "inode-content",
             "command": [
                 f"builds/{{build}}/{{commit}}/{year}-{day}",
                 "bench",

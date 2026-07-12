@@ -1,8 +1,7 @@
-use crate::config::{BenchmarkId, Config, ConfigError, ConfigFile};
+use crate::config::{BenchmarkId, Config};
 use crate::stats::StatsResult;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Result from a single benchmark run
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,50 +61,10 @@ impl RunSeries {
     }
 }
 
-/// [`RunSeries`] definition that can be deserialized.
-///
-/// This is required as constructing [`Config`] requires access to the [`ConfigFile`] instances.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RunSeriesDef {
-    pub schema: u32,
-    pub bench: BenchmarkId,
-    pub config: BTreeMap<String, String>,
-    #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
-    pub timestamp: Timestamp,
-    pub runs: Vec<Run>,
-    pub checksum: Option<String>,
-}
-
-impl RunSeriesDef {
-    pub fn try_to_run_series(self, config_file: &ConfigFile) -> Result<RunSeries, ConfigError> {
-        Ok(RunSeries {
-            schema: self.schema,
-            bench: self.bench,
-            config: config_file.config_from_map(&self.config)?,
-            timestamp: self.timestamp,
-            runs: self.runs,
-            checksum: self.checksum,
-        })
-    }
-}
-
-impl From<RunSeries> for RunSeriesDef {
-    fn from(value: RunSeries) -> Self {
-        RunSeriesDef {
-            schema: value.schema,
-            bench: value.bench,
-            config: value.config.into(),
-            timestamp: value.timestamp,
-            runs: value.runs,
-            checksum: value.checksum,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, ConfigFile};
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use jiff::Timestamp;
     use tempfile::TempDir;
@@ -142,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_series_json_round_trip() {
+    fn test_run_series_json_serialization() {
         let json = r#"{
             "config_keys": {
                 "commit": { "values": ["abc1234", "def5678"] },
@@ -188,19 +147,6 @@ mod tests {
         assert!(json.contains("\"mode\": \"per_iter\"")); // Verify snake_case serialization
         assert!(!json.contains("\"stats\":")); // Verify stats is flattened
         assert!(json.contains("\"timestamp\": 1763287200")); // Verify timestamp encoded in seconds
-
-        // Deserialize back to RunSeriesDef
-        let deserialized: RunSeriesDef = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.schema, 1);
-        assert_eq!(deserialized.bench, "2015-04".try_into().unwrap());
-        assert_eq!(deserialized.config, BTreeMap::from(config));
-        assert_eq!(deserialized.runs.len(), 1);
-        assert_eq!(deserialized.runs[0].stats.mode, EstimationMode::PerIter);
-        assert_eq!(deserialized.checksum, Some("8f024a8e".to_string()));
-
-        // Check that deserialized RunSeriesDef can be converted back to RunSeries
-        let deserialized_series = deserialized.try_to_run_series(&config_file).unwrap();
-        assert_eq!(deserialized_series, series);
 
         // Serialize RunResult to JSON
         let json = serde_json::to_string_pretty(&series.runs[0]).unwrap();

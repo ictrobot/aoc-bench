@@ -155,9 +155,27 @@ describe("App", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast", threads: "1" }, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "safe", threads: "1" }, mean_ns: 60, ci95_half_ns: 1 },
-      { bench: "bench-c", config: { commit: "b", build: "safe", threads: "2" }, mean_ns: 70, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast", threads: "1" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "safe", threads: "1" },
+        measurement_token: 0,
+        mean_ns: 60,
+        ci95_half_ns: 1,
+      },
+      {
+        bench: "bench-c",
+        config: { commit: "b", build: "safe", threads: "2" },
+        measurement_token: 0,
+        mean_ns: 70,
+        ci95_half_ns: 1,
+      },
     ])
 
     render(<App />)

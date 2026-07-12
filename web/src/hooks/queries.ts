@@ -150,7 +150,7 @@ export function useBenchmarkHistory(host: string, bench: string, config: Record<
       const data = await queryClient.ensureQueryData<IndexedHistory>(
         indexedHistoryQueryOptions(snapshotId, host, bench, hostIndex),
       )
-      return api.decodeHistory(hostIndex!, data, config)
+      return api.decodeHistory(hostIndex!, data, bench, config)
     },
     staleTime: DECODED_QUERY_STALE_TIME,
     gcTime: DECODED_QUERY_GC_TIME_MS,

@@ -34,6 +34,26 @@ describe("DrillDown", () => {
     vi.clearAllMocks()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeTimelineHostIndex()))
     mockLoadHistory.mockResolvedValue({ series: [] } satisfies IndexedHistory)
+    mockDecodeHistory.mockReturnValue([])
+  })
+
+  it("defaults a merged range to its final config", () => {
+    renderWithQueryClient(
+      <Dialog open>
+        <DialogContent>
+          <DialogDescription className="sr-only">Test drill-down dialog content</DialogDescription>
+          <DrillDown
+            host={HOST}
+            bench={BENCH}
+            configs={[{ compiler: "stable" }, { compiler: "nightly" }]}
+            varyingKey="compiler"
+          />
+        </DialogContent>
+      </Dialog>,
+    )
+
+    expect(screen.getByRole("heading", { name: "History: compiler=nightly" })).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "compiler:" })).toHaveTextContent("nightly")
   })
 
   it("renders an explicit error message when history query fails", async () => {
@@ -45,7 +65,7 @@ describe("DrillDown", () => {
       <Dialog open>
         <DialogContent>
           <DialogDescription className="sr-only">Test drill-down dialog content</DialogDescription>
-          <DrillDown host={HOST} bench={BENCH} config={{ compiler: "stable" }} />
+          <DrillDown host={HOST} bench={BENCH} configs={[{ compiler: "stable" }]} varyingKey="compiler" />
         </DialogContent>
       </Dialog>,
     )

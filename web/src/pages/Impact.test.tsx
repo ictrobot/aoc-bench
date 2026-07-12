@@ -80,8 +80,8 @@ describe("Impact", () => {
     const hostIndex = makeImpactHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a" }, mean_ns: 0, ci95_half_ns: 0 },
-      { bench: "bench-a", config: { commit: "b" }, mean_ns: 10, ci95_half_ns: 0 },
+      { bench: "bench-a", config: { commit: "a" }, measurement_token: 0, mean_ns: 0, ci95_half_ns: 0 },
+      { bench: "bench-a", config: { commit: "b" }, measurement_token: 0, mean_ns: 10, ci95_half_ns: 0 },
     ])
 
     renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })
@@ -134,8 +134,8 @@ describe("Impact", () => {
     })
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "fast" }, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "fast" }, mean_ns: 130, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "a", mode: "fast" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "b", mode: "fast" }, measurement_token: 0, mean_ns: 130, ci95_half_ns: 1 },
     ])
 
     renderWithRouterAndQueryClient(
@@ -172,8 +172,8 @@ describe("Impact", () => {
     })
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "fast" }, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "fast" }, mean_ns: 140, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "a", mode: "fast" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "b", mode: "fast" }, measurement_token: 0, mean_ns: 140, ci95_half_ns: 1 },
     ])
 
     renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })

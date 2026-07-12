@@ -1,126 +1,111 @@
 //! Stable result management: drift detection and promotion logic.
+//!
+//! This module owns the storage-independent drift/promotion state machine ([`compute_drift`]) and
+//! its result types. Measurement recording in [`crate::run::process`] applies it to both shared and
+//! isolated workloads.
 
-use crate::run::RunSeries;
-use crate::storage::{ResultsRow, ResultsRowWithStats, RunSeriesStats, Storage, StorageRead};
+use crate::storage::MeasurementStats;
 use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
 
 const STABLE_RESULT_CHANGE_REL_THRESHOLD: f64 = 0.03; // 3%
 const STABLE_RESULT_CHANGE_REQUIRED_COUNT: u64 = 3;
 
-/// Write JSON, insert `run_series` row, and update results with drift detection.
-pub fn record_run_series<S: Storage>(
-    storage: &S,
-    series: &RunSeries,
-    options: RecordOptions,
-) -> Result<(RecordOutcome, PathBuf), S::Error> {
-    let json_path = storage.write_run_series_json(series.clone())?;
-
-    let update = storage.write_transaction(|tx| {
-        storage.insert_run_series(tx, series)?;
-        let (row, outcome) = process_series(storage, tx, series, options)?;
-        storage.upsert_results(tx, &row)?;
-        Ok(outcome)
-    })?;
-
-    Ok((update, json_path))
+/// Drift counters that move together as measurements are recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DriftCounters {
+    /// Total matches since the last replacement.
+    pub matched_count: u64,
+    /// Consecutive suspicious series since the last match.
+    pub suspicious_count: u64,
+    /// Total replacements.
+    pub replaced_count: u64,
 }
 
-/// Simulate recording a run series without writing JSON or DB rows.
+/// The result of applying one measurement to a set of drift counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriftUpdate {
+    /// The updated counters.
+    pub counters: DriftCounters,
+    /// Whether the stable pointer should move to the new measurement.
+    pub stable_moved: bool,
+}
+
+/// Pure drift-detection state machine for updating per-workload stable state.
 ///
-/// This runs the same drift-detection logic as [`record_run_series`] and returns the outcome
-/// that would occur, but leaves storage untouched.
-pub fn preview_run_series<S: StorageRead>(
-    storage: &S,
-    series: &RunSeries,
-    options: RecordOptions,
-) -> Result<RecordOutcome, S::Error> {
-    storage.read_transaction(|tx| {
-        let (_, outcome) = process_series(storage, tx, series, options)?;
-        Ok(outcome)
-    })
-}
-
-fn process_series<S: StorageRead>(
-    storage: &S,
-    tx: &S::Tx<'_>,
-    series: &RunSeries,
-    options: RecordOptions,
-) -> Result<(ResultsRow, RecordOutcome), S::Error> {
-    if let Some(ResultsRowWithStats {
-        mut row,
-        stable_stats,
-        ..
-    }) = storage.get_result_with_stats(tx, &series.bench, &series.config)?
-    {
-        let outcome = compute_outcome(&mut row, stable_stats, series, options.force_update_stable);
-        Ok((row, outcome))
-    } else {
-        let row = ResultsRow {
-            bench: series.bench.clone(),
-            config: series.config.clone(),
-            stable_series_timestamp: series.timestamp,
-            last_series_timestamp: series.timestamp,
-            suspicious_count: 0,
-            matched_count: 0,
-            replaced_count: 0,
-        };
-        Ok((row, RecordOutcome::Initial))
-    }
-}
-
-fn compute_outcome(
-    row: &mut ResultsRow,
-    stable_stats: RunSeriesStats,
-    series: &RunSeries,
+/// Given the current stable stats, the new measurement's stats, and the current counters, returns
+/// the updated counters (and whether the stable pointer moves) plus the [`RecordOutcome`]. This is
+/// the single source of truth for promotion after `STABLE_RESULT_CHANGE_REQUIRED_COUNT` consecutive
+/// suspicious series, forced replacement, and match/reset behavior.
+#[must_use]
+pub fn compute_drift(
+    stable_stats: MeasurementStats,
+    new_stats: MeasurementStats,
+    counters: DriftCounters,
     force_update_stable: bool,
-) -> RecordOutcome {
-    row.last_series_timestamp = series.timestamp;
-
-    let new_stats = RunSeriesStats::from(series);
-    let is_suspicious = is_suspicious(stable_stats, new_stats);
+) -> (DriftUpdate, RecordOutcome) {
+    let is_suspicious = significant_change(stable_stats, new_stats).is_some();
 
     if is_suspicious || force_update_stable {
-        let suspicious_count = row.suspicious_count + 1;
+        let suspicious_count = counters.suspicious_count + 1;
 
         if suspicious_count >= STABLE_RESULT_CHANGE_REQUIRED_COUNT {
-            row.stable_series_timestamp = series.timestamp;
-            row.matched_count = 0;
-            row.suspicious_count = 0;
-            row.replaced_count += 1;
-
-            RecordOutcome::Replaced {
-                old_stable: stable_stats,
-            }
+            (
+                DriftUpdate {
+                    counters: DriftCounters {
+                        matched_count: 0,
+                        suspicious_count: 0,
+                        replaced_count: counters.replaced_count + 1,
+                    },
+                    stable_moved: true,
+                },
+                RecordOutcome::Replaced {
+                    old_stable: stable_stats,
+                },
+            )
         } else if force_update_stable {
-            row.stable_series_timestamp = series.timestamp;
-            row.matched_count = 0;
-            row.suspicious_count = 0;
-            row.replaced_count += 1;
-
-            RecordOutcome::Forced {
-                old_stable: stable_stats,
-            }
+            (
+                DriftUpdate {
+                    counters: DriftCounters {
+                        matched_count: 0,
+                        suspicious_count: 0,
+                        replaced_count: counters.replaced_count + 1,
+                    },
+                    stable_moved: true,
+                },
+                RecordOutcome::Forced {
+                    old_stable: stable_stats,
+                },
+            )
         } else {
             // Does not reset matched_count which is the number of matches since replacement, not
             // the number of consecutive matches
-            row.suspicious_count = suspicious_count;
-
-            RecordOutcome::Suspicious {
-                current_stable: stable_stats,
-                suspicious_count,
-            }
+            (
+                DriftUpdate {
+                    counters: DriftCounters {
+                        suspicious_count,
+                        ..counters
+                    },
+                    stable_moved: false,
+                },
+                RecordOutcome::Suspicious {
+                    current_stable: stable_stats,
+                    suspicious_count,
+                },
+            )
         }
     } else {
-        row.suspicious_count = 0;
-        row.matched_count += 1;
-
-        RecordOutcome::Matched
+        (
+            DriftUpdate {
+                counters: DriftCounters {
+                    matched_count: counters.matched_count + 1,
+                    suspicious_count: 0,
+                    replaced_count: counters.replaced_count,
+                },
+                stable_moved: false,
+            },
+            RecordOutcome::Matched,
+        )
     }
-}
-
-fn is_suspicious(stable: RunSeriesStats, new_stats: RunSeriesStats) -> bool {
-    significant_change(stable, new_stats).is_some()
 }
 
 /// Determine whether `new_stats` represents a significant change relative to `stable`.
@@ -128,7 +113,7 @@ fn is_suspicious(stable: RunSeriesStats, new_stats: RunSeriesStats) -> bool {
 /// A change is significant when the confidence intervals do not overlap and the relative
 /// difference in means is at least 3%. Returns the direction of the change if significant.
 #[must_use]
-pub fn significant_change(stable: RunSeriesStats, new_stats: RunSeriesStats) -> Option<Change> {
+pub fn significant_change(stable: MeasurementStats, new_stats: MeasurementStats) -> Option<Change> {
     significant_change_with_threshold(stable, new_stats, STABLE_RESULT_CHANGE_REL_THRESHOLD)
 }
 
@@ -139,8 +124,8 @@ pub fn significant_change(stable: RunSeriesStats, new_stats: RunSeriesStats) -> 
 /// difference in means is at least `rel_threshold`.
 #[must_use]
 pub fn significant_change_with_threshold(
-    stable: RunSeriesStats,
-    new_stats: RunSeriesStats,
+    stable: MeasurementStats,
+    new_stats: MeasurementStats,
     rel_threshold: f64,
 ) -> Option<Change> {
     let (stable_low, stable_high) = stable.bounds();
@@ -194,279 +179,132 @@ pub struct Change {
     pub rel_change: f64,
 }
 
-/// Options that control how a run series is recorded.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RecordOptions {
-    /// Force the new run series to become the stable result regardless of drift checks.
-    pub force_update_stable: bool,
-}
-
-/// Outcome of [`record_run_series`].
+/// Outcome of applying one measurement to a workload's stable/drift state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordOutcome {
     Initial,
     Matched,
     Suspicious {
-        current_stable: RunSeriesStats,
+        current_stable: MeasurementStats,
         suspicious_count: u64,
     },
     Replaced {
-        old_stable: RunSeriesStats,
+        old_stable: MeasurementStats,
     },
     Forced {
-        old_stable: RunSeriesStats,
+        old_stable: MeasurementStats,
     },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ConfigFile};
-    use crate::run::{Run, RunSeries};
-    use crate::stats::{EstimationMode, Sample, StatsResult};
-    use crate::storage::HybridDiskStorage;
-    use jiff::Timestamp;
-    use tempfile::TempDir;
 
-    fn storage_with_config() -> (TempDir, impl Storage, Config) {
-        let dir = TempDir::new().unwrap();
-        let json = r#"{
-            "config_keys": {
-                "build": { "values": ["opt"] }
-            },
-            "benchmarks": [
-                {
-                    "benchmark": "bench",
-                    "command": ["run", "{build}"],
-                    "config": { "build": ["opt"] }
-                }
-            ]
-        }"#;
-
-        let config_file = ConfigFile::from_str(dir.path(), Some("test"), json).unwrap();
-        let cfg = config_file
-            .config_from_string("build=opt,host=test")
-            .unwrap();
-        let storage = HybridDiskStorage::new(config_file, "test").unwrap();
-        (dir, storage, cfg)
+    fn stats(mean: f64, ci: f64) -> MeasurementStats {
+        MeasurementStats {
+            run_count: 3,
+            median_run_mean_ns: mean,
+            median_run_ci95_half_ns: ci,
+            median_run_outlier_count: 0,
+            median_run_sample_count: 32,
+        }
     }
 
-    fn run_series(config: &Config, mean: u32, half_width: u32, t: i64) -> RunSeries {
-        RunSeries {
-            schema: 1,
-            bench: "bench".try_into().unwrap(),
-            config: config.clone(),
-            timestamp: Timestamp::from_second(t).unwrap(),
-            runs: vec![Run {
-                timestamp: Timestamp::from_second(t + 1).unwrap(),
-                stats: StatsResult {
-                    mean_ns_per_iter: f64::from(mean),
-                    ci95_half_width_ns: f64::from(half_width),
-                    mode: EstimationMode::PerIter,
-                    intercept_ns: None,
-                    outlier_count: 0,
-                    samples: vec![Sample {
-                        iters: 1,
-                        total_ns: u64::from(mean),
-                    }],
-                    temporal_correlation: 0.0,
-                },
-            }],
-            checksum: None,
+    fn counters(matched: u64, suspicious: u64, replaced: u64) -> DriftCounters {
+        DriftCounters {
+            matched_count: matched,
+            suspicious_count: suspicious,
+            replaced_count: replaced,
         }
     }
 
     #[test]
-    fn test_first_run_promotes_to_stable() {
-        let (_dir, storage, config) = storage_with_config();
-        let series = run_series(&config, 1000, 50, 10);
-
-        let (outcome, _) = record_run_series(&storage, &series, RecordOptions::default()).unwrap();
-        assert_eq!(outcome, RecordOutcome::Initial);
-
-        let results_row = storage
-            .write_transaction(|tx| {
-                storage.get_result_with_stats(tx, &series.bench, &series.config)
-            })
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(results_row.row.stable_series_timestamp, series.timestamp);
-        assert_eq!(results_row.row.last_series_timestamp, series.timestamp);
-        assert_eq!(results_row.row.suspicious_count, 0);
-        assert_eq!(results_row.row.matched_count, 0);
-        assert_eq!(results_row.row.replaced_count, 0);
-    }
-
-    #[test]
-    fn test_non_suspicious_resets_counter() {
-        let (_dir, storage, config) = storage_with_config();
-        let stable = run_series(&config, 1000, 100, 10);
-        let newer = run_series(&config, 1010, 50, 20); // overlaps, small diff
-
-        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
-
-        // artificially mark as suspicious once
-        storage
-            .write_transaction(|tx| {
-                let mut row = storage
-                    .get_result_with_stats(tx, &stable.bench, &stable.config)?
-                    .unwrap()
-                    .row;
-                row.suspicious_count = 1;
-                storage.upsert_results(tx, &row)
-            })
-            .unwrap();
-
-        let (outcome, _) = record_run_series(&storage, &newer, RecordOptions::default()).unwrap();
+    fn overlapping_small_change_matches_and_resets_suspicious() {
+        // CIs overlap and means are within threshold => Matched.
+        let (update, outcome) = compute_drift(
+            stats(1000.0, 100.0),
+            stats(1010.0, 50.0),
+            counters(5, 1, 2),
+            false,
+        );
         assert_eq!(outcome, RecordOutcome::Matched);
-
-        let results_row = storage
-            .write_transaction(|tx| {
-                storage.get_result_with_stats(tx, &stable.bench, &stable.config)
-            })
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
-        assert_eq!(results_row.row.last_series_timestamp, newer.timestamp);
-        assert_eq!(results_row.row.suspicious_count, 0);
-        assert_eq!(results_row.row.matched_count, 1);
-        assert_eq!(results_row.row.replaced_count, 0);
+        assert_eq!(update.counters, counters(6, 0, 2));
+        assert!(!update.stable_moved);
     }
 
     #[test]
-    fn test_suspicious_three_times_promotes() {
-        let (_dir, storage, config) = storage_with_config();
-        let stable = run_series(&config, 1000, 10, 10);
-        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
-
-        // artificially increase matched_count and replaced_count
-        storage
-            .write_transaction(|tx| {
-                let mut row = storage
-                    .get_result_with_stats(tx, &stable.bench, &stable.config)?
-                    .unwrap()
-                    .row;
-                row.matched_count = 54;
-                row.replaced_count = 2;
-                storage.upsert_results(tx, &row)
-            })
-            .unwrap();
-
-        for i in 1..=3 {
-            let series = run_series(&config, 1050 + i, 10, 20 + i64::from(i));
-            let (outcome, _) =
-                record_run_series(&storage, &series, RecordOptions::default()).unwrap();
-
-            let results_row = storage
-                .write_transaction(|tx| {
-                    storage.get_result_with_stats(tx, &stable.bench, &stable.config)
-                })
-                .unwrap()
-                .unwrap();
-
-            if i < 3 {
-                assert_eq!(
-                    outcome,
-                    RecordOutcome::Suspicious {
-                        current_stable: RunSeriesStats::from(&stable),
-                        suspicious_count: u64::from(i),
-                    }
-                );
-                assert_eq!(results_row.row.matched_count, 54);
-                assert_eq!(results_row.row.suspicious_count, u64::from(i));
-                assert_eq!(results_row.row.replaced_count, 2);
-                assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
-            } else {
-                assert_eq!(
-                    outcome,
-                    RecordOutcome::Replaced {
-                        old_stable: RunSeriesStats::from(&stable),
-                    }
-                );
-                assert_eq!(results_row.row.matched_count, 0);
-                assert_eq!(results_row.row.suspicious_count, 0);
-                assert_eq!(results_row.row.replaced_count, 3);
-                assert_eq!(results_row.row.stable_series_timestamp, series.timestamp);
+    fn significant_change_accumulates_suspicion_without_moving_stable() {
+        // Non-overlapping CIs, >3% change, first suspicious.
+        let (update, outcome) = compute_drift(
+            stats(1000.0, 10.0),
+            stats(1100.0, 10.0),
+            counters(4, 0, 0),
+            false,
+        );
+        assert_eq!(
+            outcome,
+            RecordOutcome::Suspicious {
+                current_stable: stats(1000.0, 10.0),
+                suspicious_count: 1,
             }
-            assert_eq!(results_row.row.last_series_timestamp, series.timestamp);
-        }
+        );
+        // matched_count is preserved (matches since replacement), stable does not move.
+        assert_eq!(update.counters, counters(4, 1, 0));
+        assert!(!update.stable_moved);
     }
 
     #[test]
-    fn test_force_update_bypasses_counter() {
-        let (_dir, storage, config) = storage_with_config();
-        let stable = run_series(&config, 1000, 10, 10);
-        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
+    fn third_consecutive_suspicious_replaces_stable() {
+        let (update, outcome) = compute_drift(
+            stats(1000.0, 10.0),
+            stats(1100.0, 10.0),
+            counters(9, 2, 1),
+            false,
+        );
+        assert_eq!(
+            outcome,
+            RecordOutcome::Replaced {
+                old_stable: stats(1000.0, 10.0),
+            }
+        );
+        assert_eq!(update.counters, counters(0, 0, 2));
+        assert!(update.stable_moved);
+    }
 
-        let new = run_series(&config, 1010, 10, 20);
-        let (outcome, _) = record_run_series(
-            &storage,
-            &new,
-            RecordOptions {
-                force_update_stable: true,
-            },
-        )
-        .unwrap();
-
+    #[test]
+    fn force_update_replaces_immediately() {
+        // Even with overlapping CIs, force moves the stable pointer.
+        let (update, outcome) = compute_drift(
+            stats(1000.0, 100.0),
+            stats(1005.0, 100.0),
+            counters(7, 0, 3),
+            true,
+        );
         assert_eq!(
             outcome,
             RecordOutcome::Forced {
-                old_stable: RunSeriesStats::from(&stable)
+                old_stable: stats(1000.0, 100.0),
             }
         );
-
-        let results_row = storage
-            .write_transaction(|tx| {
-                storage.get_result_with_stats(tx, &stable.bench, &stable.config)
-            })
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(results_row.row.stable_series_timestamp, new.timestamp);
-        assert_eq!(results_row.row.last_series_timestamp, new.timestamp);
-        assert_eq!(results_row.row.suspicious_count, 0);
-        assert_eq!(results_row.row.replaced_count, 1);
+        assert_eq!(update.counters, counters(0, 0, 4));
+        assert!(update.stable_moved);
     }
 
     #[test]
-    fn test_preview_run_series_does_not_mutate_storage() {
-        let (_dir, storage, config) = storage_with_config();
-        let stable = run_series(&config, 1000, 10, 10);
-        record_run_series(&storage, &stable, RecordOptions::default()).unwrap();
-
-        // Manually mark two suspicious runs so the next suspicious one would replace stable.
-        storage
-            .write_transaction(|tx| {
-                let mut row = storage
-                    .get_result_with_stats(tx, &stable.bench, &stable.config)?
-                    .unwrap()
-                    .row;
-                row.suspicious_count = 2;
-                storage.upsert_results(tx, &row)
-            })
-            .unwrap();
-
-        let new_series = run_series(&config, 1100, 10, 20);
-        let outcome = preview_run_series(
-            &storage,
-            &new_series,
-            RecordOptions {
-                force_update_stable: false,
-            },
-        )
-        .unwrap();
-
-        assert!(matches!(outcome, RecordOutcome::Replaced { .. }));
-
-        // Storage state should remain unchanged after preview.
-        let results_row = storage
-            .read_transaction(|tx| storage.get_result_with_stats(tx, &stable.bench, &stable.config))
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(results_row.row.stable_series_timestamp, stable.timestamp);
-        assert_eq!(results_row.row.suspicious_count, 2);
+    fn significant_change_direction() {
+        assert_eq!(
+            significant_change(stats(1000.0, 10.0), stats(1100.0, 10.0))
+                .unwrap()
+                .direction,
+            ChangeDirection::Regression
+        );
+        assert_eq!(
+            significant_change(stats(1000.0, 10.0), stats(900.0, 10.0))
+                .unwrap()
+                .direction,
+            ChangeDirection::Improvement
+        );
+        // Overlapping CIs => not significant.
+        assert!(significant_change(stats(1000.0, 100.0), stats(1010.0, 100.0)).is_none());
     }
 }

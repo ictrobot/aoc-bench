@@ -1,9 +1,16 @@
-/** A row in results.json: `[bench_idx, config_idx, mean_ns, ci95_half_ns]` */
-export type ResultRow = [bench_idx: number, config_idx: number, mean_ns: number, ci95_half_ns: number]
+/** A row in results.json: `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns]`. */
+export type ResultRow = [
+  bench_idx: number,
+  config_idx: number,
+  measurement_token: number,
+  mean_ns: number,
+  ci95_half_ns: number,
+]
 
-/** A row in history/{bench}.json: `[config_idx, timestamp_s, mean_ns, ci95_half_ns, run_count]` */
+/** A row in history/{bench}.json: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`. */
 export type HistoryRow = [
   config_idx: number,
+  measurement_token: number,
   timestamp_s: number,
   mean_ns: number,
   ci95_half_ns: number,
@@ -20,7 +27,7 @@ export interface HostIndex {
   last_updated: number
   description?: string
   config_keys: Record<string, { values: string[]; annotations?: Record<string, string> }>
-  benchmarks: { name: string; result_count: number }[]
+  benchmarks: { name: string; result_count: number; config_keys: number[] }[]
   timeline_key: string | null
   results_path: string
   history_dir: string
@@ -39,12 +46,16 @@ export interface IndexedHistory {
 export interface CompactResult {
   bench: string
   config: Record<string, string>
+  /** Positive for a shared measurement; zero for an isolated result. */
+  measurement_token: number
   mean_ns: number
   ci95_half_ns: number
 }
 
 export interface HistorySeries {
   config: Record<string, string>
+  /** Positive for a shared measurement; zero for an isolated result. */
+  measurement_token: number
   timestamp: number
   median_run_mean_ns: number
   median_run_ci95_half_ns: number

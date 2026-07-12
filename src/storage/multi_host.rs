@@ -1,7 +1,5 @@
 use crate::config::{BenchmarkId, Config, ConfigFile, KeyValue};
-use crate::run::RunSeries;
-use crate::storage::{PerHostStorage, ResultsRow, ResultsRowWithStats, RunSeriesRow, StorageRead};
-use jiff::Timestamp;
+use crate::storage::{MeasurementHistoryRow, PerHostStorage, ResultsRowWithStats, StorageRead};
 use std::ops::ControlFlow;
 
 /// Read-only storage that fans out queries across all hosts.
@@ -77,22 +75,6 @@ impl<S: PerHostStorage> StorageRead for MultiHostStorage<S> {
     type Tx<'a> = ();
     type Error = MultiHostError<S>;
 
-    fn read_run_series_json(
-        &self,
-        bench: &BenchmarkId,
-        config: &Config,
-        timestamp: Timestamp,
-    ) -> Result<RunSeries, Self::Error> {
-        let storage = self.host_storage_from_config(config)?;
-
-        storage
-            .read_run_series_json(bench, config, timestamp)
-            .map_err(|e| MultiHostError::BackendError {
-                host: storage.host().value_name().to_string(),
-                source: e,
-            })
-    }
-
     fn read_transaction<F, T>(&self, f: F) -> Result<T, Self::Error>
     where
         F: FnOnce(&Self::Tx<'_>) -> Result<T, Self::Error>,
@@ -136,18 +118,18 @@ impl<S: PerHostStorage> StorageRead for MultiHostStorage<S> {
         })
     }
 
-    fn for_each_run_series(
+    fn for_each_measurement_history(
         &self,
         _tx: &Self::Tx<'_>,
         benchmark: &BenchmarkId,
-        mut f: impl FnMut(&[RunSeriesRow]) -> ControlFlow<()>,
+        mut f: impl FnMut(&[MeasurementHistoryRow]) -> ControlFlow<()>,
     ) -> Result<(), Self::Error> {
         for host_kv in self.config_file.host_key().values() {
             let storage = self.host_storage(&host_kv)?;
             let mut control_flow = ControlFlow::Continue(());
             storage
                 .read_transaction(|tx| {
-                    storage.for_each_run_series(tx, benchmark, |rows| {
+                    storage.for_each_measurement_history(tx, benchmark, |rows| {
                         control_flow = f(rows);
                         control_flow
                     })
@@ -161,55 +143,6 @@ impl<S: PerHostStorage> StorageRead for MultiHostStorage<S> {
             }
         }
         Ok(())
-    }
-
-    fn oldest_results(
-        &self,
-        _tx: &Self::Tx<'_>,
-        benchmark_filter: Option<&BenchmarkId>,
-        config_filter: &Config,
-        limit: usize,
-    ) -> Result<Vec<ResultsRow>, Self::Error> {
-        let mut results = Vec::new();
-
-        self.for_each_host(config_filter, |storage, config| {
-            let mut host_rows = storage.read_transaction(|tx| {
-                storage.oldest_results(tx, benchmark_filter, config, limit)
-            })?;
-            results.append(&mut host_rows);
-            Ok(ControlFlow::Continue(()))
-        })?;
-
-        results.sort_unstable_by_key(|row| row.last_series_timestamp);
-        results.truncate(limit);
-
-        Ok(results)
-    }
-
-    fn missing_results(
-        &self,
-        _tx: &Self::Tx<'_>,
-        benchmark_filter: Option<&BenchmarkId>,
-        config_filter: &Config,
-        limit: usize,
-    ) -> Result<Vec<(BenchmarkId, Config)>, Self::Error> {
-        let mut results = Vec::new();
-
-        self.for_each_host(config_filter, |storage, config| {
-            let mut host_rows = storage.read_transaction(|tx| {
-                storage.missing_results(tx, benchmark_filter, config, limit)
-            })?;
-            results.append(&mut host_rows);
-
-            Ok(if results.len() >= limit {
-                results.truncate(limit);
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            })
-        })?;
-
-        Ok(results)
     }
 }
 
@@ -230,9 +163,10 @@ pub enum MultiHostError<S: PerHostStorage> {
 mod tests {
     use super::*;
     use crate::config::{BenchmarkId, ConfigFile};
-    use crate::run::Run;
+    use crate::run::{Run, RunSeries};
     use crate::stats::{EstimationMode, Sample, StatsResult};
-    use crate::storage::{HybridDiskStorage, Storage};
+    use crate::storage::{HybridDiskStorage, ResultsRow};
+    use jiff::Timestamp;
     use tempfile::TempDir;
 
     fn make_config(config_file: &ConfigFile, host: Option<&str>) -> Config {
@@ -304,49 +238,20 @@ mod tests {
     }
 
     fn insert_row(storage: &HybridDiskStorage, series: &RunSeries) {
-        let bench = series.bench.clone();
-        let config = series.config.clone();
         let ts = series.timestamp;
-
-        storage.write_run_series_json(series.clone()).unwrap();
-        storage
-            .write_transaction(|tx| {
-                storage.insert_run_series(tx, series)?;
-                storage.upsert_results(
-                    tx,
-                    &ResultsRow {
-                        bench,
-                        config: config.clone(),
-                        stable_series_timestamp: ts,
-                        last_series_timestamp: ts,
-                        suspicious_count: 0,
-                        matched_count: 0,
-                        replaced_count: 0,
-                    },
-                )
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn test_read_run_series_json_reads_back_series() {
-        let (_dir, config_file) = setup_config(&["h1"]);
-        let backend = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
-        let cfg = make_config(&config_file, Some("h1"));
-        let bench: BenchmarkId = "bench".try_into().unwrap();
-        let ts = Timestamp::from_second(42).unwrap();
-
-        let mut series = sample_series(bench.clone(), cfg.clone(), ts.as_second());
-        series.timestamp = ts;
-        backend.write_run_series_json(series.clone()).unwrap();
-
-        let storage: MultiHostStorage<HybridDiskStorage> = MultiHostStorage::new(config_file);
-        let loaded = storage
-            .read_run_series_json(&bench, &cfg, ts)
-            .expect("read series");
-        assert_eq!(loaded.bench, bench);
-        assert_eq!(loaded.config, cfg);
-        assert_eq!(loaded.timestamp, ts);
+        crate::storage::seed_measurement(storage, series);
+        crate::storage::seed_result(
+            storage,
+            &ResultsRow {
+                bench: series.bench.clone(),
+                config: series.config.clone(),
+                stable_measurement_timestamp: ts,
+                last_measurement_timestamp: ts,
+                suspicious_count: 0,
+                matched_count: 0,
+                replaced_count: 0,
+            },
+        );
     }
 
     #[test]
@@ -441,60 +346,5 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seen, 1);
-    }
-
-    #[test]
-    fn test_oldest_results_sorted_and_limited() {
-        let (_dir, config_file) = setup_config(&["h1", "h2"]);
-        let storage: MultiHostStorage<HybridDiskStorage> =
-            MultiHostStorage::new(config_file.clone());
-
-        // Host h1, later timestamp
-        {
-            let cfg = make_config(&config_file, Some("h1"));
-            let series = sample_series("bench".try_into().unwrap(), cfg, 20);
-            let backend = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
-            insert_row(&backend, &series);
-        }
-        // Host h2, earlier timestamp
-        {
-            let cfg = make_config(&config_file, Some("h2"));
-            let series = sample_series("bench".try_into().unwrap(), cfg, 10);
-            let backend = HybridDiskStorage::new(config_file.clone(), "h2").unwrap();
-            insert_row(&backend, &series);
-        }
-
-        let rows = storage
-            .oldest_results(&(), None, &Config::new(), 1)
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].last_series_timestamp.as_second(), 10);
-
-        let rows = storage
-            .oldest_results(&(), None, &Config::new(), 10)
-            .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].last_series_timestamp.as_second(), 10);
-        assert_eq!(rows[1].last_series_timestamp.as_second(), 20);
-    }
-
-    #[test]
-    fn test_missing_results_respects_limit_and_breaks() {
-        let (_dir, config_file) = setup_config(&["h1", "h2"]);
-        let storage: MultiHostStorage<HybridDiskStorage> =
-            MultiHostStorage::new(config_file.clone());
-
-        // Insert one row for h1
-        {
-            let cfg = make_config(&config_file, Some("h1"));
-            let series = sample_series("bench".try_into().unwrap(), cfg, 20);
-            let backend = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
-            insert_row(&backend, &series);
-        }
-
-        let rows = storage
-            .missing_results(&(), None, &Config::new(), 10)
-            .unwrap();
-        assert_eq!(rows.len(), 3); // 1 for h1, 2 for h2
     }
 }

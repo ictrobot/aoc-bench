@@ -13,7 +13,7 @@
     - Cartesian product expansion, presets, canonical config encoding
     - Optional `timeline_key` and per-value annotations
 - [x] Storage and stable-result management
-    - Immutable JSON run-series files + SQLite metadata index
+    - Immutable JSON measurement files + SQLite metadata index
     - Atomic writes, migrations, lock file coordination, WAL mode
     - Stable-result drift detection and controlled replacement logic
 - [x] CLI surface
@@ -36,7 +36,7 @@
 ## TODO
 
 - [ ] Recovery tooling and startup resilience
-    - Scan run-series JSON files and rebuild SQLite metadata
+    - Scan V1/V2 measurement JSON files and rebuild SQLite metadata
     - Add DB integrity checks and a manual recovery command
     - Add optional automatic recovery path on startup when corruption is detected
 - [ ] Robustness hardening

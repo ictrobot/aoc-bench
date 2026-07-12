@@ -10,6 +10,7 @@ import type {
 } from "./types.ts"
 
 const BASE = import.meta.env.BASE_URL + "data"
+const WEB_SCHEMA_VERSION = 2
 
 export class SnapshotNotFoundError extends Error {
   constructor(path: string) {
@@ -62,8 +63,12 @@ async function fetchJson<T>(path: string): Promise<T> {
 }
 
 /** Load the top-level host index metadata. */
-export function loadIndex(): Promise<GlobalIndex> {
-  return fetchJson<GlobalIndex>("index.json")
+export async function loadIndex(): Promise<GlobalIndex> {
+  const index = await fetchJson<GlobalIndex>("index.json")
+  if (index.schema_version !== WEB_SCHEMA_VERSION) {
+    throw new Error(`Unsupported web export schema ${index.schema_version}; expected ${WEB_SCHEMA_VERSION}`)
+  }
+  return index
 }
 
 /** Load the compact indexed results payload for one host. */
@@ -76,11 +81,21 @@ export function loadHistory(index: HostIndex, bench: string): Promise<IndexedHis
   return fetchJson<IndexedHistory>(`${index.history_dir}/${bench}.json`)
 }
 
-/** Extract ordered config key names and per-key value arrays from the index. */
-function indexConfigTables(index: HostIndex): { keys: string[]; values: string[][] } {
-  // config_keys is encoded as an object; sort key names for deterministic mixed-radix decode.
-  const keys = Object.keys(index.config_keys).sort()
-  const values = keys.map((k) => index.config_keys[k].values)
+function benchmarkConfigTables(index: HostIndex, benchIdx: number): { keys: string[]; values: string[][] } {
+  assertValidBenchIdx(benchIdx, index.benchmarks.length)
+  const allKeys = Object.keys(index.config_keys).sort()
+  const keyIndexes = index.benchmarks[benchIdx].config_keys
+  const seen = new Set<number>()
+  const keys: string[] = []
+  const values: string[][] = []
+  for (const keyIndex of keyIndexes) {
+    if (!Number.isInteger(keyIndex) || keyIndex < 0 || keyIndex >= allKeys.length || seen.has(keyIndex)) {
+      throw new Error(`Invalid config key index '${keyIndex}' for benchmark '${index.benchmarks[benchIdx].name}'`)
+    }
+    seen.add(keyIndex)
+    keys.push(allKeys[keyIndex])
+    values.push(index.config_keys[allKeys[keyIndex]].values)
+  }
   return { keys, values }
 }
 
@@ -142,18 +157,19 @@ function assertValidConfigIdx(configIdx: number, configCount: number): void {
 }
 
 export function decodeResults(index: HostIndex, data: IndexedResults): CompactResult[] {
-  const { keys, values } = indexConfigTables(index)
-  const configCount = configSpaceSize(values)
   const benchNames = index.benchmarks.map((b) => b.name)
-  const cache: Record<string, string>[] = []
+  const caches: Record<string, string>[][] = index.benchmarks.map(() => [])
   return data.results.map((row) => {
     assertValidBenchIdx(row[0], benchNames.length)
+    const { keys, values } = benchmarkConfigTables(index, row[0])
+    const configCount = configSpaceSize(values)
     assertValidConfigIdx(row[1], configCount)
     return {
       bench: benchNames[row[0]],
-      config: cachedDecodeConfig(row[1], cache, keys, values),
-      mean_ns: row[2],
-      ci95_half_ns: row[3],
+      config: cachedDecodeConfig(row[1], caches[row[0]], keys, values),
+      measurement_token: row[2],
+      mean_ns: row[3],
+      ci95_half_ns: row[4],
     }
   })
 }
@@ -162,22 +178,23 @@ export function decodeResults(index: HostIndex, data: IndexedResults): CompactRe
 export function decodeResultsForBenchmark(index: HostIndex, data: IndexedResults, bench: string): CompactResult[] {
   const benchIdx = index.benchmarks.findIndex((b) => b.name === bench)
   if (benchIdx === -1) return []
-  const { keys, values } = indexConfigTables(index)
-  const configCount = configSpaceSize(values)
   const benchCount = index.benchmarks.length
   for (const row of data.results) {
     assertValidBenchIdx(row[0], benchCount)
-    assertValidConfigIdx(row[1], configCount)
+    const { values } = benchmarkConfigTables(index, row[0])
+    assertValidConfigIdx(row[1], configSpaceSize(values))
   }
 
+  const { keys, values } = benchmarkConfigTables(index, benchIdx)
   const cache: Record<string, string>[] = []
   return data.results
     .filter((row: ResultRow) => row[0] === benchIdx)
     .map((row: ResultRow) => ({
       bench,
       config: cachedDecodeConfig(row[1], cache, keys, values),
-      mean_ns: row[2],
-      ci95_half_ns: row[3],
+      measurement_token: row[2],
+      mean_ns: row[3],
+      ci95_half_ns: row[4],
     }))
 }
 
@@ -185,25 +202,33 @@ export function decodeResultsForBenchmark(index: HostIndex, data: IndexedResults
 export function decodeLatestResults(index: HostIndex): CompactResult[] | null {
   const rows = index.latest_results
   if (!rows) return null
-  const { keys, values } = indexConfigTables(index)
-  const configCount = configSpaceSize(values)
   const benchNames = index.benchmarks.map((b) => b.name)
-  const cache: Record<string, string>[] = []
+  const caches: Record<string, string>[][] = index.benchmarks.map(() => [])
   return rows.map((row) => {
     assertValidBenchIdx(row[0], benchNames.length)
+    const { keys, values } = benchmarkConfigTables(index, row[0])
+    const configCount = configSpaceSize(values)
     assertValidConfigIdx(row[1], configCount)
     return {
       bench: benchNames[row[0]],
-      config: cachedDecodeConfig(row[1], cache, keys, values),
-      mean_ns: row[2],
-      ci95_half_ns: row[3],
+      config: cachedDecodeConfig(row[1], caches[row[0]], keys, values),
+      measurement_token: row[2],
+      mean_ns: row[3],
+      ci95_half_ns: row[4],
     }
   })
 }
 
 /** Decode one benchmark history payload and keep only rows for a target config. */
-export function decodeHistory(index: HostIndex, data: IndexedHistory, config: Record<string, string>): HistorySeries[] {
-  const { keys, values } = indexConfigTables(index)
+export function decodeHistory(
+  index: HostIndex,
+  data: IndexedHistory,
+  bench: string,
+  config: Record<string, string>,
+): HistorySeries[] {
+  const benchIdx = index.benchmarks.findIndex((entry) => entry.name === bench)
+  if (benchIdx === -1) return []
+  const { keys, values } = benchmarkConfigTables(index, benchIdx)
   const configCount = configSpaceSize(values)
   const configIdx = encodeConfig(config, keys, values)
   if (configIdx === -1) {
@@ -217,9 +242,10 @@ export function decodeHistory(index: HostIndex, data: IndexedHistory, config: Re
     .filter((row) => row[0] === configIdx)
     .map((row) => ({
       config: cachedDecodeConfig(row[0], cache, keys, values),
-      timestamp: row[1],
-      median_run_mean_ns: row[2],
-      median_run_ci95_half_ns: row[3],
-      run_count: row[4],
+      measurement_token: row[1],
+      timestamp: row[2],
+      median_run_mean_ns: row[3],
+      median_run_ci95_half_ns: row[4],
+      run_count: row[5],
     }))
 }

@@ -98,8 +98,8 @@ describe("Timeline filters", () => {
 
   it("passes filter values in canonical index order", async () => {
     mockDecodeResultsForBenchmark.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "z" }, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "a" }, mean_ns: 101, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "a", mode: "z" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "b", mode: "a" }, measurement_token: 0, mean_ns: 101, ci95_half_ns: 1 },
     ])
 
     renderWithRouterAndQueryClient(<Timeline />, {
@@ -111,8 +111,8 @@ describe("Timeline filters", () => {
 
   it("reads f_* URL filters and keeps them in the URL", async () => {
     mockDecodeResultsForBenchmark.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "z" }, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "a" }, mean_ns: 101, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "a", mode: "z" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
+      { bench: "bench-a", config: { commit: "b", mode: "a" }, measurement_token: 0, mean_ns: 101, ci95_half_ns: 1 },
     ])
 
     renderWithRouterAndQueryClient(

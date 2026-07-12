@@ -1,7 +1,7 @@
 mod run;
 mod stats;
 mod web_export;
-pub use run::{RunEngine, RunEngineConfig, RunEngineError};
+pub use run::{RunEngine, RunEngineConfig, RunEngineError, RunMode, RunReport};
 pub use stats::{
     FastestResult, ImpactEntry, ImpactSummary, StatsEngine, StatsEngineError, TimelinePoint,
     TimelineResult, TimelineSummary,

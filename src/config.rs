@@ -862,6 +862,16 @@ impl ConfigProduct {
         true
     }
 
+    /// The config keys in canonical order.
+    #[must_use]
+    pub fn keys(&self) -> impl ExactSizeIterator<Item = &Key> {
+        self.subsets.iter().map(|subset| &subset.key)
+    }
+
+    fn has_same_keys(&self, other: &ConfigProduct) -> bool {
+        self.keys().eq(other.keys())
+    }
+
     /// Get the total number of configs in the Cartesian product
     #[must_use]
     #[allow(clippy::len_without_is_empty, reason = "len is always > 0")]
@@ -870,6 +880,43 @@ impl ConfigProduct {
         self.subsets
             .iter()
             .fold(1usize, |len, subset| len.strict_mul(subset.indexes.len()))
+    }
+
+    /// Reconstruct one concrete config by its stable Cartesian-product ordinal.
+    #[must_use]
+    pub(crate) fn config_at(&self, ordinal: usize) -> Option<Config> {
+        if ordinal >= self.len() {
+            return None;
+        }
+
+        let mut config = Config::new();
+        config.kv.reserve(self.subsets.len());
+        let mut stride = self.len();
+        for subset in &self.subsets {
+            stride /= subset.indexes.len();
+            let coordinate = (ordinal / stride) % subset.indexes.len();
+            config.kv.push(KeyValue {
+                key: subset.key.clone(),
+                index: subset.indexes[coordinate],
+            });
+        }
+        Some(config)
+    }
+
+    /// Describe the sub-product formed by keys referenced in `template`.
+    pub(crate) fn projection_for_template(&self, template: &str) -> ConfigProjection {
+        let mut stride = self.len();
+        let mut dimensions = Vec::new();
+        for subset in &self.subsets {
+            stride /= subset.indexes.len();
+            if template_uses_key(template, subset.key.name()) {
+                dimensions.push(ProjectionDimension {
+                    stride,
+                    radix: subset.indexes.len(),
+                });
+            }
+        }
+        ConfigProjection { dimensions }
     }
 
     /// Iterate over all configs in the Cartesian product lazily
@@ -881,6 +928,41 @@ impl ConfigProduct {
             len: self.len(),
         }
     }
+}
+
+/// Mixed-radix projection of a [`ConfigProduct`] onto selected template keys.
+pub(crate) struct ConfigProjection {
+    dimensions: Vec<ProjectionDimension>,
+}
+
+struct ProjectionDimension {
+    stride: usize,
+    radix: usize,
+}
+
+impl ConfigProjection {
+    /// Number of distinct value combinations in this projection.
+    pub(crate) fn len(&self) -> usize {
+        self.dimensions
+            .iter()
+            .fold(1usize, |len, dimension| len.strict_mul(dimension.radix))
+    }
+
+    /// Project a full-product ordinal into the compact projected product.
+    pub(crate) fn project(&self, ordinal: usize) -> usize {
+        self.dimensions.iter().fold(0, |projected, dimension| {
+            let coordinate = (ordinal / dimension.stride) % dimension.radix;
+            projected * dimension.radix + coordinate
+        })
+    }
+}
+
+fn template_uses_key(template: &str, key: &str) -> bool {
+    template.match_indices('{').any(|(start, _)| {
+        template[start + 1..]
+            .find('}')
+            .is_some_and(|end| &template[start + 1..start + 1 + end] == key)
+    })
 }
 
 impl IntoIterator for ConfigProduct {
@@ -976,11 +1058,44 @@ impl ExactSizeIterator for ConfigProductIter<'_> {
     }
 }
 
+/// Content-deduplication strategy a benchmark declares.
+///
+/// See the `group` module for how this drives runtime grouping. The value is a benchmark-level
+/// assertion by the config author that the benchmark's executables are path-independent for the
+/// purposes of measurement, so byte-identical invocations can be measured once and shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DedupeStrategy {
+    /// Group by `(device, inode)` first, then confirm by content hash before reuse.
+    ///
+    /// Valid when duplicate executable/stdin paths are hardlinks (as in the aoc-rs corpus).
+    InodeContent,
+}
+
+impl DedupeStrategy {
+    /// Parse a `dedupe` strategy name as written in `config.json`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "inode-content" => Some(Self::InodeContent),
+            _ => None,
+        }
+    }
+
+    /// The strategy name as written in `config.json`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InodeContent => "inode-content",
+        }
+    }
+}
+
 /// A benchmark with one or more config variants
 #[derive(Debug)]
 pub struct Benchmark {
     id: BenchmarkId,
     variants: Arc<[BenchmarkVariant]>,
+    dedupe: Option<DedupeStrategy>,
 }
 
 impl Benchmark {
@@ -1004,6 +1119,7 @@ impl Benchmark {
                 checksum,
                 stats,
             )?],
+            None,
         )
     }
 
@@ -1011,9 +1127,19 @@ impl Benchmark {
     pub fn new_with_variants(
         id: BenchmarkId,
         variants: Vec<BenchmarkVariant>,
+        dedupe: Option<DedupeStrategy>,
     ) -> Result<Self, ConfigError> {
         if variants.is_empty() {
             return Err(ConfigError::EmptyBenchmarkVariants(id.to_string()));
+        }
+
+        let first_config = &variants[0].config;
+        if variants
+            .iter()
+            .skip(1)
+            .any(|variant| !first_config.has_same_keys(&variant.config))
+        {
+            return Err(ConfigError::MismatchedBenchmarkVariantKeys(id.to_string()));
         }
 
         for (i, lhs) in variants.iter().enumerate() {
@@ -1027,6 +1153,7 @@ impl Benchmark {
         Ok(Self {
             id,
             variants: variants.into(),
+            dedupe,
         })
     }
 
@@ -1036,10 +1163,25 @@ impl Benchmark {
         &self.id
     }
 
+    /// The content-deduplication strategy this benchmark declares, if any.
+    ///
+    /// `None` means the benchmark keeps the lazy per-case execution path with no content
+    /// deduplication.
+    #[must_use]
+    pub fn dedupe(&self) -> Option<DedupeStrategy> {
+        self.dedupe
+    }
+
     /// Iterate over concrete variants
     #[must_use]
     pub fn variants(&self) -> &[BenchmarkVariant] {
         &self.variants
+    }
+
+    /// The config keys shared by every variant, in canonical order.
+    #[must_use]
+    pub fn config_keys(&self) -> impl ExactSizeIterator<Item = &Key> {
+        self.variants[0].config.keys()
     }
 
     /// Find the variant whose config specification matches `config`.
@@ -1058,7 +1200,7 @@ impl Benchmark {
 }
 
 /// Concrete benchmark variant data
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BenchmarkVariant {
     benchmark_id: BenchmarkId,
     config: ConfigProduct,
@@ -1303,6 +1445,10 @@ pub enum ConfigError {
     EmptyBenchmarkVariants(String),
     #[error("Benchmark '{0}' defines overlapping variants")]
     OverlappingBenchmarkVariants(String),
+    #[error("Benchmark '{0}' defines variants with different config keys")]
+    MismatchedBenchmarkVariantKeys(String),
+    #[error("Benchmark '{benchmark}' has unknown dedupe strategy '{strategy}'")]
+    UnknownDedupeStrategy { benchmark: String, strategy: String },
     #[error("Benchmark '{0}' defined multiple times")]
     DuplicateBenchmark(String),
     #[error(
@@ -1615,6 +1761,65 @@ mod tests {
     }
 
     #[test]
+    fn test_dedupe_strategy_parsed() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "shared",
+                    "command": ["cmd", "{build}"],
+                    "config": { "build": ["debug"] },
+                    "dedupe": "inode-content"
+                },
+                {
+                    "benchmark": "isolated",
+                    "command": ["cmd", "{build}"],
+                    "config": { "build": ["release"] }
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_file = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
+
+        let shared = config_file
+            .benchmark_by_id(&"shared".try_into().unwrap())
+            .unwrap();
+        assert_eq!(shared.dedupe(), Some(DedupeStrategy::InodeContent));
+
+        let isolated = config_file
+            .benchmark_by_id(&"isolated".try_into().unwrap())
+            .unwrap();
+        assert_eq!(isolated.dedupe(), None);
+    }
+
+    #[test]
+    fn test_dedupe_unknown_strategy_rejected() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "b",
+                    "command": ["cmd", "{build}"],
+                    "config": { "build": ["debug"] },
+                    "dedupe": "content"
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::UnknownDedupeStrategy { strategy, .. } if strategy == "content"
+        ));
+    }
+
+    #[test]
     fn test_disjoint_variants_allowed() {
         let json = r#"{
             "config_keys": {
@@ -1627,10 +1832,11 @@ mod tests {
                     "benchmark": "suite",
                     "variants": [
                         {
-                            "command": ["./render", "--build={build}", "--threads={threads}"],
+                            "command": ["./render", "--build={build}", "--threads={threads}", "--aa={aa}"],
                             "config": {
                                 "build": ["debug"],
-                                "threads": ["1", "2", "4"]
+                                "threads": ["1", "2", "4"],
+                                "aa": ["off"]
                             }
                         },
                         {
@@ -1654,6 +1860,41 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = ConfigFile::from_str(temp_dir.path(), None, json).unwrap();
         assert_eq!(config.benchmarks()[0].variants().len(), 2);
+    }
+
+    #[test]
+    fn mismatched_variant_keys_rejected() {
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["debug", "release"] },
+                "threads": { "values": ["1", "2"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "suite",
+                    "variants": [
+                        {
+                            "command": ["./render", "--build={build}"],
+                            "config": { "build": ["debug"] }
+                        },
+                        {
+                            "command": ["./render", "--build={build}", "--threads={threads}"],
+                            "config": {
+                                "build": ["release"],
+                                "threads": ["1", "2"]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let temp_dir = TempDir::new().unwrap();
+        let error = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::MismatchedBenchmarkVariantKeys(benchmark) if benchmark == "suite"
+        ));
     }
 
     #[test]
@@ -1825,7 +2066,7 @@ mod tests {
     }
 
     #[test]
-    fn test_disjoint_keys_still_overlap() {
+    fn test_overlapping_value_subsets_rejected_with_uniform_keys() {
         let json = r#"{
             "config_keys": {
                 "build": { "values": ["debug", "release"] },
@@ -1837,10 +2078,11 @@ mod tests {
                     "benchmark": "suite",
                     "variants": [
                         {
-                            "command": ["./render", "--build={build}", "--threads={threads}"],
+                            "command": ["./render", "--build={build}", "--threads={threads}", "--aa={aa}"],
                             "config": {
                                 "build": ["debug"],
-                                "threads": ["1", "2"]
+                                "threads": ["1", "2"],
+                                "aa": ["off", "2x"]
                             }
                         },
                         {
@@ -2445,6 +2687,19 @@ mod tests {
                 "a=2,b=y,c=q",
             ]
         );
+
+        let product = variant.config();
+        for (ordinal, expected) in configs.iter().enumerate() {
+            assert_eq!(product.config_at(ordinal).unwrap().to_string(), *expected);
+        }
+        assert!(product.config_at(configs.len()).is_none());
+
+        let projection = product.projection_for_template("builds/{a}/{c}/bin");
+        assert_eq!(projection.len(), 4);
+        let projected: Vec<_> = (0..product.len())
+            .map(|ordinal| projection.project(ordinal))
+            .collect();
+        assert_eq!(projected, [0, 1, 0, 1, 2, 3, 2, 3]);
     }
 
     #[test]
