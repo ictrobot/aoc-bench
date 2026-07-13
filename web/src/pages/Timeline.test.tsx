@@ -56,6 +56,26 @@ describe("DrillDown", () => {
     expect(screen.getByRole("combobox", { name: "compiler:" })).toHaveTextContent("nightly")
   })
 
+  it("preselects the clicked value of a merged range", () => {
+    renderWithQueryClient(
+      <Dialog open>
+        <DialogContent>
+          <DialogDescription className="sr-only">Test drill-down dialog content</DialogDescription>
+          <DrillDown
+            host={HOST}
+            bench={BENCH}
+            configs={[{ compiler: "stable" }, { compiler: "nightly" }]}
+            varyingKey="compiler"
+            initialValue="stable"
+          />
+        </DialogContent>
+      </Dialog>,
+    )
+
+    expect(screen.getByRole("heading", { name: "History: compiler=stable" })).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "compiler:" })).toHaveTextContent("stable")
+  })
+
   it("renders an explicit error message when history query fails", async () => {
     mockDecodeHistory.mockImplementation(() => {
       throw new Error("history fetch failed")

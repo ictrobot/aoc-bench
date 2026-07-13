@@ -16,13 +16,6 @@ export interface TimelineResultGroup {
   fixedSignature: string
 }
 
-export type TimelineBarDatum<T extends TimelineResultGroup = TimelineResultGroup> = T & {
-  axisValue: string
-  groupIndex: number
-  isRangeStart: boolean
-  errorBarCi95HalfNs?: number
-}
-
 /** Coalesce only contiguous cases backed by the exact same shared measurement. */
 export function groupTimelineResults(
   sortedResults: CompactResult[],
@@ -73,20 +66,4 @@ export function groupTimelineResults(
     })
   }
   return groups
-}
-
-/** Expand a merged range into one adjacent chart slot per concrete case. */
-export function expandTimelineGroups<T extends TimelineResultGroup>(
-  groups: T[],
-  varyingKey: string,
-): TimelineBarDatum<T>[] {
-  return groups.flatMap((group, groupIndex) =>
-    group.configs.map((config, caseIndex) => ({
-      ...group,
-      axisValue: config[varyingKey] ?? "",
-      groupIndex,
-      isRangeStart: caseIndex === 0,
-      errorBarCi95HalfNs: caseIndex === Math.floor((group.configs.length - 1) / 2) ? group.ci95_half_ns : undefined,
-    })),
-  )
 }

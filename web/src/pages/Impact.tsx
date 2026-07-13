@@ -334,7 +334,7 @@ function ImpactTable({
         cellClassName: "text-right",
         compare: (a: ImpactRow, b: ImpactRow) => a.relChange - b.relChange,
         render: (row: ImpactRow) => (
-          <span className={row.direction === "regression" ? "text-destructive" : "text-green-600"}>
+          <span className={row.direction === "regression" ? "text-destructive" : "text-improvement"}>
             {row.direction === "regression" ? "+" : "-"}
             {(row.relChange * 100).toFixed(2)}%
           </span>

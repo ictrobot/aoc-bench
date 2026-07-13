@@ -1,21 +1,9 @@
-import React, { useEffect, useId, useMemo, useState, useTransition } from "react"
+import { useEffect, useId, useMemo, useState, useTransition } from "react"
 import { useUrlHostBenchmark, useUrlParam, useUrlFilters } from "@/hooks/use-url-state.tsx"
-import {
-  ComposedChart,
-  Bar,
-  ErrorBar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Rectangle,
-  ReferenceLine,
-  type BarShapeProps,
-} from "recharts"
 import { useBenchmarkResults, useBenchmarkHistory } from "@/hooks/queries.ts"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
 import { HistoryChart } from "@/components/charts/HistoryChart.tsx"
+import { StepTimelineChart, type TimelineChartGroup } from "@/components/charts/StepTimelineChart.tsx"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog.tsx"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx"
@@ -25,7 +13,8 @@ import { Badge } from "@/components/ui/badge.tsx"
 import { Button } from "@/components/ui/button.tsx"
 import type { CompactResult, HostIndex } from "@/lib/types.ts"
 import { relativeChange } from "@/lib/delta.ts"
-import { expandTimelineGroups, groupTimelineResults, type TimelineResultGroup } from "@/lib/timeline-grouping.ts"
+import { groupTimelineResults } from "@/lib/timeline-grouping.ts"
+import { GroupValueLabel } from "@/components/config/GroupValueLabel.tsx"
 
 export function Timeline() {
   const { host, bench, hostIndex, setBench } = useUrlHostBenchmark()
@@ -74,7 +63,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
   const { filters: urlFilters, setFilter, clearFilters } = useUrlFilters()
 
   const [isPending, startTransition] = useTransition()
-  const [selectedGroup, setSelectedGroup] = useState<TimelineResultGroup | null>(null)
+  const [selected, setSelected] = useState<{ group: TimelineChartGroup; value?: string } | null>(null)
   const compareByControlId = useId()
   const compareByLabelId = `${compareByControlId}-label`
 
@@ -129,7 +118,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
   }, [analysis, preferredVaryingKey, filters, results])
 
   // Filter and sort results
-  const chartData = useMemo(() => {
+  const chartData = useMemo((): TimelineChartGroup[] => {
     if (!results || !effectiveVaryingKey) return []
 
     const filtered = filterResultsByConfig(results, filters, effectiveVaryingKey)
@@ -152,16 +141,13 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
     )
     return grouped.map((group, i) => {
       const prev = i > 0 ? grouped[i - 1] : null
-      let color = "oklch(0.60 0.15 250)" // blue — no significant change
+      let color = "var(--color-chart-1)" // no significant change
       let delta: number | null = null
       if (prev) {
         const relChange = relativeChange(group.mean_ns, prev.mean_ns)
         delta = relChange
         if (relChange !== null && Math.abs(relChange) > 0.1) {
-          color =
-            relChange > 0
-              ? "oklch(0.55 0.22 25)" // red — regression
-              : "oklch(0.55 0.20 142)" // green — improvement
+          color = relChange > 0 ? "var(--color-destructive)" : "var(--color-improvement)"
         }
       }
       return {
@@ -172,12 +158,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
     })
   }, [results, filters, effectiveVaryingKey, index])
 
-  const barChartData = useMemo(
-    () => expandTimelineGroups(chartData, effectiveVaryingKey),
-    [chartData, effectiveVaryingKey],
-  )
-
-  // Top 10 changes >10% by magnitude — used for sparse labelling in overview mode
+  // Top 10 changes >10% by magnitude — markers + sparse labelling in overview mode
   const significantGroupIndices = useMemo((): Set<number> => {
     return new Set(
       chartData
@@ -189,15 +170,8 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
     )
   }, [chartData])
 
-  const significantBarIndices = useMemo((): Set<number> => {
-    return new Set(
-      barChartData.flatMap((bar, index) =>
-        bar.isRangeStart && significantGroupIndices.has(bar.groupIndex) ? [index] : [],
-      ),
-    )
-  }, [barChartData, significantGroupIndices])
-
-  const annotatedItems = useMemo(() => chartData.flatMap((group) => group.annotations), [chartData])
+  const totalCases = useMemo(() => chartData.reduce((sum, group) => sum + group.caseCount, 0), [chartData])
+  const hasAnnotations = chartData.some((d) => d.annotations.length > 0)
 
   const [detailMode, setDetailMode] = useState(false)
   const MIN_DETAIL_BAR_PX = 20
@@ -208,7 +182,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
   function onBenchChange(b: string) {
     startTransition(() => {
       setBench(b)
-      setSelectedGroup(null)
+      setSelected(null)
     })
   }
 
@@ -218,13 +192,6 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
   function resetViewFilters() {
     clearFilters()
     setCompare("")
-  }
-
-  function openChartConfigAtIndex(barIndex: number | undefined) {
-    if (barIndex === undefined || barIndex < 0) return
-    const bar = barChartData[barIndex]
-    const d = bar && chartData[bar.groupIndex]
-    if (d) setSelectedGroup(d)
   }
 
   return (
@@ -324,97 +291,26 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
             <CardContent>
               {detailMode ? (
                 <div className="overflow-x-auto">
-                  <div style={{ minWidth: Math.max(600, barChartData.length * MIN_DETAIL_BAR_PX) }}>
-                    <ResponsiveContainer key={bench} width="100%" height={400}>
-                      <ComposedChart
-                        data={barChartData}
-                        barCategoryGap={0}
-                        margin={{ top: 5, right: 20, bottom: 0, left: 20 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
-                        <XAxis
-                          dataKey="axisValue"
-                          angle={-45}
-                          textAnchor="end"
-                          interval={0}
-                          tickFormatter={(value: string, index: number) =>
-                            barChartData[index]?.isRangeStart ? shortenValue(value) : ""
-                          }
-                          tick={{ fontSize: 11 }}
-                          height={100}
-                        />
-                        <YAxis tickFormatter={(v: number) => formatDurationNs(v)} tick={{ fontSize: 11 }} width={80} />
-                        <Tooltip content={<TimelineTooltip />} />
-                        <Bar
-                          dataKey="mean_ns"
-                          isAnimationActive={false}
-                          onClick={(_data, index) => openChartConfigAtIndex(index)}
-                          cursor="pointer"
-                          shape={WideTimelineBar}
-                        >
-                          <ErrorBar
-                            dataKey="errorBarCi95HalfNs"
-                            width={4}
-                            strokeWidth={1.5}
-                            stroke="var(--color-foreground)"
-                            direction="y"
-                          />
-                        </Bar>
-                        {annotatedItems.map((d) => (
-                          <ReferenceLine
-                            key={d.value}
-                            x={d.value}
-                            stroke="var(--color-foreground)"
-                            strokeOpacity={0.8}
-                            strokeDasharray="6 3"
-                            strokeWidth={2.5}
-                          />
-                        ))}
-                      </ComposedChart>
-                    </ResponsiveContainer>
+                  <div style={{ minWidth: Math.max(600, totalCases * MIN_DETAIL_BAR_PX) }}>
+                    <StepTimelineChart
+                      key={bench}
+                      groups={chartData}
+                      varyingKey={effectiveVaryingKey}
+                      significantGroupIndices={significantGroupIndices}
+                      xLabels="all"
+                      onGroupClick={(group, value) => setSelected({ group, value })}
+                    />
                   </div>
                 </div>
               ) : (
-                <ResponsiveContainer key={bench} width="100%" height={400}>
-                  <ComposedChart
-                    data={barChartData}
-                    barCategoryGap={0}
-                    margin={{ top: 5, right: 20, bottom: 0, left: 20 }}
-                  >
-                    {barChartData.length <= 30 && <CartesianGrid strokeDasharray="3 3" className="opacity-30" />}
-                    <XAxis
-                      dataKey="axisValue"
-                      angle={-45}
-                      textAnchor="end"
-                      interval={0}
-                      tick={<SparseTick significantIndices={significantBarIndices} />}
-                      height={significantBarIndices.size === 0 ? 5 : 80}
-                    />
-                    <YAxis tickFormatter={(v: number) => formatDurationNs(v)} tick={{ fontSize: 11 }} width={80} />
-                    <Tooltip content={<TimelineTooltip />} />
-                    {annotatedItems.map((d) => (
-                      <ReferenceLine
-                        key={d.value}
-                        x={d.value}
-                        stroke="var(--color-muted-foreground)"
-                        strokeDasharray="3 3"
-                        label={{
-                          value: d.label,
-                          position: "top",
-                          fontSize: 10,
-                          fill: "currentColor",
-                        }}
-                      />
-                    ))}
-                    <Bar
-                      dataKey="mean_ns"
-                      isAnimationActive={false}
-                      onClick={(_data, index) => openChartConfigAtIndex(index)}
-                      cursor="pointer"
-                      shape={WideTimelineBar}
-                    />
-                  </ComposedChart>
-                </ResponsiveContainer>
+                <StepTimelineChart
+                  key={bench}
+                  groups={chartData}
+                  varyingKey={effectiveVaryingKey}
+                  significantGroupIndices={significantGroupIndices}
+                  xLabels="sparse"
+                  onGroupClick={(group, value) => setSelected({ group, value })}
+                />
               )}
             </CardContent>
           </Card>
@@ -429,6 +325,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
               <Table>
                 <TableHeader>
                   <TableRow>
+                    {hasAnnotations && <TableHead className="w-0" />}
                     <TableHead>{effectiveVaryingKey}</TableHead>
                     <TableHead className="text-right">Mean</TableHead>
                     <TableHead className="text-right">CI</TableHead>
@@ -438,25 +335,21 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
                 <TableBody>
                   {chartData.map((d, i) => (
                     <TableRow key={i}>
-                      <TableCell className="font-mono text-sm">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedGroup(d)}
-                          className="hover:underline"
-                          title={d.fullValue}
-                          aria-label={`Open history for ${d.fullValue}`}
-                        >
-                          {shortenValue(d.fullValue)}
-                        </button>
-                        {d.annotations.map((annotation) => (
-                          <Badge key={annotation.value} variant="outline" className="ml-2 font-sans text-xs">
-                            {annotation.label}
-                          </Badge>
-                        ))}
+                      {hasAnnotations && (
+                        <TableCell className="whitespace-nowrap">
+                          {d.annotations.map((annotation) => (
+                            <Badge key={annotation.value} variant="secondary" className="font-sans text-xs">
+                              {annotation.label}
+                            </Badge>
+                          ))}
+                        </TableCell>
+                      )}
+                      <TableCell className="text-sm">
+                        <GroupValueLabel group={d} onSelectValue={(value) => setSelected({ group: d, value })} />
                         {d.caseCount > 1 && (
                           <Badge
-                            variant="secondary"
-                            className="ml-2 font-sans text-xs"
+                            variant="outline"
+                            className="ml-2 font-sans text-xs text-muted-foreground"
                             title={`These ${d.caseCount} cases produced identical binaries, so one benchmark result applies to all of them`}
                           >
                             {d.caseCount} identical
@@ -467,7 +360,9 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
                       <TableCell className="text-right text-muted-foreground">{formatCi(d.ci95_half_ns)}</TableCell>
                       <TableCell className="text-right">
                         {d.delta !== null ? (
-                          <span className={d.delta > 0.1 ? "text-destructive" : d.delta < -0.1 ? "text-green-600" : ""}>
+                          <span
+                            className={d.delta > 0.1 ? "text-destructive" : d.delta < -0.1 ? "text-improvement" : ""}
+                          >
                             {d.delta > 0 ? "+" : ""}
                             {(d.delta * 100).toFixed(2)}%
                           </span>
@@ -484,40 +379,25 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
         )}
 
         <Dialog
-          open={selectedGroup !== null}
+          open={selected !== null}
           onOpenChange={(open) => {
-            if (!open) setSelectedGroup(null)
+            if (!open) setSelected(null)
           }}
         >
           <DialogContent className="max-w-4xl">
-            {selectedGroup && (
-              <DrillDown host={host} bench={bench} configs={selectedGroup.configs} varyingKey={effectiveVaryingKey} />
+            {selected && (
+              <DrillDown
+                host={host}
+                bench={bench}
+                configs={selected.group.configs}
+                varyingKey={effectiveVaryingKey}
+                initialValue={selected.value}
+              />
             )}
           </DialogContent>
         </Dialog>
       </div>
     </div>
-  )
-}
-
-interface WideTimelineBarPayload {
-  isRangeStart: boolean
-  caseCount: number
-  color: string
-}
-
-/** Draw one real rectangle over all of the case-width slots reserved for a merged range. */
-function WideTimelineBar(props: BarShapeProps) {
-  const payload = props.payload as WideTimelineBarPayload | undefined
-  if (!payload?.isRangeStart) return <g />
-
-  return (
-    <Rectangle
-      {...props}
-      width={Math.max(0, props.width * payload.caseCount - 1)}
-      fill={payload.color}
-      radius={[2, 2, 0, 0]}
-    />
   )
 }
 
@@ -543,59 +423,21 @@ function BenchmarkSelector({
   )
 }
 
-function TimelineTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean
-  payload?: Array<{
-    payload: {
-      fullValue: string
-      mean_ns: number
-      ci95_half_ns: number
-      delta: number | null
-      annotations: { value: string; label: string }[]
-      caseCount: number
-    }
-  }>
-}) {
-  if (!active || !payload?.[0]) return null
-  const d = payload[0].payload
-  return (
-    <div className="rounded-md border bg-background p-3 shadow-md text-sm">
-      <div className="font-medium">{d.fullValue}</div>
-      {d.annotations.map((annotation) => (
-        <div key={annotation.value}>
-          {shortenValue(annotation.value)}: {annotation.label}
-        </div>
-      ))}
-      <div>
-        Mean: {formatDurationNs(d.mean_ns)}
-        <span className="text-muted-foreground"> {formatCi(d.ci95_half_ns)}</span>
-      </div>
-      {d.delta !== null && (
-        <div>
-          Delta: {d.delta > 0 ? "+" : ""}
-          {(d.delta * 100).toFixed(2)}%
-        </div>
-      )}
-    </div>
-  )
-}
-
 export function DrillDown({
   host,
   bench,
   configs,
   varyingKey,
+  initialValue,
 }: {
   host: string
   bench: string
   configs: Record<string, string>[]
   varyingKey: string
+  initialValue?: string
 }) {
   const selectorId = useId()
-  const [selectedValue, setSelectedValue] = useState(configs.at(-1)?.[varyingKey] ?? "")
+  const [selectedValue, setSelectedValue] = useState(initialValue ?? configs.at(-1)?.[varyingKey] ?? "")
   const config = configs.find((candidate) => candidate[varyingKey] === selectedValue) ?? configs.at(-1)!
   const { data, isLoading, error } = useBenchmarkHistory(host, bench, config)
 
@@ -639,29 +481,6 @@ export function DrillDown({
           <div className="text-muted-foreground py-8 text-center">No history found.</div>
         ))}
     </>
-  )
-}
-
-function SparseTick({
-  x = 0,
-  y = 0,
-  payload,
-  index = 0,
-  significantIndices,
-}: React.SVGProps<SVGGElement> & {
-  payload?: { value: string }
-  index?: number
-  significantIndices: Set<number>
-}) {
-  if (!significantIndices.has(index)) {
-    return <g />
-  }
-  return (
-    <g transform={`translate(${x},${y})`}>
-      <text x={0} y={0} dy={4} textAnchor="end" fill="currentColor" fontSize={11} transform="rotate(-45)">
-        {payload?.value ? shortenValue(String(payload.value)) : ""}
-      </text>
-    </g>
   )
 }
 

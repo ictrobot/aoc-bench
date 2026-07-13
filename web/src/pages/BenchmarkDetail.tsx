@@ -3,13 +3,12 @@ import { Link } from "react-router"
 import { useUrlHostBenchmark } from "@/hooks/use-url-state.tsx"
 import { useBenchmarkResults } from "@/hooks/queries.ts"
 import { compareConfigsByOrder } from "@/lib/config-order.ts"
-import { formatDurationNs, formatCi, shortenValue } from "@/lib/format.ts"
+import { formatDurationNs, shortenValue } from "@/lib/format.ts"
 import { Card, CardContent } from "@/components/ui/card.tsx"
 import { withQuery } from "@/lib/routes.ts"
 import { buildConfigSignature } from "@/lib/config-signature.ts"
+import { downsampleSparkValues } from "@/lib/downsample.ts"
 import type { CompactResult, HostIndex } from "@/lib/types.ts"
-
-const MAX_SPARK_POINTS = 100
 
 export function BenchmarkDetail() {
   const { host, bench, hostIndex } = useUrlHostBenchmark()
@@ -104,20 +103,7 @@ function BenchmarkDetailContent({
           ...group.trendPoints.map((p) => p.trendValue).filter((v) => !canonicalTrendOrder.includes(v)),
         ]
 
-        // Downsample to MAX_SPARK_POINTS
-        const step = ordered.length > MAX_SPARK_POINTS ? ordered.length / MAX_SPARK_POINTS : 1
-        const sampled =
-          step <= 1
-            ? ordered
-            : Array.from({ length: MAX_SPARK_POINTS }, (_, i) => {
-                if (i === 0) return ordered[0]
-                if (i === MAX_SPARK_POINTS - 1) return ordered[ordered.length - 1]
-                return ordered[Math.min(Math.round(i * step), ordered.length - 2)]
-              })
-
-        const sparkData = sampled.map((v) => ({
-          value: pointMap.get(v)!,
-        }))
+        const sparkData = downsampleSparkValues(ordered.map((v) => pointMap.get(v)!))
 
         const filterParams = Object.fromEntries(Object.entries(group.config).map(([k, v]) => [`f_${k}`, v]))
 
@@ -145,7 +131,7 @@ interface CardData {
   config: Record<string, string>
   mean_ns: number
   ci95_half_ns: number
-  sparkData: { value: number }[]
+  sparkData: number[]
   timelineUrl: string
 }
 
@@ -166,9 +152,9 @@ function CardGrid({ cards }: { cards: CardData[] }) {
   )
 }
 
-function ConfigCard({ config, mean_ns, ci95_half_ns, sparkData, timelineUrl }: CardData) {
+function ConfigCard({ config, mean_ns, sparkData, timelineUrl }: CardData) {
   return (
-    <Link to={timelineUrl}>
+    <Link to={timelineUrl} style={{ contentVisibility: "auto", containIntrinsicSize: "auto 220px" }}>
       <Card className="hover:bg-muted/50 transition-colors cursor-pointer h-full">
         <CardContent className="p-5 flex flex-col gap-3">
           {Object.entries(config).length > 0 && (
@@ -180,27 +166,45 @@ function ConfigCard({ config, mean_ns, ci95_half_ns, sparkData, timelineUrl }: C
               ))}
             </div>
           )}
-          <div>
-            <div className="text-3xl font-bold tabular-nums">{formatDurationNs(mean_ns)}</div>
-            <div className="text-sm text-muted-foreground">{formatCi(ci95_half_ns)}</div>
-          </div>
-          {sparkData.length > 1 && <SparkBar data={sparkData} />}
+          <div className="text-3xl font-bold tabular-nums">{formatDurationNs(mean_ns)}</div>
+          {sparkData.length > 1 && <SparkStep data={sparkData} />}
         </CardContent>
       </Card>
     </Link>
   )
 }
 
-function SparkBar({ data }: { data: { value: number }[] }) {
-  const max = Math.max(...data.map((d) => d.value)) || 1
-  const W = data.length
+const SPARK_LINE_COLOR = "var(--color-chart-1)"
+const SPARK_FILL_COLOR = "color-mix(in oklab, var(--color-chart-1) 15%, transparent)"
+
+/**
+ * From-0 step-line sparkline. The data is piecewise-constant, so the path only
+ * needs commands where the value changes — two paths and a few dozen commands
+ * per card instead of one rect per point, which matters with hundreds of cards.
+ */
+function SparkStep({ data }: { data: number[] }) {
   const H = 80
+  let dataMax = 0
+  for (const v of data) if (v > dataMax) dataMax = v
+  const max = (dataMax || 1) * 1.05
+  const x = (i: number) => (i / data.length) * 100
+  const y = (v: number) => 1 + (H - 1) * (1 - v / max)
+  let path = `M 0 ${y(data[0])}`
+  for (let i = 1; i < data.length; i++) {
+    if (data[i] !== data[i - 1]) path += ` H ${x(i)} V ${y(data[i])}`
+  }
+  path += " H 100"
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none">
-      {data.map((d, i) => {
-        const h = Math.max(0.5, (d.value / max) * H)
-        return <rect key={i} x={i} y={H - h} width={1} height={h} fill="var(--color-muted-foreground)" />
-      })}
+    <svg viewBox={`0 0 100 ${H}`} width="100%" height={H} preserveAspectRatio="none" aria-hidden="true">
+      <path d={`${path} V ${H} H 0 Z`} fill={SPARK_FILL_COLOR} />
+      <path
+        d={path}
+        fill="none"
+        stroke={SPARK_LINE_COLOR}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        vectorEffect="non-scaling-stroke"
+      />
     </svg>
   )
 }

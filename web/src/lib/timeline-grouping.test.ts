@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { CompactResult } from "./types.ts"
-import { expandTimelineGroups, groupTimelineResults } from "./timeline-grouping.ts"
+import { groupTimelineResults } from "./timeline-grouping.ts"
 
 const result = (commit: string, token: number): CompactResult => ({
   bench: "bench",
@@ -27,16 +27,6 @@ describe("groupTimelineResults", () => {
       ["d", 1, 0],
     ])
     expect(groups[0].configs.map((config) => config.commit)).toEqual(["a", "b"])
-
-    const bars = expandTimelineGroups(groups, "commit")
-    expect(bars.map(({ axisValue, groupIndex, isRangeStart }) => [axisValue, groupIndex, isRangeStart])).toEqual([
-      ["a", 0, true],
-      ["b", 0, false],
-      ["c", 1, true],
-      ["d", 2, true],
-    ])
-    expect(bars.map((bar) => bar.fullValue)).toEqual(["a–b", "a–b", "c", "d"])
-    expect(bars.map((bar) => bar.errorBarCi95HalfNs)).toEqual([2, undefined, 2, 2])
   })
 
   it("does not merge across gaps or different fixed configs", () => {
