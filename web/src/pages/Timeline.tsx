@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useState, useTransition } from "react"
+import { ExternalLink } from "lucide-react"
 import { useUrlHostBenchmark, useUrlParam, useUrlFilters } from "@/hooks/use-url-state.tsx"
 import { useBenchmarkResults, useBenchmarkHistory } from "@/hooks/queries.ts"
 import { ConfigFilter } from "@/components/config/ConfigFilter.tsx"
@@ -15,6 +16,7 @@ import type { CompactResult, HostIndex } from "@/lib/types.ts"
 import { relativeChange } from "@/lib/delta.ts"
 import { groupTimelineResults } from "@/lib/timeline-grouping.ts"
 import { GroupValueLabel } from "@/components/config/GroupValueLabel.tsx"
+import { configValueUrl } from "@/lib/routes.ts"
 
 export function Timeline() {
   const { host, bench, hostIndex, setBench } = useUrlHostBenchmark()
@@ -172,6 +174,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
 
   const totalCases = useMemo(() => chartData.reduce((sum, group) => sum + group.caseCount, 0), [chartData])
   const hasAnnotations = chartData.some((d) => d.annotations.length > 0)
+  const linkTemplate = index.config_keys[effectiveVaryingKey]?.link
 
   const [detailMode, setDetailMode] = useState(false)
   const MIN_DETAIL_BAR_PX = 20
@@ -345,6 +348,18 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
                         </TableCell>
                       )}
                       <TableCell className="text-sm">
+                        {linkTemplate && (
+                          <a
+                            href={configValueUrl(linkTemplate, d.startValue)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mr-1.5 inline-flex align-middle text-muted-foreground hover:text-foreground"
+                            title={`Open link for ${shortenValue(d.startValue)}`}
+                            aria-label={`Open link for ${shortenValue(d.startValue)}`}
+                          >
+                            <ExternalLink className="size-3.5" />
+                          </a>
+                        )}
                         <GroupValueLabel group={d} onSelectValue={(value) => setSelected({ group: d, value })} />
                         {d.caseCount > 1 && (
                           <Badge
@@ -392,6 +407,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
                 configs={selected.group.configs}
                 varyingKey={effectiveVaryingKey}
                 initialValue={selected.value}
+                linkTemplate={linkTemplate}
               />
             )}
           </DialogContent>
@@ -429,12 +445,14 @@ export function DrillDown({
   configs,
   varyingKey,
   initialValue,
+  linkTemplate,
 }: {
   host: string
   bench: string
   configs: Record<string, string>[]
   varyingKey: string
   initialValue?: string
+  linkTemplate?: string
 }) {
   const selectorId = useId()
   const [selectedValue, setSelectedValue] = useState(initialValue ?? configs.at(-1)?.[varyingKey] ?? "")
@@ -449,6 +467,17 @@ export function DrillDown({
     <>
       <DialogHeader>
         <DialogTitle>History: {configLabel}</DialogTitle>
+        {linkTemplate && config[varyingKey] && (
+          <a
+            href={configValueUrl(linkTemplate, config[varyingKey])}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground hover:underline"
+          >
+            <span className="font-mono">{shortenValue(config[varyingKey])}</span>
+            <ExternalLink className="size-3.5" />
+          </a>
+        )}
       </DialogHeader>
       {configs.length > 1 && (
         <div className="flex items-center gap-2">

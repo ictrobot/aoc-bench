@@ -62,12 +62,26 @@ async function fetchJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** Mirrors the exporter's link validation: an https URL containing `{value}`. */
+function isValidLinkTemplate(link: string): boolean {
+  return link.startsWith("https://") && link.includes("{value}")
+}
+
 /** Load the top-level host index metadata. */
 export async function loadIndex(): Promise<GlobalIndex> {
   const index = await fetchJson<GlobalIndex>("index.json")
   if (index.schema_version !== WEB_SCHEMA_VERSION) {
     throw new Error(`Unsupported web export schema ${index.schema_version}; expected ${WEB_SCHEMA_VERSION}`)
   }
+
+  for (const host of Object.values(index.hosts)) {
+    for (const key of Object.values(host.config_keys)) {
+      if (key.link !== undefined && !isValidLinkTemplate(key.link)) {
+        delete key.link
+      }
+    }
+  }
+
   return index
 }
 

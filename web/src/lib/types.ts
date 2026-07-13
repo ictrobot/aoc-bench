@@ -26,7 +26,7 @@ export interface GlobalIndex {
 export interface HostIndex {
   last_updated: number
   description?: string
-  config_keys: Record<string, { values: string[]; annotations?: Record<string, string> }>
+  config_keys: Record<string, { values: string[]; annotations?: Record<string, string>; link?: string }>
   benchmarks: { name: string; result_count: number; config_keys: number[] }[]
   timeline_key: string | null
   results_path: string

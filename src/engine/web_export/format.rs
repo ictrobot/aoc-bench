@@ -77,6 +77,9 @@ pub struct WebConfigKey {
     pub values: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
+    /// URL template containing `{value}`, e.g. a commit link
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]

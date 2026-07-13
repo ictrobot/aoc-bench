@@ -208,6 +208,7 @@ struct KeyInner {
     values: Vec<Arc<str>>,
     name_to_idx: HashMap<Arc<str>, usize>,
     annotations: HashMap<usize, Arc<str>>,
+    link_template: Option<Arc<str>>,
 }
 
 impl Key {
@@ -224,8 +225,12 @@ impl Key {
     pub const MAX_KEY_LEN: usize = 64;
     /// Maximum allowed length for a config value name.
     pub const MAX_VALUE_LEN: usize = 128;
+    /// Placeholder that a key's link template must contain.
+    pub const LINK_VALUE_PLACEHOLDER: &'static str = "{value}";
 
-    /// Create a new configuration key with the given name and valid values.
+    /// Create a new configuration key with the given name and valid values,
+    /// optionally with a link template containing [`Self::LINK_VALUE_PLACEHOLDER`]
+    /// (e.g. a commit URL).
     ///
     /// Validates that the key name matches `[a-z][a-z0-9_]+` and values match `[a-zA-Z0-9_-]+`.
     /// Returns an error if values are empty, contain duplicates, or fail validation.
@@ -233,8 +238,18 @@ impl Key {
         name: &str,
         values: Vec<&str>,
         annotations: HashMap<&str, &str>,
+        link_template: Option<&str>,
     ) -> Result<Self, ConfigError> {
         Self::validate_key_name(name)?;
+
+        if let Some(template) = link_template
+            && !(template.contains(Self::LINK_VALUE_PLACEHOLDER)
+                && template.starts_with("https://"))
+        {
+            return Err(ConfigError::InvalidLink {
+                key: name.to_string(),
+            });
+        }
 
         let values = values
             .into_iter()
@@ -277,6 +292,7 @@ impl Key {
             values,
             name_to_idx,
             annotations: indexed_annotations,
+            link_template: link_template.map(Arc::from),
         })))
     }
 
@@ -334,7 +350,14 @@ impl Key {
             values,
             name_to_idx,
             annotations: HashMap::new(),
+            link_template: None,
         })))
+    }
+
+    /// Get the key's link template (a URL containing [`Self::LINK_VALUE_PLACEHOLDER`]), if set
+    #[must_use]
+    pub fn link_template(&self) -> Option<&str> {
+        self.0.link_template.as_deref()
     }
 
     /// Iterate over all annotated values
@@ -1473,6 +1496,8 @@ pub enum ConfigError {
     InvalidHostAtPath { host: String, path: PathBuf },
     #[error("Empty annotation for value '{value}' in key '{key}'")]
     EmptyAnnotation { key: String, value: String },
+    #[error("Link for key '{key}' must be an https URL containing {{value}}")]
+    InvalidLink { key: String },
     #[error("Config must define at least one benchmark")]
     NoBenchmarks,
 }
@@ -1486,49 +1511,67 @@ mod tests {
     #[test]
     fn test_key_validation() {
         // Valid key names
-        assert!(Key::new("commit", vec!["a"], HashMap::new()).is_ok());
-        assert!(Key::new("build_type", vec!["a"], HashMap::new()).is_ok());
-        assert!(Key::new("t123", vec!["a"], HashMap::new()).is_ok());
-        assert!(Key::new(&"k".repeat(Key::MAX_KEY_LEN), vec!["a"], HashMap::new()).is_ok());
+        assert!(Key::new("commit", vec!["a"], HashMap::new(), None).is_ok());
+        assert!(Key::new("build_type", vec!["a"], HashMap::new(), None).is_ok());
+        assert!(Key::new("t123", vec!["a"], HashMap::new(), None).is_ok());
+        assert!(
+            Key::new(
+                &"k".repeat(Key::MAX_KEY_LEN),
+                vec!["a"],
+                HashMap::new(),
+                None
+            )
+            .is_ok()
+        );
 
         // Invalid key names
-        assert!(Key::new("", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("Commit", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("123", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("build-type", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("build type", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("host", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("bench", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("benchmark", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new("timestamp", vec!["a"], HashMap::new()).is_err());
-        assert!(Key::new(&"k".repeat(Key::MAX_KEY_LEN + 1), vec!["a"], HashMap::new()).is_err());
+        assert!(Key::new("", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("Commit", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("123", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("build-type", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("build type", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("host", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("bench", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("benchmark", vec!["a"], HashMap::new(), None).is_err());
+        assert!(Key::new("timestamp", vec!["a"], HashMap::new(), None).is_err());
+        assert!(
+            Key::new(
+                &"k".repeat(Key::MAX_KEY_LEN + 1),
+                vec!["a"],
+                HashMap::new(),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn test_value_validation() {
         // Valid values
-        assert!(Key::new("test", vec!["abc123"], HashMap::new()).is_ok());
-        assert!(Key::new("test", vec!["build_type"], HashMap::new()).is_ok());
-        assert!(Key::new("test", vec!["build-type"], HashMap::new()).is_ok());
-        assert!(Key::new("test", vec!["ABC123"], HashMap::new()).is_ok());
+        assert!(Key::new("test", vec!["abc123"], HashMap::new(), None).is_ok());
+        assert!(Key::new("test", vec!["build_type"], HashMap::new(), None).is_ok());
+        assert!(Key::new("test", vec!["build-type"], HashMap::new(), None).is_ok());
+        assert!(Key::new("test", vec!["ABC123"], HashMap::new(), None).is_ok());
         assert!(
             Key::new(
                 "test",
                 vec![&"v".repeat(Key::MAX_VALUE_LEN)],
-                HashMap::new()
+                HashMap::new(),
+                None
             )
             .is_ok()
         );
 
         // Invalid values
-        assert!(Key::new("test", vec![""], HashMap::new()).is_err());
-        assert!(Key::new("test", vec!["build type"], HashMap::new()).is_err());
-        assert!(Key::new("test", vec!["build/type"], HashMap::new()).is_err());
+        assert!(Key::new("test", vec![""], HashMap::new(), None).is_err());
+        assert!(Key::new("test", vec!["build type"], HashMap::new(), None).is_err());
+        assert!(Key::new("test", vec!["build/type"], HashMap::new(), None).is_err());
         assert!(
             Key::new(
                 "test",
                 vec![&"v".repeat(Key::MAX_VALUE_LEN + 1)],
-                HashMap::new()
+                HashMap::new(),
+                None
             )
             .is_err()
         );
@@ -1536,14 +1579,14 @@ mod tests {
 
     #[test]
     fn test_key_duplicate_values() {
-        let err = Key::new("test", vec!["val1", "val2", "val1"], HashMap::new()).unwrap_err();
+        let err = Key::new("test", vec!["val1", "val2", "val1"], HashMap::new(), None).unwrap_err();
         assert!(matches!(err, ConfigError::DuplicateValue { .. }));
     }
 
     #[test]
     fn test_key_annotations() {
         let annotations = HashMap::from_iter([("b", "label for b")]);
-        let key = Key::new("test", vec!["a", "b", "c"], annotations).unwrap();
+        let key = Key::new("test", vec!["a", "b", "c"], annotations, None).unwrap();
 
         // annotations() yields the annotated value
         let items: Vec<_> = key.annotations().collect();
@@ -1563,20 +1606,56 @@ mod tests {
     #[test]
     fn test_key_annotation_unknown_value_rejected() {
         let annotations = HashMap::from_iter([("nonexistent", "label")]);
-        let err = Key::new("test", vec!["a"], annotations).unwrap_err();
+        let err = Key::new("test", vec!["a"], annotations, None).unwrap_err();
         assert!(matches!(err, ConfigError::UnknownValueForKey { .. }));
     }
 
     #[test]
     fn test_key_annotation_empty_rejected() {
         let annotations = HashMap::from_iter([("a", "")]);
-        let err = Key::new("test", vec!["a"], annotations).unwrap_err();
+        let err = Key::new("test", vec!["a"], annotations, None).unwrap_err();
         assert!(matches!(err, ConfigError::EmptyAnnotation { .. }));
     }
 
     #[test]
+    fn test_key_link_template() {
+        let key = Key::new(
+            "commit",
+            vec!["abc"],
+            HashMap::new(),
+            Some("https://example.com/commit/{value}"),
+        )
+        .unwrap();
+        assert_eq!(
+            key.link_template(),
+            Some("https://example.com/commit/{value}")
+        );
+
+        let key = Key::new("commit", vec!["abc"], HashMap::new(), None).unwrap();
+        assert_eq!(key.link_template(), None);
+    }
+
+    #[test]
+    fn test_key_link_invalid_rejected() {
+        for template in [
+            "https://example.com/commit/", // missing {value}
+            "/commit/{value}",             // relative
+            "example.com/{value}",         // missing scheme
+            "http://example.com/{value}",  // https only
+            "ftp://example.com/{value}",   // non-https scheme
+            "",
+        ] {
+            let err = Key::new("commit", vec!["abc"], HashMap::new(), Some(template)).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidLink { .. }),
+                "expected InvalidLink for {template:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_key_interning() {
-        let key1 = Key::new("test", vec!["a"], HashMap::new()).unwrap();
+        let key1 = Key::new("test", vec!["a"], HashMap::new(), None).unwrap();
         let key2 = key1.clone();
 
         // Keys should share the same Arc
@@ -2113,8 +2192,8 @@ mod tests {
 
     #[test]
     fn test_config_product_overlap_logic() {
-        let build = Key::new("build", vec!["debug", "release"], HashMap::new()).unwrap();
-        let threads = Key::new("threads", vec!["1", "2"], HashMap::new()).unwrap();
+        let build = Key::new("build", vec!["debug", "release"], HashMap::new(), None).unwrap();
+        let threads = Key::new("threads", vec!["1", "2"], HashMap::new(), None).unwrap();
 
         let build_debug = build.subset_from_names(["debug"].into_iter()).unwrap();
         let build_release = build.subset_from_names(["release"].into_iter()).unwrap();
@@ -2433,8 +2512,8 @@ mod tests {
 
     #[test]
     fn test_expand_command_edge_cases() {
-        let key1 = Key::new("key", vec!["value"], HashMap::new()).unwrap();
-        let key2 = Key::new("another", vec!["test"], HashMap::new()).unwrap();
+        let key1 = Key::new("key", vec!["value"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("another", vec!["test"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("value").unwrap();
         let kv2 = key2.value_from_name("test").unwrap();
@@ -2575,8 +2654,8 @@ mod tests {
 
     #[test]
     fn test_config_product_filter() {
-        let key1 = Key::new("a", vec!["1", "2", "3"], HashMap::new()).unwrap();
-        let key2 = Key::new("b", vec!["x", "y"], HashMap::new()).unwrap();
+        let key1 = Key::new("a", vec!["1", "2", "3"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"], HashMap::new(), None).unwrap();
 
         let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
         let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
@@ -2633,8 +2712,8 @@ mod tests {
 
     #[test]
     fn test_key_value_ordering() {
-        let key1 = Key::new("aaa", vec!["1"], HashMap::new()).unwrap();
-        let key2 = Key::new("zzz", vec!["2"], HashMap::new()).unwrap();
+        let key1 = Key::new("aaa", vec!["1"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("zzz", vec!["2"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("1").unwrap();
         let kv2 = key2.value_from_name("2").unwrap();
@@ -2704,9 +2783,9 @@ mod tests {
 
     #[test]
     fn test_config_filter_with_missing_key() {
-        let key1 = Key::new("a", vec!["1", "2"], HashMap::new()).unwrap();
-        let key2 = Key::new("b", vec!["x", "y"], HashMap::new()).unwrap();
-        let key3 = Key::new("c", vec!["p"], HashMap::new()).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"], HashMap::new(), None).unwrap();
+        let key3 = Key::new("c", vec!["p"], HashMap::new(), None).unwrap();
 
         let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
         let subset2 = key2.subset_from_names(["x", "y"].iter().copied()).unwrap();
@@ -2722,8 +2801,8 @@ mod tests {
 
     #[test]
     fn test_config_filter_with_missing_value() {
-        let key1 = Key::new("a", vec!["1", "2"], HashMap::new()).unwrap();
-        let key2 = Key::new("b", vec!["x", "y"], HashMap::new()).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"], HashMap::new(), None).unwrap();
 
         // Product only contains a=1 (not a=2)
         let subset1 = key1.subset_from_names(["1"].iter().copied()).unwrap();
@@ -2740,7 +2819,7 @@ mod tests {
 
     #[test]
     fn test_config_filter_empty() {
-        let key1 = Key::new("a", vec!["1", "2"], HashMap::new()).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"], HashMap::new(), None).unwrap();
         let subset1 = key1.subset_from_names(["1", "2"].iter().copied()).unwrap();
         let product = ConfigProduct::new(vec![subset1]);
 
@@ -2753,8 +2832,8 @@ mod tests {
 
     #[test]
     fn test_config_with() {
-        let key1 = Key::new("a", vec!["1", "2"], HashMap::new()).unwrap();
-        let key2 = Key::new("b", vec!["x", "y"], HashMap::new()).unwrap();
+        let key1 = Key::new("a", vec!["1", "2"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("b", vec!["x", "y"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("1").unwrap();
         let kv2 = key2.value_from_name("x").unwrap();
@@ -2777,9 +2856,9 @@ mod tests {
 
     #[test]
     fn test_config_without_key() {
-        let key1 = Key::new("a", vec!["1"], HashMap::new()).unwrap();
-        let key2 = Key::new("b", vec!["x"], HashMap::new()).unwrap();
-        let key3 = Key::new("c", vec!["p"], HashMap::new()).unwrap();
+        let key1 = Key::new("a", vec!["1"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("b", vec!["x"], HashMap::new(), None).unwrap();
+        let key3 = Key::new("c", vec!["p"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("1").unwrap();
         let kv2 = key2.value_from_name("x").unwrap();
@@ -2807,8 +2886,8 @@ mod tests {
 
     #[test]
     fn test_config_get_by_name() {
-        let key1 = Key::new("build", vec!["debug"], HashMap::new()).unwrap();
-        let key2 = Key::new("threads", vec!["4"], HashMap::new()).unwrap();
+        let key1 = Key::new("build", vec!["debug"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("threads", vec!["4"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("debug").unwrap();
         let kv2 = key2.value_from_name("4").unwrap();
@@ -3023,8 +3102,8 @@ mod tests {
 
     #[test]
     fn test_config_serialization() {
-        let key1 = Key::new("build", vec!["debug"], HashMap::new()).unwrap();
-        let key2 = Key::new("threads", vec!["4"], HashMap::new()).unwrap();
+        let key1 = Key::new("build", vec!["debug"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("threads", vec!["4"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("debug").unwrap();
         let kv2 = key2.value_from_name("4").unwrap();
@@ -3050,8 +3129,8 @@ mod tests {
 
     #[test]
     fn test_config_to_btreemap() {
-        let key1 = Key::new("build", vec!["release"], HashMap::new()).unwrap();
-        let key2 = Key::new("threads", vec!["8"], HashMap::new()).unwrap();
+        let key1 = Key::new("build", vec!["release"], HashMap::new(), None).unwrap();
+        let key2 = Key::new("threads", vec!["8"], HashMap::new(), None).unwrap();
 
         let kv1 = key1.value_from_name("release").unwrap();
         let kv2 = key2.value_from_name("8").unwrap();

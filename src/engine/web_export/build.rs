@@ -234,6 +234,7 @@ fn build_host_index(
                             .map(|value| value.value_name().to_string())
                             .collect(),
                         annotations,
+                        link: k.link_template().map(str::to_string),
                     },
                 )
             })
@@ -553,6 +554,40 @@ mod tests {
         let build_key = &data.index.config_keys["build"];
         assert_eq!(build_key.annotations.len(), 1);
         assert_eq!(build_key.annotations["y"], "optimized");
+        assert_eq!(build_key.link, None);
+    }
+
+    #[test]
+    fn test_export_link_template() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {
+                "build": {
+                    "values": ["x"],
+                    "link": "https://example.com/{value}"
+                }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["x"] }
+                }
+            ]
+        }"#;
+        let config_file = ConfigFile::from_str(dir.path(), Some("h1"), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
+
+        let s = mk_series(&config_file, "h1", "bench", "build=x", 100.0, 1000);
+        insert(&storage, &s);
+
+        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+
+        let build_key = &data.index.config_keys["build"];
+        assert_eq!(
+            build_key.link.as_deref(),
+            Some("https://example.com/{value}")
+        );
     }
 
     #[test]

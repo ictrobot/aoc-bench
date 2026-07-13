@@ -110,6 +110,7 @@ class MatrixBuilder:
         results = {
             "config_keys": {
                 "commit": {
+                    "link": "https://github.com/ictrobot/aoc-rs/commit/{value}",
                     "values": commits,
                     "presets": {}
                 },

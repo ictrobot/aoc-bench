@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { HostIndex } from "./types.ts"
-import { createSnapshotRetry, loadHistory, loadResults, SnapshotNotFoundError } from "./api.ts"
+import { createSnapshotRetry, loadHistory, loadIndex, loadResults, SnapshotNotFoundError } from "./api.ts"
 
 function makeQueryClient(snapshotId?: string) {
   const qc = new QueryClient()
@@ -151,5 +151,33 @@ describe("fetchJson snapshot handling", () => {
     const error = await loadResults(makeSnapshotHostIndex()).catch((err: unknown) => err)
     expect(error).not.toBeInstanceOf(SnapshotNotFoundError)
     expect(error).toBeInstanceOf(Error)
+  })
+})
+
+describe("loadIndex", () => {
+  it("drops config key link templates that fail validation", async () => {
+    const host = makeSnapshotHostIndex()
+    host.config_keys = {
+      commit: { values: ["a"], link: "https://example.com/commit/{value}" },
+      build: { values: ["x"], link: "javascript:alert(1)//{value}" },
+      threads: { values: ["1"], link: "https://example.com/no-placeholder" },
+      mode: { values: ["m"], link: "http://example.com/{value}" },
+      multiversion: { values: ["default"] },
+    }
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ schema_version: 2, snapshot_id: "snap-1", hosts: { h1: host } }), {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "application/json" },
+      }),
+    )
+
+    const index = await loadIndex()
+    const keys = index.hosts["h1"].config_keys
+    expect(keys["commit"].link).toBe("https://example.com/commit/{value}")
+    expect(keys["build"].link).toBeUndefined()
+    expect(keys["threads"].link).toBeUndefined()
+    expect(keys["mode"].link).toBeUndefined()
+    expect(keys["multiversion"].link).toBeUndefined()
   })
 })

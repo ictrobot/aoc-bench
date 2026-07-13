@@ -56,6 +56,28 @@ describe("DrillDown", () => {
     expect(screen.getByRole("combobox", { name: "compiler:" })).toHaveTextContent("nightly")
   })
 
+  it("links the selected value using the key's link template", () => {
+    renderWithQueryClient(
+      <Dialog open>
+        <DialogContent>
+          <DialogDescription className="sr-only">Test drill-down dialog content</DialogDescription>
+          <DrillDown
+            host={HOST}
+            bench={BENCH}
+            configs={[{ compiler: "stable" }, { compiler: "nightly" }]}
+            varyingKey="compiler"
+            initialValue="stable"
+            linkTemplate="https://example.com/compiler/{value}"
+          />
+        </DialogContent>
+      </Dialog>,
+    )
+
+    const link = screen.getByRole("link", { name: /stable/ })
+    expect(link).toHaveAttribute("href", "https://example.com/compiler/stable")
+    expect(link).toHaveAttribute("target", "_blank")
+  })
+
   it("preselects the clicked value of a merged range", () => {
     renderWithQueryClient(
       <Dialog open>
