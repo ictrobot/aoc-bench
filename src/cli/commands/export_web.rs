@@ -1,7 +1,7 @@
 use crate::cli::CliError;
 use crate::cli::args::DEFAULT_DATA_DIR;
 use aoc_bench::config::ConfigFile;
-use aoc_bench::engine::export_web_snapshot;
+use aoc_bench::engine::{WebSnapshotExportOptions, export_web_snapshot_with_options};
 use clap::Args;
 use std::path::PathBuf;
 use tracing::info;
@@ -15,6 +15,10 @@ pub struct ExportWebArgs {
     /// Path to the data directory
     #[arg(long, value_parser = clap::value_parser!(PathBuf), default_value = DEFAULT_DATA_DIR)]
     data_dir: PathBuf,
+
+    /// Refuse to export unless every configured case has a stable result
+    #[arg(long)]
+    require_complete: bool,
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -22,7 +26,11 @@ pub fn execute(args: ExportWebArgs) -> Result<(), CliError> {
     let config_file = ConfigFile::new(&args.data_dir, None)?;
     info!(path = %args.output_dir.display(), "exporting web data");
 
-    let Some(result) = export_web_snapshot(&config_file, &args.output_dir)? else {
+    let options = WebSnapshotExportOptions {
+        require_complete: args.require_complete,
+    };
+    let Some(result) = export_web_snapshot_with_options(&config_file, &args.output_dir, options)?
+    else {
         return Err(CliError::NothingToExport);
     };
 

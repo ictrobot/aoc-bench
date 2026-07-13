@@ -1,7 +1,7 @@
 use super::build::{export_host, host_names};
 use super::error::WebSnapshotExportError;
 use super::format::WebHostIndex;
-use crate::config::ConfigFile;
+use crate::config::{Benchmark, ConfigFile};
 use crate::host_config::HostConfig;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,6 +19,13 @@ pub struct WebSnapshotExport {
     pub snapshot_id: String,
     pub host_count: usize,
     pub snapshot_created: bool,
+}
+
+/// Optional policy checks applied while producing a web snapshot.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WebSnapshotExportOptions {
+    /// Refuse to publish unless every configured case has a stable result on every host.
+    pub require_complete: bool,
 }
 
 #[derive(Serialize)]
@@ -50,10 +57,23 @@ pub fn export_web_snapshot(
     config_file: &ConfigFile,
     output_dir: &Path,
 ) -> Result<Option<WebSnapshotExport>, WebSnapshotExportError> {
+    export_web_snapshot_with_options(config_file, output_dir, WebSnapshotExportOptions::default())
+}
+
+/// Export all hosts with optional completeness policy checks.
+pub fn export_web_snapshot_with_options(
+    config_file: &ConfigFile,
+    output_dir: &Path,
+    options: WebSnapshotExportOptions,
+) -> Result<Option<WebSnapshotExport>, WebSnapshotExportError> {
     let hosts = host_names(config_file);
     if hosts.is_empty() {
         return Ok(None);
     }
+
+    let expected_result_count = options
+        .require_complete
+        .then(|| configured_result_count(config_file));
 
     let snapshots_dir = output_dir.join("snapshots");
     fs::create_dir_all(&snapshots_dir).map_err(|error| WebSnapshotExportError::Io {
@@ -69,8 +89,12 @@ pub fn export_web_snapshot(
                 error,
             })?;
 
-    let (snapshot_id, host_index_map) =
-        write_snapshot_payload(config_file, staging_snapshot_dir.path(), &hosts)?;
+    let (snapshot_id, host_index_map) = write_snapshot_payload(
+        config_file,
+        staging_snapshot_dir.path(),
+        &hosts,
+        expected_result_count,
+    )?;
 
     if host_index_map.is_empty() {
         return Ok(None);
@@ -98,6 +122,7 @@ fn write_snapshot_payload(
     config_file: &ConfigFile,
     staging_snapshot_dir: &Path,
     hosts: &[String],
+    expected_result_count: Option<usize>,
 ) -> Result<(String, BTreeMap<String, WebHostIndex>), WebSnapshotExportError> {
     let mut host_index_map: BTreeMap<String, WebHostIndex> = BTreeMap::new();
     let mut manifest_entries: Vec<SnapshotManifestEntry> = Vec::new();
@@ -122,6 +147,17 @@ fn write_snapshot_payload(
             count = history_count,
             "wrote history files"
         );
+
+        if let Some(expected) = expected_result_count {
+            let actual = data.compact.results.len();
+            if actual != expected {
+                return Err(WebSnapshotExportError::IncompleteResults {
+                    host: host_name.clone(),
+                    expected,
+                    actual,
+                });
+            }
+        }
 
         if data.index.benchmarks.is_empty() {
             info!(host = host_name, "skipping host with no benchmark results");
@@ -156,6 +192,16 @@ fn write_snapshot_payload(
 
     let snapshot_id = snapshot_id_from_manifest(&manifest_entries)?;
     Ok((snapshot_id, host_index_map))
+}
+
+fn configured_result_count(config_file: &ConfigFile) -> usize {
+    config_file
+        .benchmarks()
+        .iter()
+        .flat_map(Benchmark::variants)
+        .fold(0usize, |total, variant| {
+            total.strict_add(variant.config().len())
+        })
 }
 
 fn publish_snapshot_dir(
@@ -569,6 +615,62 @@ mod tests {
     }
 
     #[test]
+    fn test_require_complete_rejects_partial_results_but_default_allows_them() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["x", "y"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["x", "y"] }
+                }
+            ]
+        }"#;
+        let config_file = ConfigFile::from_str(dir.path(), Some("h1"), json).unwrap();
+        let storage = HybridDiskStorage::new(config_file.clone(), "h1").unwrap();
+        insert(
+            &storage,
+            &mk_series(&config_file, "h1", "bench", "build=x", 100.0, 1000),
+        );
+
+        let partial_output = dir.path().join("partial-web-data");
+        assert!(
+            export_web_snapshot(&config_file, &partial_output)
+                .unwrap()
+                .is_some()
+        );
+
+        let complete_output = dir.path().join("complete-web-data");
+        let options = WebSnapshotExportOptions {
+            require_complete: true,
+        };
+        let error =
+            export_web_snapshot_with_options(&config_file, &complete_output, options).unwrap_err();
+        assert!(matches!(
+            error,
+            WebSnapshotExportError::IncompleteResults {
+                ref host,
+                expected: 2,
+                actual: 1,
+            } if host == "h1"
+        ));
+        assert!(!complete_output.join("index.json").exists());
+
+        insert(
+            &storage,
+            &mk_series(&config_file, "h1", "bench", "build=y", 101.0, 1001),
+        );
+        assert!(
+            export_web_snapshot_with_options(&config_file, &complete_output, options)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn test_export_web_snapshot_skips_host_without_results() {
         let (dir, h1_config_file, storage) = setup_storage("h1");
 
@@ -605,5 +707,49 @@ mod tests {
             serde_json::from_slice(&fs::read(output_dir.join("index.json")).unwrap()).unwrap();
         assert!(index["hosts"]["h1"].is_object());
         assert!(index["hosts"]["h2"].is_null());
+    }
+
+    #[test]
+    fn test_require_complete_checks_every_host() {
+        let (dir, h1_config_file, h1_storage) = setup_storage("h1");
+        let json = r#"{
+            "config_keys": {
+                "build": { "values": ["x"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "bench",
+                    "command": ["echo", "{build}"],
+                    "config": { "build": ["x"] }
+                }
+            ]
+        }"#;
+
+        insert(
+            &h1_storage,
+            &mk_series(&h1_config_file, "h1", "bench", "build=x", 100.0, 1000),
+        );
+
+        let h2_config_file = ConfigFile::from_str(dir.path(), Some("h2"), json).unwrap();
+        let _h2_storage = HybridDiskStorage::new(h2_config_file, "h2").unwrap();
+        let config_file = ConfigFile::from_str(dir.path(), None, json).unwrap();
+        let options = WebSnapshotExportOptions {
+            require_complete: true,
+        };
+
+        let error = export_web_snapshot_with_options(
+            &config_file,
+            &dir.path().join("complete-web-data"),
+            options,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            WebSnapshotExportError::IncompleteResults {
+                ref host,
+                expected: 1,
+                actual: 0,
+            } if host == "h2"
+        ));
     }
 }

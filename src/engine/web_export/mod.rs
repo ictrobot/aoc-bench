@@ -6,4 +6,7 @@ mod snapshot;
 pub use build::{HostExportData, export_host, host_names};
 pub use error::{WebExportError, WebSnapshotExportError};
 pub use format::{WebHostIndex, WebIndexedHistory, WebIndexedResults};
-pub use snapshot::{WebSnapshotExport, export_web_snapshot};
+pub use snapshot::{
+    WebSnapshotExport, WebSnapshotExportOptions, export_web_snapshot,
+    export_web_snapshot_with_options,
+};

@@ -28,7 +28,8 @@ The `aoc-bench` tool provides the following subcommands:
     * Performs run series and stores results
 
 * **`run`** - Periodically process new groups and re-run measured workloads
-    * Applies separate limits to new groups and oldest rerun candidates
+    * Limits new groups and oldest reruns independently, with a separate rerun-only limit
+    * Samples new groups randomly or prioritizes them by the configured timeline key
     * New groups may inherit an exact measured workload without re-running the workload
     * Useful for nightly/periodic runs to detect environment changes
 
@@ -1036,12 +1037,12 @@ measurement update uses one immediate transaction.
 
 Each host's `metadata.db` has four normalized tables:
 
-| Table | Role |
-| --- | --- |
-| `cases` | One row per `(benchmark, canonical hostless config)` and its current `workload_id` |
-| `workloads` | Durable shared/isolated identity plus stable/last measurement pointers and drift counters |
-| `measurements` | One row per workload run series, with timestamp, V1/V2 schema version, checksum, and median-run summary |
-| `measurement_cases` | Append-only case-visible measurement history |
+| Table               | Role                                                                                                    |
+|---------------------|---------------------------------------------------------------------------------------------------------|
+| `cases`             | One row per `(benchmark, canonical hostless config)` and its current `workload_id`                      |
+| `workloads`         | Durable shared/isolated identity plus stable/last measurement pointers and drift counters               |
+| `measurements`      | One row per workload run series, with timestamp, V1/V2 schema version, checksum, and median-run summary |
+| `measurement_cases` | Append-only case-visible measurement history                                                            |
 
 Important invariants:
 
@@ -1165,8 +1166,11 @@ current artifact or coalesce byte-identical files on different inodes before app
 * Otherwise it is a **rerun**, ordered by the workload's last measurement time.
 * An isolated case is new without a recorded workload and otherwise a rerun.
 
-Groups are shuffled before the read transaction, and the first `--new-limit` new classifications are
-retained. A bounded max-heap retains only the oldest `--rerun-limit` reruns; preserving global
+Groups are shuffled before the read transaction. By default the first `--new-limit` new
+classifications form a random sample; `--new-order timeline-asc|timeline-desc` instead prioritizes
+groups by the earliest/latest matching value of the configured timeline key, retaining random
+tie-breaking. A bounded max-heap retains the oldest reruns. At most `--rerun-limit` are selected
+alongside new work, or `--rerun-only-limit` when no new groups are selected; preserving global
 oldest-first semantics requires scanning every eligible group when reruns are requested. Only
 selected shared groups are content-hashed. A reuse completes its selected new-group slot; the
 scheduler does not select a replacement.
@@ -1350,6 +1354,8 @@ Web export schema 2 records the config keys used by each benchmark and encodes c
 benchmark-local index space. Within one host snapshot, equal positive measurement tokens mean two
 rows display the exact same shared measurement; zero identifies isolated measurements. Timeline
 merges only contiguous rows with the same positive token and matching metrics/fixed config.
+Export permits partial result sets by default; `--require-complete` refuses to publish unless every
+currently configured case has a stable result on every discovered host.
 
 ---
 
@@ -1403,14 +1409,14 @@ config, timestamp, checksum, and runs. Files used the human-readable path
 `runs/{benchmark}/{key=value}/.../{timestamp}.json`. SQLite duplicated each file's median-run summary
 in `run_series`, while `results` held that case's stable/latest timestamps and drift counters.
 
-| Concern | V1 | V2 |
-| --- | --- | --- |
-| Recorded unit | One case run series | One workload measurement covering one or more cases |
-| Durable identity | Benchmark + config + timestamp | Measurement UUID and complete workload identity |
-| JSON path | Benchmark/config/timestamp | UUID random-tail shards |
-| Mutable state | Per case in `results` | Per workload in `workloads` |
-| Case history | Implied by V1 run-series ownership | Explicit `measurement_cases` links |
-| Sharing | None | Shared workloads with executable/stdin content hashes |
+| Concern          | V1                                 | V2                                                    |
+|------------------|------------------------------------|-------------------------------------------------------|
+| Recorded unit    | One case run series                | One workload measurement covering one or more cases   |
+| Durable identity | Benchmark + config + timestamp     | Measurement UUID and complete workload identity       |
+| JSON path        | Benchmark/config/timestamp         | UUID random-tail shards                               |
+| Mutable state    | Per case in `results`              | Per workload in `workloads`                           |
+| Case history     | Implied by V1 run-series ownership | Explicit `measurement_cases` links                    |
+| Sharing          | None                               | Shared workloads with executable/stdin content hashes |
 
 Migration 03 converts V1 metadata transactionally:
 

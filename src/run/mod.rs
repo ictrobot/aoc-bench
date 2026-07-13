@@ -11,3 +11,4 @@ mod test_support;
 
 pub use model::{Run, RunSeries};
 pub use process::RunProcessError;
+pub use schedule::{NewGroupOrder, RunScheduleConfig};

@@ -74,6 +74,8 @@ pub enum CliError {
     BenchmarkSelectionError(#[source] HybridDiskError),
     #[error("running {0} benchmarks failed")]
     BenchmarksFailed(NonZeroUsize),
+    #[error("timeline ordering requires a configured timeline key")]
+    TimelineOrderWithoutTimelineKey,
 
     // stats commands
     #[error("--host cannot be used with a --config filter that includes a host key")]

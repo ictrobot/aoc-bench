@@ -8,5 +8,6 @@ pub use stats::{
 };
 pub use web_export::{
     HostExportData, WebExportError, WebHostIndex, WebIndexedHistory, WebIndexedResults,
-    WebSnapshotExport, WebSnapshotExportError, export_host, export_web_snapshot, host_names,
+    WebSnapshotExport, WebSnapshotExportError, WebSnapshotExportOptions, export_host,
+    export_web_snapshot, export_web_snapshot_with_options, host_names,
 };

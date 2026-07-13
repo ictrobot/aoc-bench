@@ -23,4 +23,12 @@ pub enum WebSnapshotExportError {
     },
     #[error("JSON error: {0}")]
     Json(#[source] serde_json::Error),
+    #[error(
+        "web export is incomplete for host '{host}': {actual} of {expected} configured results present"
+    )]
+    IncompleteResults {
+        host: String,
+        expected: usize,
+        actual: usize,
+    },
 }

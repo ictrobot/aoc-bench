@@ -8,7 +8,6 @@ SCRIPT_ARGS=("$@")
 REPO_DIR="${AOC_BENCH_DIR:-$HOME/aoc-bench}"
 AOC_RS_BENCH_DIR="$REPO_DIR/tools/aoc-rs-bench"
 DATA_DIR="$REPO_DIR/data"
-CONFIG_JSON="$DATA_DIR/config.json"
 INPUTS_DIR="${AOC_INPUTS_DIR:-$HOME/inputs}"
 BENCH_BIN="target/release/aoc-bench"
 WEB_DIR="$REPO_DIR/web"
@@ -21,14 +20,6 @@ LAST_DEPLOY_EPOCH_FILE="$STATE_DIR/last_deploy_epoch"
 LAST_DEPLOY_SNAPSHOT_FILE="$STATE_DIR/last_deployed_snapshot_id"
 CLOUDFLARE_ENV_FILE="${CLOUDFLARE_ENV_FILE:-$HOME/.config/aoc-bench/cloudflare.env}"
 DEPLOY_INTERVAL_SECONDS=7200
-
-close_loop_fds() {
-    set +e
-    exec 3<&-
-    exec 4<&-
-    exec 5<&-
-    set -e
-}
 
 run_on_all_cores() {
     # The builds and config generation aren't ran at the same time as benchmarks, so opt in to running on every core,
@@ -81,7 +72,7 @@ maybe_sync_and_deploy() {
         return 0
     fi
 
-    if ! "$BENCH_BIN" export-web --data-dir "$DATA_DIR" --output-dir "$WEB_DATA_DIR"; then
+    if ! "$BENCH_BIN" export-web --require-complete --data-dir "$DATA_DIR" --output-dir "$WEB_DATA_DIR"; then
         echo "Web export failed, skipping deploy attempt" >&2
         return 0
     fi
@@ -132,16 +123,13 @@ maybe_sync_and_deploy() {
 }
 
 restart_self() {
-    local reason
-    reason="$1"
-
-    echo "Restarting script ($reason)..." >&2
+    echo "Restarting script..." >&2
     exec "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
 }
 
 run_benchmarks() {
     local command start status end elapsed
-    command=("$BENCH_BIN" run --rerun-limit 0 --new-limit 1000 "$@")
+    command=("$BENCH_BIN" run --new-order timeline-desc --new-limit 512 --rerun-limit 16 --rerun-only-limit 512)
     echo "Running '${command[*]}'" >&2
 
     start=$(date +%s)
@@ -155,17 +143,6 @@ run_benchmarks() {
     elapsed=$(( end - start ))
 
     echo "Command '${command[*]}' exited with code $status after ${elapsed}s" >&2
-
-    if (( elapsed > 60 )); then
-        close_loop_fds
-
-        command=("$BENCH_BIN" run --rerun-limit 16 --new-limit 0)
-        echo "Rerunning some benchmarks before restarting" >&2
-        echo "Running '${command[*]}'" >&2
-        "${command[@]}" || true
-
-        restart_self "long benchmark run"
-    fi
 }
 
 main() {
@@ -187,39 +164,11 @@ main() {
 
     cd "$REPO_DIR"
 
-    # Three streams: latest puzzle, latest commit, and forward puzzle pass.
-    exec 3< <(jq -r '.benchmarks | reverse | .[].benchmark' "$CONFIG_JSON")
-    exec 4< <(jq -r '.config_keys.commit.values | reverse | .[]' "$CONFIG_JSON")
-    exec 5< <(jq -r '.benchmarks | .[].benchmark' "$CONFIG_JSON" | grep -vP '^(2015-04|2016-05|2016-14)$')
-
-    while true; do
-        if read -r last_puzzle <&3; then
-            run_benchmarks "$last_puzzle"
-        fi
-        if read -r last_commit <&4; then
-            run_benchmarks --config "commit=$last_commit"
-        fi
-        if read -r next_puzzle <&5; then
-            run_benchmarks "$next_puzzle"
-        fi
-
-        [[ -z "$last_puzzle" && -z "$last_commit" && -z "$next_puzzle" ]] && break
-    done
-
-    # Clean up loop file descriptors
-    close_loop_fds
-
-    # Try deploying pages before steady-state reruns
     maybe_sync_and_deploy
 
-    # After reaching a steady state, run a wider rerun batch before restarting.
-    local command
-    command=("$BENCH_BIN" run --rerun-limit 256 --new-limit 0)
-    echo "Up to date, rerunning batch of benchmarks" >&2
-    echo "Running '${command[*]}'" >&2
-    "${command[@]}" || true
+    run_benchmarks
 
-    restart_self "steady-state loop complete"
+    restart_self
 }
 
 main "$@"

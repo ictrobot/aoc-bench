@@ -5,7 +5,7 @@ use crate::group::{
 use crate::host_config::{HostConfig, HostConfigError};
 use crate::run::RunProcessError;
 use crate::run::process::{GroupOutcome, ProcessContext, process_group};
-use crate::run::schedule::{select_for_run, select_for_run_all};
+use crate::run::schedule::{RunScheduleConfig, select_for_run, select_for_run_all};
 use crate::storage::{FileLock, HybridDiskError, HybridDiskStorage, Storage};
 use std::collections::BTreeMap;
 use tracing::{error, info_span};
@@ -100,15 +100,11 @@ impl RunEngine {
         }
 
         let selected = match mode {
-            RunMode::Sample {
-                new_limit,
-                rerun_limit,
-            } => select_for_run(
+            RunMode::Sample(schedule) => select_for_run(
                 &self.storage,
                 &mut groups,
                 config_filter,
-                new_limit,
-                rerun_limit,
+                schedule,
                 &mut rand::rng(),
             )
             .map_err(RunEngineError::SchedulingError)?,
@@ -199,10 +195,7 @@ impl RunEngine {
 #[derive(Debug, Clone, Copy)]
 pub enum RunMode {
     /// `run`: classify into new/rerun pools and cap by the given limits.
-    Sample {
-        new_limit: usize,
-        rerun_limit: usize,
-    },
+    Sample(RunScheduleConfig),
     /// `run-all`: process every eligible group unconditionally.
     All,
 }
