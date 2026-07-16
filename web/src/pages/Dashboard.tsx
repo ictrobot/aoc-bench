@@ -1,5 +1,6 @@
-import { useEffect, useMemo } from "react"
-import { useUrlHostBenchmark, useUrlFilters } from "@/hooks/use-url-state.tsx"
+import { useEffect, useId, useMemo, useRef } from "react"
+import { ExternalLink } from "lucide-react"
+import { useUrlHostBenchmark, useUrlFilters, useUrlParam } from "@/hooks/use-url-state.tsx"
 import { useLatestResults } from "@/hooks/queries.ts"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card.tsx"
 import { BenchmarkConfigTable, type BenchmarkConfigTableRow } from "@/components/benchmarks/BenchmarkConfigTable.tsx"
@@ -8,18 +9,30 @@ import { DashboardInsights } from "@/components/benchmarks/DashboardInsights.tsx
 import { compareConfigsByOrder } from "@/lib/config-order.ts"
 import { formatDurationNs, shortenValue } from "@/lib/format.ts"
 import type { CompactResult } from "@/lib/types.ts"
-import { withQuery } from "@/lib/routes.ts"
+import { withQuery, configValueUrl } from "@/lib/routes.ts"
 import { MarkdownLinks } from "@/components/ui/markdown-links.tsx"
 
 export function Dashboard() {
   const { host, hostIndex } = useUrlHostBenchmark()
   const { benchmarks, config_keys: configKeys, description, timeline_key: timelineKey } = hostIndex
   const { filters, setFilter } = useUrlFilters()
+  const [benchFilter, setBenchFilter] = useUrlParam("benchFilter")
   const { data: latestResults, error: decodeError } = useLatestResults(host)
+
+  const benchRegex = useMemo(() => {
+    if (!benchFilter) return null
+    try {
+      return new RegExp(benchFilter, "i")
+    } catch {
+      return null
+    }
+  }, [benchFilter])
+  const benchFilterInvalid = benchFilter !== "" && benchRegex === null
 
   const hasLatestResults = (latestResults?.length ?? 0) > 0
   const showFastestColumns = timelineKey !== null && hasLatestResults
   const currentTimelineValue = showFastestColumns && timelineKey ? (configKeys[timelineKey]?.values.at(-1) ?? "") : ""
+  const timelineLinkTemplate = timelineKey ? configKeys[timelineKey]?.link : undefined
   const dashboardFilters = useMemo(() => {
     if (!timelineKey || !filters[timelineKey]) return filters
 
@@ -38,14 +51,21 @@ export function Dashboard() {
     return selectFastestByBenchmark(latestResults ?? [], dashboardFilters, configKeys)
   }, [showFastestColumns, latestResults, dashboardFilters, configKeys])
 
+  const visibleBenchmarks = useMemo(
+    () => (benchRegex ? benchmarks.filter((b) => benchRegex.test(b.name)) : benchmarks),
+    [benchmarks, benchRegex],
+  )
+
   const insightEntries = useMemo(
     () =>
-      [...fastestByBenchmark.entries()].map(([name, result]) => ({
-        name,
-        mean_ns: result.mean_ns,
-        href: withQuery("/benchmark", { host, bench: name }),
-      })),
-    [fastestByBenchmark, host],
+      [...fastestByBenchmark.entries()]
+        .filter(([name]) => !benchRegex || benchRegex.test(name))
+        .map(([name, result]) => ({
+          name,
+          mean_ns: result.mean_ns,
+          href: withQuery("/benchmark", { host, bench: name }),
+        })),
+    [fastestByBenchmark, host, benchRegex],
   )
 
   useEffect(() => {
@@ -72,10 +92,14 @@ export function Dashboard() {
           <DashboardFilters
             timelineKey={timelineKey}
             currentTimelineValue={currentTimelineValue}
+            timelineLinkTemplate={timelineLinkTemplate}
             configKeys={configKeys}
             filterKeys={filterKeys}
             filters={effectiveFilters}
             setFilter={setFilter}
+            benchFilter={benchFilter}
+            benchFilterInvalid={benchFilterInvalid}
+            setBenchFilter={setBenchFilter}
           />
           <Card>
             <CardHeader>
@@ -84,7 +108,7 @@ export function Dashboard() {
             <CardContent>
               <DashboardBenchmarkTable
                 key={host}
-                benchmarks={benchmarks}
+                benchmarks={visibleBenchmarks}
                 host={host}
                 configKeys={configKeys}
                 configColumnKeys={visibleConfigColumnKeys}
@@ -104,24 +128,62 @@ export function Dashboard() {
 function DashboardFilters({
   timelineKey,
   currentTimelineValue,
+  timelineLinkTemplate,
   configKeys,
   filterKeys,
   filters,
   setFilter,
+  benchFilter,
+  benchFilterInvalid,
+  setBenchFilter,
 }: {
   timelineKey: string | null
   currentTimelineValue: string
+  timelineLinkTemplate?: string
   configKeys: Record<string, { values: string[] }>
   filterKeys: string[]
   filters: Record<string, string>
   setFilter: (key: string, value: string) => void
+  benchFilter: string
+  benchFilterInvalid: boolean
+  setBenchFilter: (value: string) => void
 }) {
-  if (filterKeys.length === 0 && !currentTimelineValue) return null
+  const benchFilterId = useId()
+  // The input is uncontrolled: react-router applies setSearchParams in a transition
+  // after the change event, and re-controlling the input from that late update resets
+  // the cursor to the end when editing mid-value. Sync the DOM value from the URL only
+  // while the input is not focused, so external updates (e.g. back/forward navigation)
+  // still show up without clobbering in-progress typing.
+  const benchFilterRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    const el = benchFilterRef.current
+    if (el && document.activeElement !== el && el.value !== benchFilter) {
+      el.value = benchFilter
+    }
+  }, [benchFilter])
+
   const displayTimelineValue = shortenValue(currentTimelineValue)
   const timelineValueTitle = displayTimelineValue !== currentTimelineValue ? currentTimelineValue : undefined
 
   return (
     <div className="flex flex-wrap items-end gap-3">
+      <div className="flex items-center gap-2">
+        <label htmlFor={benchFilterId} className="text-sm text-muted-foreground whitespace-nowrap">
+          Benchmark:
+        </label>
+        <input
+          ref={benchFilterRef}
+          id={benchFilterId}
+          type="text"
+          defaultValue={benchFilter}
+          onChange={(e) => setBenchFilter(e.target.value)}
+          placeholder="Filter (regex)"
+          spellCheck={false}
+          aria-invalid={benchFilterInvalid || undefined}
+          title={benchFilterInvalid ? "Invalid regular expression" : undefined}
+          className={`h-9 w-[160px] rounded-md border bg-transparent px-3 py-2 font-mono text-sm shadow-xs placeholder:font-sans placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring ${benchFilterInvalid ? "border-destructive" : "border-input"}`}
+        />
+      </div>
       {filterKeys.map((key) => (
         <ConfigFilter
           key={key}
@@ -134,9 +196,22 @@ function DashboardFilters({
       {timelineKey && currentTimelineValue && (
         <div className="self-center text-sm text-muted-foreground">
           <span>Current {timelineKey}: </span>
-          <span className="font-mono text-foreground" title={timelineValueTitle}>
-            {displayTimelineValue}
-          </span>
+          {timelineLinkTemplate ? (
+            <a
+              href={configValueUrl(timelineLinkTemplate, currentTimelineValue)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-mono text-foreground hover:underline"
+              title={timelineValueTitle}
+            >
+              {displayTimelineValue}
+              <ExternalLink className="size-3.5 text-muted-foreground" />
+            </a>
+          ) : (
+            <span className="font-mono text-foreground" title={timelineValueTitle}>
+              {displayTimelineValue}
+            </span>
+          )}
         </div>
       )}
     </div>

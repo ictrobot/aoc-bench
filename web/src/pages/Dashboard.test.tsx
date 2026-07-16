@@ -239,6 +239,121 @@ describe("Dashboard", () => {
     expect(benchmarkOrder()).toEqual(["bench-b", "bench-a"])
   })
 
+  it("links the current timeline value when the timeline key has a link template", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    hostIndex.config_keys.commit.link = "https://example.com/commit/{value}"
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+    ])
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
+
+    expect(await screen.findByText((_, element) => element?.textContent === "Current commit: b")).toBeInTheDocument()
+    const link = screen.getByRole("link", { name: "b" })
+    expect(link).toHaveAttribute("href", "https://example.com/commit/b")
+    expect(link).toHaveAttribute("target", "_blank")
+  })
+
+  it("filters benchmarks by name as a regex is typed", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+    ])
+
+    const user = userEvent.setup()
+    renderWithRouterAndQueryClient(
+      <>
+        <Dashboard />
+        <LocationProbe />
+      </>,
+      { initialEntries: [`/?host=${HOST}`] },
+    )
+
+    expect(await screen.findByText("2 matching benchmarks")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "bench-a" })).toBeInTheDocument()
+
+    await user.type(screen.getByRole("textbox", { name: "Benchmark:" }), "a$")
+
+    expect(screen.getByRole("link", { name: "bench-a" })).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: "bench-b" })).toBeNull()
+    expect(screen.getByTestId("dashboard-total-time-value")).toHaveTextContent("50 ns")
+    expect(screen.getByText("1 matching benchmark")).toBeInTheDocument()
+    expect(screen.getByTestId("location")).toHaveTextContent("benchFilter=a%24")
+  })
+
+  it("keeps the cursor position when editing the middle of the regex filter", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([])
+
+    const user = userEvent.setup()
+    renderWithRouterAndQueryClient(
+      <>
+        <Dashboard />
+        <LocationProbe />
+      </>,
+      { initialEntries: [`/?host=${HOST}`] },
+    )
+
+    const input = await screen.findByRole<HTMLInputElement>("textbox", { name: "Benchmark:" })
+    await user.type(input, "2016-{ArrowLeft}{Backspace}")
+
+    expect(input).toHaveValue("201-")
+    expect(input.selectionStart).toBe(3)
+    expect(screen.getByTestId("location")).toHaveTextContent("benchFilter=201-")
+  })
+
+  it("applies the benchmark regex filter from the URL", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+    ])
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&benchFilter=b%24`] })
+
+    expect(await screen.findByTestId("dashboard-total-time-value")).toHaveTextContent("90 ns")
+    expect(screen.getByRole("link", { name: "bench-b" })).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: "bench-a" })).toBeNull()
+    expect(screen.getByRole("textbox", { name: "Benchmark:" })).toHaveValue("b$")
+  })
+
+  it("shows all benchmarks and marks the filter invalid for a bad regex", async () => {
+    const hostIndex = makeDashboardHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue([
+      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+    ])
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&benchFilter=%28`] })
+
+    expect(await screen.findByRole("link", { name: "bench-a" })).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "bench-b" })).toBeInTheDocument()
+    expect(screen.getByRole("textbox", { name: "Benchmark:" })).toHaveAttribute("aria-invalid", "true")
+  })
+
+  it("filters the result count table by benchmark name", async () => {
+    const hostIndex = makeHostIndex({
+      config_keys: {},
+      benchmarks: [
+        { name: "bench-a", result_count: 2 },
+        { name: "other", result_count: 1 },
+      ],
+    })
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeLatestResults.mockReturnValue(null)
+
+    renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&benchFilter=bench`] })
+
+    expect(await screen.findByRole("link", { name: "bench-a" })).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: "other" })).toBeNull()
+  })
+
   it("shows decode error and suppresses benchmark cards/table", async () => {
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeDashboardHostIndex()))
     mockDecodeLatestResults.mockImplementation(() => {
