@@ -10,7 +10,7 @@ import type {
 } from "./types.ts"
 
 const BASE = import.meta.env.BASE_URL + "data"
-const WEB_SCHEMA_VERSION = 2
+const WEB_SCHEMA_VERSION = 3
 
 export class SnapshotNotFoundError extends Error {
   constructor(path: string) {
@@ -90,9 +90,42 @@ export function loadResults(index: HostIndex): Promise<IndexedResults> {
   return fetchJson<IndexedResults>(index.results_path)
 }
 
-/** Load the compact history payload for one benchmark on one host. */
-export function loadHistory(index: HostIndex, bench: string): Promise<IndexedHistory> {
-  return fetchJson<IndexedHistory>(`${index.history_dir}/${bench}.json`)
+/** Load one compact history part for one benchmark on one host (see `historyPart`). */
+export function loadHistory(index: HostIndex, bench: string, part: number): Promise<IndexedHistory> {
+  return fetchJson<IndexedHistory>(`${index.history_dir}/${bench}.${part}.json`)
+}
+
+/**
+ * Find the history part file holding one benchmark config.
+ *
+ * Returns -1 when the benchmark or config is unknown to the index (nothing to fetch), and
+ * throws when the index's part table is malformed.
+ */
+export function historyPart(index: HostIndex, bench: string, config: Record<string, string>): number {
+  const benchIdx = index.benchmarks.findIndex((entry) => entry.name === bench)
+  if (benchIdx === -1) return -1
+  const { keys, values } = benchmarkConfigTables(index, benchIdx)
+  const configIdx = encodeConfig(config, keys, values)
+  if (configIdx === -1) return -1
+
+  const parts = index.benchmarks[benchIdx].history_parts
+  assertValidHistoryParts(parts, bench)
+  let part = 0
+  while (part + 1 < parts.length && parts[part + 1] <= configIdx) {
+    part++
+  }
+  return part
+}
+
+function assertValidHistoryParts(parts: number[], bench: string): void {
+  const valid =
+    Array.isArray(parts) &&
+    parts.length > 0 &&
+    parts[0] === 0 &&
+    parts.every((start, i) => Number.isInteger(start) && (i === 0 || start > parts[i - 1]))
+  if (!valid) {
+    throw new Error(`Invalid history_parts for benchmark '${bench}'`)
+  }
 }
 
 function benchmarkConfigTables(index: HostIndex, benchIdx: number): { keys: string[]; values: string[][] } {

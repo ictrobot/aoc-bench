@@ -7,7 +7,7 @@ export type ResultRow = [
   ci95_half_ns: number,
 ]
 
-/** A row in history/{bench}.json: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`. */
+/** A row in history/{bench}.{part}.json: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`. */
 export type HistoryRow = [
   config_idx: number,
   measurement_token: number,
@@ -27,7 +27,16 @@ export interface HostIndex {
   last_updated: number
   description?: string
   config_keys: Record<string, { values: string[]; annotations?: Record<string, string>; link?: string }>
-  benchmarks: { name: string; result_count: number; config_keys: number[] }[]
+  benchmarks: {
+    name: string
+    result_count: number
+    config_keys: number[]
+    /**
+     * First config_idx of each history part file, in part order (always starts at 0, strictly
+     * increasing). Part `n` is `history/{name}.{n}.json`.
+     */
+    history_parts: number[]
+  }[]
   timeline_key: string | null
   results_path: string
   history_dir: string

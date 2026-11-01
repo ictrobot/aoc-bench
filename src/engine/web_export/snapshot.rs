@@ -12,7 +12,7 @@ use std::path::Path;
 use tempfile::{Builder, NamedTempFile, TempDir};
 use tracing::info;
 
-const WEB_INDEX_SCHEMA_VERSION: u32 = 2;
+const WEB_INDEX_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct WebSnapshotExport {
@@ -134,9 +134,9 @@ fn write_snapshot_payload(
         let history_dir = host_dir.join("history");
         let mut history_count = 0usize;
 
-        let mut data = export_host(config_file, host_name, |bench_id, history| {
+        let mut data = export_host(config_file, host_name, |bench_id, part, history| {
             history_count += 1;
-            let file_name = format!("{}.json", bench_id.as_str());
+            let file_name = format!("{}.{part}.json", bench_id.as_str());
             let relative_path = format!("{host_name}/history/{file_name}");
             let entry = write_json_hashed(&history_dir.join(file_name), &relative_path, &history)?;
             manifest_entries.push(entry);
@@ -145,7 +145,7 @@ fn write_snapshot_payload(
         info!(
             host = host_name,
             count = history_count,
-            "wrote history files"
+            "wrote history part files"
         );
 
         if let Some(expected) = expected_result_count {
@@ -590,11 +590,15 @@ mod tests {
         let results_path =
             output_dir.join(format!("snapshots/{}/h1/results.json", first.snapshot_id));
         let history_path = output_dir.join(format!(
-            "snapshots/{}/h1/history/bench.json",
+            "snapshots/{}/h1/history/bench.0.json",
             first.snapshot_id
         ));
         assert!(results_path.exists());
         assert!(history_path.exists());
+        assert_eq!(
+            index["hosts"]["h1"]["benchmarks"][0]["history_parts"],
+            serde_json::json!([0])
+        );
 
         let second = export_web_snapshot(&config_file, &output_dir)
             .unwrap()

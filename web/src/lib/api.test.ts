@@ -136,7 +136,22 @@ describe("fetchJson snapshot handling", () => {
       }),
     )
 
-    await expect(loadHistory(makeSnapshotHostIndex(), "bench-a")).rejects.toBeInstanceOf(SnapshotNotFoundError)
+    await expect(loadHistory(makeSnapshotHostIndex(), "bench-a", 0)).rejects.toBeInstanceOf(SnapshotNotFoundError)
+  })
+
+  it("fetches the requested history part file", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response('{"series":[]}', {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "application/json" },
+      }),
+    )
+
+    await expect(loadHistory(makeSnapshotHostIndex(), "bench-a", 2)).resolves.toEqual({ series: [] })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/snapshots\/snap-1\/linux-x64\/history\/bench-a\.2\.json$/),
+    )
   })
 
   it("keeps malformed non-HTML snapshot JSON as a parse error", async () => {
@@ -165,7 +180,7 @@ describe("loadIndex", () => {
       multiversion: { values: ["default"] },
     }
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ schema_version: 2, snapshot_id: "snap-1", hosts: { h1: host } }), {
+      new Response(JSON.stringify({ schema_version: 3, snapshot_id: "snap-1", hosts: { h1: host } }), {
         status: 200,
         statusText: "OK",
         headers: { "content-type": "application/json" },

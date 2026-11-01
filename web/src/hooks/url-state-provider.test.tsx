@@ -18,7 +18,7 @@ const mockLoadIndex = vi.mocked(api.loadIndex)
 
 function makeIndexWithTwoHosts() {
   return {
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     snapshot_id: "snapshot-a",
     hosts: {
       [HOST_A]: makeHostIndex({

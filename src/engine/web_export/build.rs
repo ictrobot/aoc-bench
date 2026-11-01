@@ -10,15 +10,22 @@ use jiff::Timestamp;
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
+/// Target serialized size of one history part file.
+///
+/// Static hosts cap individual file sizes (Cloudflare Pages at 25 MiB), and the UI only needs
+/// one config's rows at a time, so smaller parts keep both the upload and the drill-down fetch
+/// bounded. The trade-off is more files per benchmark, which is cheap.
+pub const HISTORY_PART_TARGET_BYTES: usize = 4 * 1024 * 1024;
+
 /// Collect and build all web export data for a single host.
 ///
-/// `on_history` is called once per benchmark (in config file order) with the benchmark's
-/// history data. Each call completes before the next benchmark's history is loaded, so only
-/// one benchmark's history is in memory at a time.
+/// `on_history` is called once per history part of each benchmark (in config file order, then
+/// part order) with the part index and its rows. Each call completes before the next part is
+/// handed over, so only one benchmark's history is in memory at a time.
 pub fn export_host<E>(
     config_file: &ConfigFile,
     host_name: &str,
-    mut on_history: impl FnMut(&BenchmarkId, WebIndexedHistory) -> Result<(), E>,
+    mut on_history: impl FnMut(&BenchmarkId, usize, WebIndexedHistory) -> Result<(), E>,
 ) -> Result<HostExportData, E>
 where
     E: From<WebExportError>,
@@ -78,22 +85,36 @@ where
         )
     });
 
-    let index = build_host_index(
-        config_file,
-        &all_results,
-        &by_benchmark,
-        host_key,
-        latest_results,
-    );
-
     let compact = WebIndexedResults { results };
 
     // Build and emit history one benchmark at a time to avoid holding all history in memory.
+    let mut history_parts: Vec<Vec<usize>> = Vec::with_capacity(benchmarks.len());
     for (benchmark, config_index) in benchmarks.iter().zip(&config_indexes) {
-        let h = build_indexed_history(&storage, benchmark, config_index, &mut measurement_tokens)
-            .map_err(E::from)?;
-        on_history(benchmark.id(), h)?;
+        let rows =
+            build_indexed_history(&storage, benchmark, config_index, &mut measurement_tokens)
+                .map_err(E::from)?;
+        let parts = partition_history(rows, HISTORY_PART_TARGET_BYTES);
+        let mut starts = Vec::with_capacity(parts.len());
+        for (part_idx, part) in parts.into_iter().enumerate() {
+            starts.push(part.first_config_idx);
+            on_history(
+                benchmark.id(),
+                part_idx,
+                WebIndexedHistory { series: part.rows },
+            )?;
+        }
+        history_parts.push(starts);
     }
+
+    let index = build_host_index(
+        config_file,
+        &all_results,
+        &benchmarks,
+        &by_benchmark,
+        &history_parts,
+        host_key,
+        latest_results,
+    );
 
     Ok(HostExportData { index, compact })
 }
@@ -183,10 +204,13 @@ fn compute_strides(values: &[Vec<String>]) -> Vec<usize> {
 fn build_host_index(
     config_file: &ConfigFile,
     all_results: &[ResultsRowWithStats],
+    benchmarks: &[&Benchmark],
     by_benchmark: &HashMap<BenchmarkId, Vec<&ResultsRowWithStats>>,
+    history_parts: &[Vec<usize>],
     host_key: &Key,
     latest_results: Option<Vec<ResultRow>>,
 ) -> WebHostIndex {
+    debug_assert_eq!(benchmarks.len(), history_parts.len());
     let host_config_keys: Vec<&Key> = config_file
         .config_keys()
         .iter()
@@ -197,16 +221,14 @@ fn build_host_index(
         .enumerate()
         .map(|(index, key)| (*key, index))
         .collect();
-    let benchmarks: Vec<WebBenchmarkEntry> = config_file
-        .benchmarks()
+    let benchmarks: Vec<WebBenchmarkEntry> = benchmarks
         .iter()
-        .filter_map(|b| {
-            let rows = by_benchmark.get(b.id())?;
-            Some(WebBenchmarkEntry {
-                name: b.id().clone(),
-                result_count: rows.len(),
-                config_keys: b.config_keys().map(|key| key_indexes[key]).collect(),
-            })
+        .zip(history_parts)
+        .map(|(b, parts)| WebBenchmarkEntry {
+            name: b.id().clone(),
+            result_count: by_benchmark.get(b.id()).map_or(0, Vec::len),
+            config_keys: b.config_keys().map(|key| key_indexes[key]).collect(),
+            history_parts: parts.clone(),
         })
         .collect();
 
@@ -315,7 +337,7 @@ fn build_indexed_history(
     benchmark: &Benchmark,
     config_index: &ConfigIndex,
     measurement_tokens: &mut MeasurementTokens,
-) -> Result<WebIndexedHistory, WebExportError> {
+) -> Result<Vec<HistoryRow>, WebExportError> {
     let mut series: Vec<HistoryRow> = Vec::new();
 
     storage.read_transaction(|tx| {
@@ -340,7 +362,77 @@ fn build_indexed_history(
         })
     })?;
 
-    Ok(WebIndexedHistory { series })
+    Ok(series)
+}
+
+/// One history part: a contiguous `config_idx` range of a benchmark's history.
+struct HistoryPart {
+    /// First `config_idx` this part is responsible for (not necessarily present in `rows`).
+    first_config_idx: usize,
+    rows: Vec<HistoryRow>,
+}
+
+/// Split one benchmark's history into parts of roughly `target_bytes` serialized size.
+///
+/// Rows are grouped by `config_idx` (keeping their timestamp order within a config) and a
+/// config's rows are never split across parts, so a part may exceed `target_bytes` only when a
+/// single config does on its own. Always returns at least one part, and the first part always
+/// starts at config 0, so every config maps to exactly one part.
+fn partition_history(mut rows: Vec<HistoryRow>, target_bytes: usize) -> Vec<HistoryPart> {
+    // Stable sort keeps the storage's timestamp order within each config.
+    rows.sort_by_key(|row| row.config_idx);
+
+    // Row indices at which a new part begins (the first part implicitly begins at 0).
+    let mut cuts: Vec<usize> = Vec::new();
+    let mut part_start = 0usize;
+    let mut part_bytes = 0usize;
+    let mut row_idx = 0usize;
+    for group in rows.chunk_by(|a, b| a.config_idx == b.config_idx) {
+        let group_bytes: usize = group.iter().map(history_row_json_len).sum();
+        if row_idx > part_start && part_bytes + group_bytes > target_bytes {
+            cuts.push(row_idx);
+            part_start = row_idx;
+            part_bytes = 0;
+        }
+        part_bytes += group_bytes;
+        row_idx += group.len();
+    }
+
+    // Split off parts from the back so each split moves only its own rows.
+    let mut parts = Vec::with_capacity(cuts.len() + 1);
+    for &cut in cuts.iter().rev() {
+        let part_rows = rows.split_off(cut);
+        parts.push(HistoryPart {
+            first_config_idx: part_rows[0].config_idx,
+            rows: part_rows,
+        });
+    }
+    parts.push(HistoryPart {
+        first_config_idx: 0,
+        rows,
+    });
+    parts.reverse();
+    parts
+}
+
+/// Serialized size of one history row including its separating comma.
+fn history_row_json_len(row: &HistoryRow) -> usize {
+    const BRACKETS_AND_COMMAS: usize = 2 + 5 + 1;
+    BRACKETS_AND_COMMAS
+        + unsigned_decimal_len(row.config_idx as u64)
+        + unsigned_decimal_len(u64::from(row.measurement_token))
+        + signed_decimal_len(row.timestamp_s)
+        + signed_decimal_len(row.mean_ns)
+        + signed_decimal_len(row.ci95_half_ns)
+        + unsigned_decimal_len(row.run_count as u64)
+}
+
+fn unsigned_decimal_len(value: u64) -> usize {
+    value.checked_ilog10().map_or(1, |log| log as usize + 1)
+}
+
+fn signed_decimal_len(value: i64) -> usize {
+    usize::from(value < 0) + unsigned_decimal_len(value.unsigned_abs())
 }
 
 fn collect_all_results(
@@ -509,13 +601,14 @@ mod tests {
         insert(&storage, &s2);
         insert(&storage, &s3);
 
-        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let data = export_host(&config_file, "h1", |_, _, _| Ok::<(), WebExportError>(())).unwrap();
 
         assert_eq!(data.index.last_updated, 3000);
         assert_eq!(data.index.benchmarks.len(), 2);
         assert_eq!(data.index.benchmarks[0].name.as_str(), "bench");
         assert_eq!(data.index.benchmarks[0].result_count, 2);
         assert_eq!(data.index.benchmarks[0].config_keys, vec![0]);
+        assert_eq!(data.index.benchmarks[0].history_parts, vec![0]);
         assert_eq!(data.index.benchmarks[1].name.as_str(), "bench2");
         assert_eq!(data.index.benchmarks[1].result_count, 1);
         assert_eq!(data.index.benchmarks[1].config_keys, vec![0]);
@@ -549,7 +642,7 @@ mod tests {
         let s = mk_series(&config_file, "h1", "bench", "build=x", 100.0, 1000);
         insert(&storage, &s);
 
-        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let data = export_host(&config_file, "h1", |_, _, _| Ok::<(), WebExportError>(())).unwrap();
 
         let build_key = &data.index.config_keys["build"];
         assert_eq!(build_key.annotations.len(), 1);
@@ -581,7 +674,7 @@ mod tests {
         let s = mk_series(&config_file, "h1", "bench", "build=x", 100.0, 1000);
         insert(&storage, &s);
 
-        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let data = export_host(&config_file, "h1", |_, _, _| Ok::<(), WebExportError>(())).unwrap();
 
         let build_key = &data.index.config_keys["build"];
         assert_eq!(
@@ -599,7 +692,7 @@ mod tests {
         insert(&storage, &s1);
         insert(&storage, &s2);
 
-        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let data = export_host(&config_file, "h1", |_, _, _| Ok::<(), WebExportError>(())).unwrap();
 
         // Config keys/values are in index.json, not results.json
         assert!(data.index.config_keys.contains_key("build"));
@@ -630,7 +723,7 @@ mod tests {
         insert(&storage, &s1);
         insert(&storage, &s2);
 
-        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let data = export_host(&config_file, "h1", |_, _, _| Ok::<(), WebExportError>(())).unwrap();
         let latest = data
             .index
             .latest_results
@@ -654,7 +747,7 @@ mod tests {
         insert(&storage, &s1);
         insert(&storage, &s2);
 
-        let data = export_host(&config_file, "h1", |_, _| Ok::<(), WebExportError>(())).unwrap();
+        let data = export_host(&config_file, "h1", |_, _, _| Ok::<(), WebExportError>(())).unwrap();
         let latest = data
             .index
             .latest_results
@@ -680,16 +773,16 @@ mod tests {
         insert(&storage, &s3);
 
         let mut history_map = BTreeMap::new();
-        export_host(&config_file, "h1", |bench_id, history| {
-            history_map.insert(bench_id.clone(), history);
+        export_host(&config_file, "h1", |bench_id, part, history| {
+            history_map.insert((bench_id.clone(), part), history);
             Ok::<(), WebExportError>(())
         })
         .unwrap();
-        let history = history_map.get(&"bench".try_into().unwrap()).unwrap();
+        let history = history_map.get(&("bench".try_into().unwrap(), 0)).unwrap();
 
         assert_eq!(history.series.len(), 3);
 
-        // Ordered by timestamp
+        // Ordered by config, then timestamp
         let s0 = &history.series[0];
         assert_eq!(s0.config_idx, 0); // build=x
         assert_eq!(s0.measurement_token, 0); // isolated
@@ -697,12 +790,113 @@ mod tests {
         assert_eq!(s0.run_count, 1);
 
         let s1 = &history.series[1];
-        assert_eq!(s1.config_idx, 1); // build=y
-        assert_eq!(s1.timestamp_s, 1500);
+        assert_eq!(s1.config_idx, 0); // build=x
+        assert_eq!(s1.timestamp_s, 2000);
 
         let s2 = &history.series[2];
-        assert_eq!(s2.config_idx, 0); // build=x
-        assert_eq!(s2.timestamp_s, 2000);
+        assert_eq!(s2.config_idx, 1); // build=y
+        assert_eq!(s2.timestamp_s, 1500);
+    }
+
+    fn history_row(config_idx: usize, timestamp_s: i64) -> HistoryRow {
+        HistoryRow {
+            config_idx,
+            measurement_token: 0,
+            timestamp_s,
+            mean_ns: 123_456,
+            ci95_half_ns: 789,
+            run_count: 3,
+        }
+    }
+
+    #[test]
+    fn history_row_json_len_matches_serialized_size() {
+        let rows = [
+            history_row(0, 0),
+            history_row(18_413, 1_780_952_018),
+            HistoryRow {
+                config_idx: 7,
+                measurement_token: 42,
+                timestamp_s: -5,
+                mean_ns: -1_000_000_000,
+                ci95_half_ns: 10,
+                run_count: 100,
+            },
+        ];
+        for row in &rows {
+            let serialized = serde_json::to_vec(row).unwrap();
+            assert_eq!(history_row_json_len(row), serialized.len() + 1, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn partition_history_empty_yields_one_part_starting_at_zero() {
+        let parts = partition_history(Vec::new(), 1024);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].first_config_idx, 0);
+        assert_eq!(parts[0].rows.len(), 0);
+    }
+
+    #[test]
+    fn partition_history_keeps_everything_in_one_part_under_target() {
+        let rows = vec![
+            history_row(2, 2000),
+            history_row(0, 1000),
+            history_row(2, 1500),
+        ];
+        let parts = partition_history(rows, HISTORY_PART_TARGET_BYTES);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].first_config_idx, 0);
+        // Sorted by config, timestamp order preserved within a config.
+        assert_eq!(
+            parts[0]
+                .rows
+                .iter()
+                .map(|r| (r.config_idx, r.timestamp_s))
+                .collect::<Vec<_>>(),
+            vec![(0, 1000), (2, 2000), (2, 1500)]
+        );
+    }
+
+    #[test]
+    fn partition_history_splits_on_config_boundaries_only() {
+        // Config 5 is missing on purpose: its lookup must still land on the part before it.
+        let rows: Vec<HistoryRow> = [1usize, 2, 3, 4, 6, 7]
+            .into_iter()
+            .flat_map(|config_idx| (0..3).map(move |n| history_row(config_idx, 1000 + n)))
+            .collect();
+        let row_len = history_row_json_len(&rows[0]);
+        // Fits two configs (six rows) per part, but not three.
+        let target = row_len * 7;
+
+        let parts = partition_history(rows, target);
+
+        assert_eq!(
+            parts.iter().map(|p| p.first_config_idx).collect::<Vec<_>>(),
+            vec![0, 3, 6]
+        );
+        for part in &parts {
+            let bytes: usize = part.rows.iter().map(history_row_json_len).sum();
+            assert!(bytes <= target, "part exceeds target: {bytes} > {target}");
+        }
+        let configs_per_part: Vec<Vec<usize>> = parts
+            .iter()
+            .map(|p| {
+                let mut c: Vec<usize> = p.rows.iter().map(|r| r.config_idx).collect();
+                c.dedup();
+                c
+            })
+            .collect();
+        assert_eq!(configs_per_part, vec![vec![1, 2], vec![3, 4], vec![6, 7]]);
+    }
+
+    #[test]
+    fn partition_history_never_splits_a_single_config() {
+        let rows: Vec<HistoryRow> = (0..10).map(|n| history_row(3, 1000 + n)).collect();
+        let parts = partition_history(rows, 1);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].first_config_idx, 0);
+        assert_eq!(parts[0].rows.len(), 10);
     }
 
     #[test]
@@ -733,7 +927,7 @@ mod tests {
         }
 
         let mut history = None;
-        let data = export_host(&config_file, "h1", |_, rows| {
+        let data = export_host(&config_file, "h1", |_, _, rows| {
             history = Some(rows);
             Ok::<(), WebExportError>(())
         })
@@ -759,7 +953,7 @@ mod tests {
         insert(&storage, &s1);
 
         let mut history_count = 0usize;
-        let data = export_host(&config_file, "h1", |_, _| {
+        let data = export_host(&config_file, "h1", |_, _, _| {
             history_count += 1;
             Ok::<(), WebExportError>(())
         })
@@ -853,7 +1047,7 @@ mod tests {
             .unwrap();
 
         let mut history = None;
-        let data = export_host(&config_file, "h1", |_, rows| {
+        let data = export_host(&config_file, "h1", |_, _, rows| {
             history = Some(rows);
             Ok::<(), WebExportError>(())
         })

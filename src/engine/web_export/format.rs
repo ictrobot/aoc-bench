@@ -29,11 +29,12 @@ impl Serialize for ResultRow {
     }
 }
 
-/// A row in the indexed history file.
+/// A row in an indexed history part file.
 ///
 /// Serializes as
 /// `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`.
-/// Decoded using the host's `config_keys` from `index.json`.
+/// Decoded using the host's `config_keys` from `index.json`. Rows are ordered by `config_idx`,
+/// then by timestamp.
 #[derive(Debug, PartialEq)]
 pub struct HistoryRow {
     pub config_idx: usize,
@@ -88,6 +89,10 @@ pub struct WebBenchmarkEntry {
     pub result_count: usize,
     /// Indices into the host's canonically ordered `config_keys` table.
     pub config_keys: Vec<usize>,
+    /// First `config_idx` covered by each history part file, in part order. Always starts at 0,
+    /// strictly increasing; part `n` is `history/{name}.{n}.json` and holds configs from
+    /// `history_parts[n]` up to (excluding) `history_parts[n + 1]`.
+    pub history_parts: Vec<usize>,
 }
 
 /// Stable results for all benchmarks on this host.
@@ -97,7 +102,8 @@ pub struct WebIndexedResults {
     pub results: Vec<ResultRow>,
 }
 
-/// Measurement history for a single benchmark.
+/// One part of the measurement history for a single benchmark, covering a contiguous
+/// `config_idx` range (see [`WebBenchmarkEntry::history_parts`]).
 /// Each row: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`
 #[derive(Serialize, Debug, PartialEq)]
 pub struct WebIndexedHistory {

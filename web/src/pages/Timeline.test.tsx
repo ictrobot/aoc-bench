@@ -10,6 +10,7 @@ import type { IndexedHistory } from "@/lib/types.ts"
 vi.mock("@/lib/api.ts", () => ({
   loadIndex: vi.fn(),
   loadHistory: vi.fn(),
+  historyPart: vi.fn(),
   decodeHistory: vi.fn(),
 }))
 
@@ -17,6 +18,7 @@ const HOST = TEST_HOST
 const BENCH = "aoc/bench-1"
 const mockLoadIndex = vi.mocked(api.loadIndex)
 const mockLoadHistory = vi.mocked(api.loadHistory)
+const mockHistoryPart = vi.mocked(api.historyPart)
 const mockDecodeHistory = vi.mocked(api.decodeHistory)
 
 function makeTimelineHostIndex() {
@@ -34,6 +36,7 @@ describe("DrillDown", () => {
     vi.clearAllMocks()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeTimelineHostIndex()))
     mockLoadHistory.mockResolvedValue({ series: [] } satisfies IndexedHistory)
+    mockHistoryPart.mockReturnValue(0)
     mockDecodeHistory.mockReturnValue([])
   })
 

@@ -2,7 +2,10 @@ import type { GlobalIndex, HostIndex } from "@/lib/types.ts"
 
 export const TEST_HOST = "linux-x64"
 
-type BenchmarkOverride = Omit<HostIndex["benchmarks"][number], "config_keys"> & { config_keys?: number[] }
+type BenchmarkOverride = Omit<HostIndex["benchmarks"][number], "config_keys" | "history_parts"> & {
+  config_keys?: number[]
+  history_parts?: number[]
+}
 type HostIndexOverrides = Omit<Partial<HostIndex>, "benchmarks"> & { benchmarks?: BenchmarkOverride[] }
 
 export function makeHostIndex(overrides: HostIndexOverrides = {}): HostIndex {
@@ -21,6 +24,7 @@ export function makeHostIndex(overrides: HostIndexOverrides = {}): HostIndex {
   index.benchmarks = (overrides.benchmarks ?? []).map((benchmark) => ({
     ...benchmark,
     config_keys: benchmark.config_keys ?? allKeyIndexes,
+    history_parts: benchmark.history_parts ?? [0],
   }))
   return index
 }
@@ -36,7 +40,7 @@ export function makeGlobalIndex(
   } = {},
 ): GlobalIndex {
   return {
-    schema_version: 2,
+    schema_version: 3,
     snapshot_id: snapshotId,
     hosts: { [host]: hostIndex },
   }

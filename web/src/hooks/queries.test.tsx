@@ -10,6 +10,7 @@ vi.mock("@/lib/api.ts", () => ({
   loadIndex: vi.fn(),
   loadResults: vi.fn(),
   loadHistory: vi.fn(),
+  historyPart: vi.fn(),
   decodeResultsForBenchmark: vi.fn(),
   decodeHistory: vi.fn(),
 }))
@@ -22,6 +23,7 @@ const mockLoadIndex = vi.mocked(api.loadIndex)
 const mockLoadResults = vi.mocked(api.loadResults)
 const mockDecodeResultsForBenchmark = vi.mocked(api.decodeResultsForBenchmark)
 const mockLoadHistory = vi.mocked(api.loadHistory)
+const mockHistoryPart = vi.mocked(api.historyPart)
 const mockDecodeHistory = vi.mocked(api.decodeHistory)
 
 function makeHostIndex(resultsPath: string): HostIndex {
@@ -32,8 +34,8 @@ function makeHostIndex(resultsPath: string): HostIndex {
       input: { values: ["small"] },
     },
     benchmarks: [
-      { name: BENCH, result_count: 1, config_keys: [0, 1] },
-      { name: BENCH_2, result_count: 1, config_keys: [0, 1] },
+      { name: BENCH, result_count: 1, config_keys: [0, 1], history_parts: [0] },
+      { name: BENCH_2, result_count: 1, config_keys: [0, 1], history_parts: [0] },
     ],
     timeline_key: "compiler",
     results_path: resultsPath,
@@ -43,7 +45,7 @@ function makeHostIndex(resultsPath: string): HostIndex {
 
 function makeIndex(snapshotId: string, hostIndex: HostIndex): GlobalIndex {
   return {
-    schema_version: 2,
+    schema_version: 3,
     snapshot_id: snapshotId,
     hosts: { [HOST]: hostIndex },
   }
@@ -69,6 +71,7 @@ function createWrapper(queryClient: QueryClient) {
 beforeEach(() => {
   vi.clearAllMocks()
   mockLoadHistory.mockResolvedValue({ series: [] } satisfies IndexedHistory)
+  mockHistoryPart.mockReturnValue(0)
   mockDecodeHistory.mockReturnValue([])
 })
 
@@ -280,5 +283,80 @@ describe("useBenchmarkHistory", () => {
     expect(mockLoadHistory).toHaveBeenCalledTimes(1)
     expect(mockDecodeHistory).toHaveBeenCalledTimes(2)
     expect(mockDecodeHistory.mock.calls.map((call) => call[3])).toEqual([configA, configB])
+  })
+
+  it("loads a different history part when the config lives in another part", async () => {
+    const queryClient = createQueryClient()
+    const hostIndex = makeHostIndex("results-a.json")
+    const index = makeIndex("snapshot-a", hostIndex)
+
+    const configA = { compiler: "stable", input: "small" }
+    const configB = { compiler: "stable", input: "large" }
+
+    mockLoadIndex.mockResolvedValue(index)
+    mockHistoryPart.mockImplementation((_index, _bench, config) => (config.input === "small" ? 0 : 1))
+    mockLoadHistory.mockImplementation(async (_index, _bench, part) => ({
+      series: [[part, 0, 1_000 * (part + 1), 100, 5, 10]],
+    }))
+    mockDecodeHistory.mockImplementation((_index, data, _bench, config) => [
+      {
+        config: { ...config },
+        measurement_token: 0,
+        timestamp: data.series[0][2],
+        median_run_mean_ns: 100,
+        median_run_ci95_half_ns: 5,
+        run_count: 10,
+      },
+    ])
+
+    const { result, rerender } = renderHook(({ config }) => useBenchmarkHistory(HOST, BENCH, config), {
+      initialProps: { config: configA },
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => expect(result.current.data?.[0].timestamp).toBe(1_000))
+    expect(mockLoadHistory).toHaveBeenCalledTimes(1)
+    expect(mockLoadHistory).toHaveBeenLastCalledWith(hostIndex, BENCH, 0)
+
+    rerender({ config: configB })
+    await waitFor(() => expect(result.current.data?.[0].timestamp).toBe(2_000))
+    expect(mockLoadHistory).toHaveBeenCalledTimes(2)
+    expect(mockLoadHistory).toHaveBeenLastCalledWith(hostIndex, BENCH, 1)
+
+    // Switching back reuses the cached first part.
+    rerender({ config: configA })
+    await waitFor(() => expect(result.current.data?.[0].timestamp).toBe(1_000))
+    expect(mockLoadHistory).toHaveBeenCalledTimes(2)
+  })
+
+  it("resolves to no history without fetching when the config has no history part", async () => {
+    const queryClient = createQueryClient()
+    const hostIndex = makeHostIndex("results-a.json")
+    mockLoadIndex.mockResolvedValue(makeIndex("snapshot-a", hostIndex))
+    mockHistoryPart.mockReturnValue(-1)
+
+    const { result } = renderHook(() => useBenchmarkHistory(HOST, BENCH, { compiler: "unknown", input: "small" }), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => expect(result.current.data).toEqual([]))
+    expect(mockLoadHistory).not.toHaveBeenCalled()
+    expect(mockDecodeHistory).not.toHaveBeenCalled()
+  })
+
+  it("reports a malformed history part table as a query error", async () => {
+    const queryClient = createQueryClient()
+    const hostIndex = makeHostIndex("results-a.json")
+    mockLoadIndex.mockResolvedValue(makeIndex("snapshot-a", hostIndex))
+    mockHistoryPart.mockImplementation(() => {
+      throw new Error("Invalid history_parts for benchmark 'aoc/bench-1'")
+    })
+
+    const { result } = renderHook(() => useBenchmarkHistory(HOST, BENCH, { compiler: "stable", input: "small" }), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => expect(result.current.error?.message).toMatch(/Invalid history_parts/))
+    expect(mockLoadHistory).not.toHaveBeenCalled()
   })
 })

@@ -30,11 +30,12 @@ function indexedHistoryQueryOptions(
   snapshotId: string | undefined,
   host: string,
   bench: string,
+  part: number,
   hostIndex: HostIndex | undefined,
 ) {
   return {
-    queryKey: ["history", snapshotId, host, bench] as const,
-    queryFn: () => api.loadHistory(hostIndex!, bench),
+    queryKey: ["history", snapshotId, host, bench, part] as const,
+    queryFn: () => api.loadHistory(hostIndex!, bench, part),
     staleTime: RAW_QUERY_STALE_TIME,
     gcTime: RAW_QUERY_GC_TIME_MS,
   }
@@ -138,17 +139,32 @@ export function useBenchmarkHistory(host: string, bench: string, config: Record<
   const snapshotId = index?.snapshot_id
   const enabled = !!hostIndex && !!snapshotId && !!bench
 
-  // Used to keep the raw indexed history active
+  // History is split into part files by config range. The part is resolved during render so the
+  // raw query below can keep it active; -1 means there is nothing to fetch, and a malformed part
+  // table is surfaced as an error of the decoded query rather than thrown from render.
+  let part = -1
+  let partError: unknown
+  if (enabled) {
+    try {
+      part = api.historyPart(hostIndex, bench, config)
+    } catch (error) {
+      partError = error
+    }
+  }
+
+  // Used to keep the raw indexed history part active
   useQuery<IndexedHistory>({
-    ...indexedHistoryQueryOptions(snapshotId, host, bench, hostIndex),
-    enabled,
+    ...indexedHistoryQueryOptions(snapshotId, host, bench, part, hostIndex),
+    enabled: enabled && part >= 0,
   })
 
   return useQuery<HistorySeries[]>({
     queryKey: ["decoded-history", snapshotId, host, bench, buildConfigSignature(config, "")],
     queryFn: async () => {
+      if (partError !== undefined) throw partError
+      if (part < 0) return []
       const data = await queryClient.ensureQueryData<IndexedHistory>(
-        indexedHistoryQueryOptions(snapshotId, host, bench, hostIndex),
+        indexedHistoryQueryOptions(snapshotId, host, bench, part, hostIndex),
       )
       return api.decodeHistory(hostIndex!, data, bench, config)
     },

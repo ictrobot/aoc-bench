@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { HostIndex, IndexedHistory, IndexedResults } from "./types.ts"
-import { decodeHistory, decodeLatestResults, decodeResults, decodeResultsForBenchmark } from "./api.ts"
+import { decodeHistory, decodeLatestResults, decodeResults, decodeResultsForBenchmark, historyPart } from "./api.ts"
 
 function makeHostIndex(): HostIndex {
   return {
@@ -10,8 +10,8 @@ function makeHostIndex(): HostIndex {
       compiler: { values: ["stable", "nightly"] },
     },
     benchmarks: [
-      { name: "bench-a", result_count: 2, config_keys: [0, 1] },
-      { name: "bench-b", result_count: 2, config_keys: [0] },
+      { name: "bench-a", result_count: 2, config_keys: [0, 1], history_parts: [0, 2] },
+      { name: "bench-b", result_count: 2, config_keys: [0], history_parts: [0] },
     ],
     timeline_key: "compiler",
     results_path: "results.json",
@@ -130,6 +130,28 @@ describe("api decode helpers", () => {
       },
     ])
     expect(decodeHistory(index, data, "bench-a", { compiler: "unknown", input: "large" })).toEqual([])
+  })
+
+  it("locates the history part holding a config", () => {
+    const index = makeHostIndex()
+    // bench-a config_idx is compiler-major: stable/small=0, stable/large=1, nightly/small=2, nightly/large=3
+    expect(historyPart(index, "bench-a", { compiler: "stable", input: "small" })).toBe(0)
+    expect(historyPart(index, "bench-a", { compiler: "stable", input: "large" })).toBe(0)
+    expect(historyPart(index, "bench-a", { compiler: "nightly", input: "small" })).toBe(1)
+    expect(historyPart(index, "bench-a", { compiler: "nightly", input: "large" })).toBe(1)
+    expect(historyPart(index, "bench-b", { compiler: "nightly" })).toBe(0)
+
+    expect(historyPart(index, "missing", { compiler: "stable", input: "small" })).toBe(-1)
+    expect(historyPart(index, "bench-a", { compiler: "unknown", input: "small" })).toBe(-1)
+  })
+
+  it("rejects malformed history part tables", () => {
+    const config = { compiler: "stable", input: "small" }
+    for (const parts of [[], [1], [0, 0], [0, 3, 2], [0, 1.5]]) {
+      const index = makeHostIndex()
+      index.benchmarks[0].history_parts = parts
+      expect(() => historyPart(index, "bench-a", config)).toThrow(/Invalid history_parts/)
+    }
   })
 
   it("rejects malformed benchmark, config, and key indices", () => {
