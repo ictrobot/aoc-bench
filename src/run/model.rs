@@ -39,6 +39,7 @@ impl RunSeries {
     }
 
     /// Returns the stats for the median run.
+    #[must_use]
     pub fn median_stats(&self) -> &StatsResult {
         &self.runs[self.runs.len() / 2].stats
     }

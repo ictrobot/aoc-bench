@@ -251,7 +251,7 @@ fn build_snapshot_hosts(
 fn write_json_atomic<T: Serialize>(path: &Path, data: &T) -> Result<(), WebSnapshotExportError> {
     let parent = path
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| !p.is_empty())
         .unwrap_or_else(|| Path::new("."));
 
     fs::create_dir_all(parent).map_err(|error| WebSnapshotExportError::Io {
@@ -285,7 +285,7 @@ fn write_json_hashed<T: Serialize>(
 ) -> Result<SnapshotManifestEntry, WebSnapshotExportError> {
     let parent = path
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| !p.is_empty())
         .unwrap_or_else(|| Path::new("."));
 
     fs::create_dir_all(parent).map_err(|error| WebSnapshotExportError::Io {
@@ -388,6 +388,7 @@ mod tests {
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use crate::storage::{HybridDiskStorage, ResultsRow};
     use jiff::Timestamp;
+    use std::assert_matches;
 
     fn setup_storage(host: &str) -> (TempDir, ConfigFile, HybridDiskStorage) {
         let dir = TempDir::new().unwrap();
@@ -653,14 +654,14 @@ mod tests {
         };
         let error =
             export_web_snapshot_with_options(&config_file, &complete_output, options).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             WebSnapshotExportError::IncompleteResults {
                 ref host,
                 expected: 2,
                 actual: 1,
             } if host == "h1"
-        ));
+        );
         assert!(!complete_output.join("index.json").exists());
 
         insert(
@@ -747,13 +748,13 @@ mod tests {
             options,
         )
         .unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             WebSnapshotExportError::IncompleteResults {
                 ref host,
                 expected: 1,
                 actual: 0,
             } if host == "h2"
-        ));
+        );
     }
 }

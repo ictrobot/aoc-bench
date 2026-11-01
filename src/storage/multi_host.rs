@@ -167,6 +167,7 @@ mod tests {
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use crate::storage::{HybridDiskStorage, ResultsRow};
     use jiff::Timestamp;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     fn make_config(config_file: &ConfigFile, host: Option<&str>) -> Config {
@@ -286,7 +287,7 @@ mod tests {
         let err = storage
             .get_result_with_stats(&(), &bench, &Config::new())
             .unwrap_err();
-        assert!(matches!(err, MultiHostError::ConfigMissingHostKey(_)));
+        assert_matches!(err, MultiHostError::ConfigMissingHostKey(_));
     }
 
     #[test]
@@ -305,7 +306,7 @@ mod tests {
             .get_result_with_stats(&(), &bench, &config)
             .unwrap_err();
 
-        assert!(matches!(err, MultiHostError::BackendError { host, .. } if host == "h1"));
+        assert_matches!(err, MultiHostError::BackendError { host, .. } if host == "h1");
     }
 
     #[test]

@@ -109,7 +109,7 @@ fn run_command_stores_isolated_measurement() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
 
     let mut run_series_path: Option<PathBuf> = None;
     for line in String::from_utf8_lossy(&output.stderr).lines() {

@@ -1027,6 +1027,7 @@ mod tests {
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use crate::storage::{seed_measurement, seed_result};
     use crate::workload::Sha256;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     const TEST_CONFIG: &str = r#"{
@@ -1151,7 +1152,7 @@ mod tests {
         let err = storage
             .read_transaction(|tx| storage.get_result_with_stats(tx, &series.bench, &config))
             .unwrap_err();
-        assert!(matches!(err, HybridDiskError::HostMismatch { .. }));
+        assert_matches!(err, HybridDiskError::HostMismatch { .. });
     }
 
     #[test]
@@ -1227,7 +1228,7 @@ mod tests {
 
         let lock1 = storage.acquire_lock().unwrap();
         let err = storage.acquire_lock().unwrap_err();
-        assert!(matches!(err, HybridDiskError::LockUnavailable { .. }));
+        assert_matches!(err, HybridDiskError::LockUnavailable { .. });
         drop(lock1);
         storage.acquire_lock().unwrap();
     }
@@ -1260,7 +1261,7 @@ mod tests {
             storage.get_or_create_case(tx, "empty-config", "{}")?;
             Err(CallbackError::Abort)
         });
-        assert!(matches!(result, Err(CallbackError::Abort)));
+        assert_matches!(result, Err(CallbackError::Abort));
 
         storage
             .read_transaction(|tx| {
@@ -1274,7 +1275,7 @@ mod tests {
     fn test_new_unknown_host() {
         let (_dir, storage) = temp_storage("pi5");
         let err = HybridDiskStorage::new(storage.config_file, "unknown-host").unwrap_err();
-        assert!(matches!(err, HybridDiskError::UnknownHost(_)));
+        assert_matches!(err, HybridDiskError::UnknownHost(_));
     }
 
     #[test]
@@ -1414,8 +1415,8 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| !row.is_shared));
         assert!(
-            rows.windows(2)
-                .all(|pair| pair[0].measurement_id != pair[1].measurement_id)
+            rows.array_windows()
+                .all(|[a, b]| a.measurement_id != b.measurement_id)
         );
         let timestamps: Vec<_> = rows.iter().map(|r| r.timestamp.as_second()).collect();
         assert_eq!(timestamps, vec![10, 20, 30]);
@@ -1634,13 +1635,13 @@ mod tests {
                     last_measurement_id: other_measurement,
                     ..result.clone()
                 };
-                assert!(matches!(
+                assert_matches!(
                     storage.set_workload_state(tx, &invalid),
                     Err(HybridDiskError::MalformedStoredValue {
                         kind: "workload state",
                         ..
                     })
-                ));
+                );
 
                 let updated = WorkloadState {
                     matched_count: 6,
@@ -1691,10 +1692,10 @@ mod tests {
         }
 
         let error = storage.read_transaction(|_| Ok(())).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             HybridDiskError::RustMigrationError { version: 3, .. }
-        ));
+        );
 
         let conn = Connection::open(&db_path).unwrap();
         let migration_version: i64 = conn

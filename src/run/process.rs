@@ -504,6 +504,7 @@ mod tests {
     use crate::group::resolve_and_group;
     use crate::run::test_support::{Fixture, write_sampler};
     use crate::storage::Storage;
+    use std::assert_matches;
     use std::fs;
 
     fn fixture() -> Fixture {
@@ -746,7 +747,7 @@ mod tests {
         // reuse = false => always re-runs the workload, producing a second measurement.
         let outcome =
             process_shared_group(&f.storage, &f.host_config, &c, false, false, false).unwrap();
-        assert!(matches!(outcome, GroupOutcome::Executed { .. }));
+        assert_matches!(outcome, GroupOutcome::Executed { .. });
 
         f.storage
             .read_transaction(|tx| {

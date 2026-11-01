@@ -103,7 +103,7 @@ pub struct WebIndexedResults {
 }
 
 /// One part of the measurement history for a single benchmark, covering a contiguous
-/// `config_idx` range (see [`WebBenchmarkEntry::history_parts`]).
+/// `config_idx` range (see `WebBenchmarkEntry::history_parts`).
 /// Each row: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`
 #[derive(Serialize, Debug, PartialEq)]
 pub struct WebIndexedHistory {

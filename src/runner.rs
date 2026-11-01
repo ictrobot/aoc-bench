@@ -468,6 +468,7 @@ mod tests {
     use super::*;
     use crate::config::{Benchmark, ConfigProduct};
     use crate::stats::{EstimationMode, Sample, StatsOptions};
+    use std::assert_matches;
     use std::num::{NonZeroU64, NonZeroUsize};
     use tempfile::NamedTempFile;
 
@@ -590,7 +591,7 @@ mod tests {
         .unwrap();
 
         let err = runner.run_single().unwrap_err();
-        assert!(matches!(err, RunError::Timeout { .. }));
+        assert_matches!(err, RunError::Timeout { .. });
     }
 
     #[test]
@@ -619,7 +620,7 @@ mod tests {
         )
         .unwrap();
         let result = runner.run_single();
-        assert!(matches!(result, Err(RunError::PrematureEof)));
+        assert_matches!(result, Err(RunError::PrematureEof));
 
         let mut tmp_file = NamedTempFile::new().unwrap();
         tmp_file
@@ -665,14 +666,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            runner.run_single(),
-            Err(RunError::ProcessCrashed(_))
-        ));
+        assert_matches!(runner.run_single(), Err(RunError::ProcessCrashed(_)));
 
-        assert!(matches!(
-            runner.run_series(),
-            Err(RunError::ProcessCrashed(_))
-        ));
+        assert_matches!(runner.run_series(), Err(RunError::ProcessCrashed(_)));
     }
 }

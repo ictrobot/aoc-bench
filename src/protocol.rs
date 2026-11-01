@@ -241,6 +241,7 @@ pub fn validate_meta_version(meta: &MetaLine) -> Result<(), ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_parse_meta_line() {
@@ -366,10 +367,7 @@ mod tests {
             ProtocolLine::Sample(sample) => {
                 let result = validate_checksum(&sample, "different");
                 assert!(result.is_err());
-                assert!(matches!(
-                    result.unwrap_err(),
-                    ParseError::ChecksumMismatch { .. }
-                ));
+                assert_matches!(result.unwrap_err(), ParseError::ChecksumMismatch { .. });
             }
             ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
@@ -385,10 +383,7 @@ mod tests {
                 assert_eq!(sample.total_ns, 30_920_000_000);
                 let result = validate_checksum(&sample, "8f024a8e");
                 assert!(result.is_err());
-                assert!(matches!(
-                    result.unwrap_err(),
-                    ParseError::ChecksumMissing { .. }
-                ));
+                assert_matches!(result.unwrap_err(), ParseError::ChecksumMissing { .. });
             }
             ProtocolLine::Meta(_) => panic!("Expected Sample line"),
         }
@@ -437,7 +432,7 @@ mod tests {
         let line = "SAMPLE\t0\t0";
         let result = parse_line(line);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ParseError::InvalidNumber(_))));
+        assert_matches!(result, Err(ParseError::InvalidNumber(_)));
     }
 
     #[test]
@@ -512,7 +507,7 @@ mod tests {
             ProtocolLine::Meta(meta) => {
                 let result = validate_meta_version(&meta);
                 assert!(result.is_err());
-                assert!(matches!(result.unwrap_err(), ParseError::InvalidFormat(_)));
+                assert_matches!(result.unwrap_err(), ParseError::InvalidFormat(_));
             }
             ProtocolLine::Sample(_) => panic!("Expected Meta line"),
         }

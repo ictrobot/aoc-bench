@@ -482,6 +482,7 @@ mod tests {
     use crate::stable::ChangeDirection;
     use crate::stats::{EstimationMode, Sample, StatsResult};
     use crate::storage::HybridDiskStorage;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     fn setup_storage(host: &str) -> (TempDir, StatsEngine) {
@@ -697,7 +698,7 @@ mod tests {
         let bench: BenchmarkId = "bench2".try_into().unwrap();
 
         let err = engine.timeline(&bench, &Config::new()).unwrap_err();
-        assert!(matches!(err, StatsEngineError::NoVaryingKey));
+        assert_matches!(err, StatsEngineError::NoVaryingKey);
     }
 
     #[test]
@@ -771,7 +772,7 @@ mod tests {
 
         let engine = StatsEngine::new(config_file);
         let err = engine.timeline(&bench, &Config::new()).unwrap_err();
-        assert!(matches!(err, StatsEngineError::MultipleVaryingKeys(_)));
+        assert_matches!(err, StatsEngineError::MultipleVaryingKeys(_));
     }
 
     #[test]
@@ -916,7 +917,7 @@ mod tests {
             .impact(&comparison_value, None, &filter, 0.03)
             .unwrap_err();
 
-        assert!(matches!(err, StatsEngineError::ComparisonKeyInFilter(_)));
+        assert_matches!(err, StatsEngineError::ComparisonKeyInFilter(_));
     }
 
     #[test]
@@ -950,6 +951,6 @@ mod tests {
             .fastest_configs(Some(&missing), &Config::new())
             .unwrap_err();
 
-        assert!(matches!(err, StatsEngineError::NoResults));
+        assert_matches!(err, StatsEngineError::NoResults);
     }
 }

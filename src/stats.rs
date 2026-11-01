@@ -808,6 +808,7 @@ pub enum StatsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::num::{NonZeroU64, NonZeroUsize};
 
     #[test]
@@ -954,14 +955,14 @@ mod tests {
         // 8 stable samples, 150ms each => 1.2s total (meets min time) and window full
         for _ in 0..8 {
             let state = acc.add_sample(100, 150_000_000); // 1.5e6 ns/iter
-            assert!(matches!(state, StatsState::MoreSamplesRequired));
+            assert_matches!(state, StatsState::MoreSamplesRequired);
             assert_eq!(acc.sample_count(), 0);
         }
 
         // First post-warmup sample is recorded
         let state = acc.add_sample(100, 30_000_000);
         assert_eq!(acc.sample_count(), 1);
-        assert!(matches!(state, StatsState::MoreSamplesRequired));
+        assert_matches!(state, StatsState::MoreSamplesRequired);
     }
 
     #[test]
@@ -971,12 +972,12 @@ mod tests {
         // 7 samples of 125ms each => 875ms (below 1s minimum)
         for _ in 0..7 {
             let state = acc.add_sample(100, 125_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesRequired));
+            assert_matches!(state, StatsState::MoreSamplesRequired);
         }
 
         // 8th sample crosses 1s
         let state = acc.add_sample(100, 125_000_000);
-        assert!(matches!(state, StatsState::MoreSamplesRequired));
+        assert_matches!(state, StatsState::MoreSamplesRequired);
         assert_eq!(acc.sample_count(), 0);
 
         // 9th sample should be the first recorded
@@ -996,7 +997,7 @@ mod tests {
                 1_100_000_000
             };
             let state = acc.add_sample(100, total_ns);
-            assert!(matches!(state, StatsState::MoreSamplesRequired));
+            assert_matches!(state, StatsState::MoreSamplesRequired);
         }
 
         assert_eq!(acc.sample_count(), 0, "Warmup samples should be skipped");
@@ -1019,10 +1020,10 @@ mod tests {
         let mut acc = StatsAccumulator::with_options(opts);
 
         for _ in 1..=12 {
-            assert!(matches!(
+            assert_matches!(
                 acc.add_sample(1, 5_000_000_000),
                 StatsState::MoreSamplesRequired
-            ));
+            );
             assert_eq!(acc.sample_count(), 0);
         }
 
@@ -1037,18 +1038,18 @@ mod tests {
         // Warmup: 8 stable samples, 30ms each
         for _ in 0..34 {
             let state = acc.add_sample(100, 30_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesRequired));
+            assert_matches!(state, StatsState::MoreSamplesRequired);
         }
 
         // Add samples to satisfy the time and samples gates
         for i in 1..32 {
-            assert!(matches!(
+            assert_matches!(
                 acc.add_sample(100, 100_000_000),
                 StatsState::MoreSamplesRequired
-            ));
+            );
             assert_eq!(acc.sample_count(), i);
         }
-        assert!(matches!(acc.add_sample(100, 100_000_000), StatsState::Done));
+        assert_matches!(acc.add_sample(100, 100_000_000), StatsState::Done);
     }
 
     #[test]
@@ -1058,18 +1059,18 @@ mod tests {
         // Warmup: 8 stable samples, 150ms each
         for _ in 0..8 {
             let state = acc.add_sample(1000, 150_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesRequired));
+            assert_matches!(state, StatsState::MoreSamplesRequired);
         }
 
         for _ in 0..StatsOptions::DEFAULT_MIN_SAMPLES - 1 {
             let state = acc.add_sample(100, 150_000_000);
-            assert!(matches!(state, StatsState::MoreSamplesRequired));
+            assert_matches!(state, StatsState::MoreSamplesRequired);
         }
 
         // At exactly MIN_SAMPLES, state checks stopping
         let state = acc.add_sample(100, 150_000_000);
         // With consistent samples, should return Done
-        assert!(matches!(state, StatsState::Done));
+        assert_matches!(state, StatsState::Done);
     }
 
     #[test]
@@ -1082,16 +1083,13 @@ mod tests {
         };
 
         let mut acc = StatsAccumulator::with_options(opts);
-        assert!(matches!(
+        assert_matches!(
             acc.add_sample(100, 10_000_000),
             StatsState::MoreSamplesRequired
-        ));
+        );
         let _ = acc.add_sample(100, 10_000_000);
         let state = acc.state();
-        assert!(matches!(
-            state,
-            StatsState::Done | StatsState::MoreSamplesOptional
-        ));
+        assert_matches!(state, StatsState::Done | StatsState::MoreSamplesOptional);
     }
 
     #[test]
@@ -1104,14 +1102,14 @@ mod tests {
                 1 => 20_000_000,
                 _ => 30_000_000,
             }; // moderate variance, keeps CI wide without triggering outliers
-            assert!(matches!(
+            assert_matches!(
                 acc.add_sample(100, total_ns),
                 StatsState::MoreSamplesRequired | StatsState::MoreSamplesOptional
-            ));
+            );
         }
 
         // Hitting MAX_SAMPLES should finish without aborting even if CI is still wide
-        assert!(matches!(acc.add_sample(100, 30_000_000), StatsState::Done));
+        assert_matches!(acc.add_sample(100, 30_000_000), StatsState::Done);
     }
 
     #[test]
@@ -1120,13 +1118,13 @@ mod tests {
 
         // 200 samples * 10ms = 2s
         for _ in 1..200 {
-            assert!(matches!(
+            assert_matches!(
                 acc.add_sample(100, 10_000_000),
                 StatsState::MoreSamplesRequired
-            ));
+            );
         }
 
-        assert!(matches!(acc.add_sample(100, 10_000_000), StatsState::Done));
+        assert_matches!(acc.add_sample(100, 10_000_000), StatsState::Done);
     }
 
     #[test]
@@ -1135,13 +1133,13 @@ mod tests {
 
         // Very fast samples: total time stays well under 2s, but count will reach MAX_SAMPLES
         for _ in 1..StatsAccumulator::MAX_SAMPLES {
-            assert!(matches!(
+            assert_matches!(
                 acc.add_sample(100, 1_000), // 1µs per sample
                 StatsState::MoreSamplesRequired
-            ));
+            );
         }
 
-        assert!(matches!(acc.add_sample(100, 1_000), StatsState::Done));
+        assert_matches!(acc.add_sample(100, 1_000), StatsState::Done);
     }
 
     // Phase 2 tests: Bootstrap CI
@@ -1412,17 +1410,17 @@ mod tests {
 
         // Generate a strong upward trend in per-iteration time
         for i in 1..StatsAccumulator::TREND_CORRELATION_MIN_ITERATIONS {
-            assert!(matches!(
+            assert_matches!(
                 acc.add_sample(100, i as u64 * StatsAccumulator::CHECK_EVERY_NS),
                 StatsState::MoreSamplesRequired
-            ));
+            );
         }
 
         // Next sample should push it over the threshold and trigger Abort
-        assert!(matches!(
+        assert_matches!(
             acc.add_sample(100, 1_000_000_000),
             StatsState::Abort(StatsError::TrendDetected { .. })
-        ));
+        );
     }
 
     #[test]

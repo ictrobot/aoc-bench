@@ -800,6 +800,7 @@ mod tests {
     use super::*;
     use crate::config::{Benchmark, ConfigProduct};
     use crate::stats::StatsOptions;
+    use std::assert_matches;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use tempfile::TempDir;
@@ -916,7 +917,7 @@ mod tests {
         fs::create_dir_all(data.join("builds/a/bin")).unwrap();
         let bench_a = variant(&["builds/a/bin"]);
         let err = resolve_case(data, &bench_a.variants()[0], &Config::new()).unwrap_err();
-        assert!(matches!(err, GroupError::NotRegularFile { .. }));
+        assert_matches!(err, GroupError::NotRegularFile { .. });
     }
 
     #[test]
@@ -969,7 +970,7 @@ mod tests {
         .unwrap();
 
         let err = resolve_case(data, &bench.variants()[0], &Config::new()).unwrap_err();
-        assert!(matches!(err, GroupError::NotRegularFile { .. }));
+        assert_matches!(err, GroupError::NotRegularFile { .. });
     }
 
     #[test]
@@ -985,10 +986,7 @@ mod tests {
         // Replace the executable with a new inode.
         fs::remove_file(data.join("builds/a/bin")).unwrap();
         write_exe(data, "builds/a/bin", b"replacement with different inode");
-        assert!(matches!(
-            group[0].restat(),
-            Err(GroupError::GroupChanged { .. })
-        ));
+        assert_matches!(group[0].restat(), Err(GroupError::GroupChanged { .. }));
     }
 
     #[test]
@@ -1001,10 +999,7 @@ mod tests {
 
         // Same-length `fs::write` changes the bytes without replacing the inode or changing size.
         fs::write(data.join("builds/a/bin"), b"changed!").unwrap();
-        assert!(matches!(
-            group[0].restat(),
-            Err(GroupError::GroupChanged { .. })
-        ));
+        assert_matches!(group[0].restat(), Err(GroupError::GroupChanged { .. }));
     }
 
     #[test]

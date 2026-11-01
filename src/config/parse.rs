@@ -234,8 +234,9 @@ fn parse_benchmarks<'a>(
                         let command = variant
                             .command
                             .or_else(|| base_command.clone())
-                            .map(|cmd| cmd.into_iter().map(Cow::into_owned).collect::<Vec<_>>())
-                            .unwrap_or_default();
+                            .map_or_default(|cmd| {
+                                cmd.into_iter().map(Cow::into_owned).collect::<Vec<_>>()
+                            });
                         let input = match variant.input {
                             Some(name) => Some(resolve_input_path(data_dir, name)?),
                             None => base_input.clone(),

@@ -4,7 +4,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUSTDOCFLAGS: -Dwarnings
-  RUSTFLAGS: -Dwarnings
+  CARGO_BUILD_WARNINGS: deny
 jobs:
   test:
     runs-on: ubuntu-latest

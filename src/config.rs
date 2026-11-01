@@ -614,10 +614,10 @@ impl KeyValuesSubset {
         // private and should only be called with valid indexes.
         assert!(indexes[indexes.len() - 1] < key.0.values.len());
 
-        if let Some(pair) = indexes.windows(2).find(|w| w[0] == w[1]) {
+        if let Some([duplicate, _]) = indexes.array_windows().find(|[a, b]| a == b) {
             return Err(ConfigError::DuplicateValue {
                 key: key.name().to_string(),
-                value: key.0.values[pair[0]].to_string(),
+                value: key.0.values[*duplicate].to_string(),
             });
         }
 
@@ -886,7 +886,6 @@ impl ConfigProduct {
     }
 
     /// The config keys in canonical order.
-    #[must_use]
     pub fn keys(&self) -> impl ExactSizeIterator<Item = &Key> {
         self.subsets.iter().map(|subset| &subset.key)
     }
@@ -1202,7 +1201,6 @@ impl Benchmark {
     }
 
     /// The config keys shared by every variant, in canonical order.
-    #[must_use]
     pub fn config_keys(&self) -> impl ExactSizeIterator<Item = &Key> {
         self.variants[0].config.keys()
     }
@@ -1506,6 +1504,7 @@ pub enum ConfigError {
 mod tests {
     use super::*;
     use crate::stats::StatsOptions;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     #[test]
@@ -1580,7 +1579,7 @@ mod tests {
     #[test]
     fn test_key_duplicate_values() {
         let err = Key::new("test", vec!["val1", "val2", "val1"], HashMap::new(), None).unwrap_err();
-        assert!(matches!(err, ConfigError::DuplicateValue { .. }));
+        assert_matches!(err, ConfigError::DuplicateValue { .. });
     }
 
     #[test]
@@ -1607,14 +1606,14 @@ mod tests {
     fn test_key_annotation_unknown_value_rejected() {
         let annotations = HashMap::from_iter([("nonexistent", "label")]);
         let err = Key::new("test", vec!["a"], annotations, None).unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownValueForKey { .. }));
+        assert_matches!(err, ConfigError::UnknownValueForKey { .. });
     }
 
     #[test]
     fn test_key_annotation_empty_rejected() {
         let annotations = HashMap::from_iter([("a", "")]);
         let err = Key::new("test", vec!["a"], annotations, None).unwrap_err();
-        assert!(matches!(err, ConfigError::EmptyAnnotation { .. }));
+        assert_matches!(err, ConfigError::EmptyAnnotation { .. });
     }
 
     #[test]
@@ -1646,8 +1645,9 @@ mod tests {
             "",
         ] {
             let err = Key::new("commit", vec!["abc"], HashMap::new(), Some(template)).unwrap_err();
-            assert!(
-                matches!(err, ConfigError::InvalidLink { .. }),
+            assert_matches!(
+                err,
+                ConfigError::InvalidLink { .. },
                 "expected InvalidLink for {template:?}"
             );
         }
@@ -1696,10 +1696,7 @@ mod tests {
         // Should error as input is missing
         let result = ConfigFile::from_str(temp_dir.path(), None, json);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConfigError::MissingInput { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ConfigError::MissingInput { .. });
 
         // Create the input file
         let inputs_dir = temp_dir.path().join("inputs");
@@ -1836,7 +1833,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::DuplicateBenchmark(name) if name == "dup"));
+        assert_matches!(err, ConfigError::DuplicateBenchmark(name) if name == "dup");
     }
 
     #[test]
@@ -1892,10 +1889,10 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::UnknownDedupeStrategy { strategy, .. } if strategy == "content"
-        ));
+        );
     }
 
     #[test]
@@ -1970,14 +1967,13 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let error = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             ConfigError::MismatchedBenchmarkVariantKeys(benchmark) if benchmark == "suite"
-        ));
+        );
     }
 
     #[test]
-    #[expect(clippy::float_cmp)]
     fn test_stats_overrides_single_variant() {
         let json = r#"{
             "config_keys": {
@@ -2010,7 +2006,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp)]
     fn test_stats_overrides_variant_inherits_benchmark() {
         let json = r#"{
             "config_keys": {
@@ -2079,13 +2074,13 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::InvalidStatsOverride {
                 field: "runs_per_series",
                 reason: "must be odd"
             }
-        ));
+        );
     }
 
     #[test]
@@ -2104,13 +2099,13 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::InvalidStatsOverride {
                 field: "target_rel_ci",
                 reason: "must be between 0 and 1"
             }
-        ));
+        );
     }
 
     #[test]
@@ -2138,10 +2133,10 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::OverlappingBenchmarkVariants(name) if name == "suite"
-        ));
+        );
     }
 
     #[test]
@@ -2184,10 +2179,10 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(temp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
                 err,
                 ConfigError::OverlappingBenchmarkVariants(name) if name == "suite"
-        ));
+        );
     }
 
     #[test]
@@ -2379,7 +2374,7 @@ mod tests {
             ]
         }"#;
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidBenchmarkId(_)));
+        assert_matches!(err, ConfigError::InvalidBenchmarkId(_));
         assert_eq!(
             err.to_string(),
             "Invalid benchmark id 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': must match [a-zA-Z0-9_-]{1,128}"
@@ -2393,7 +2388,7 @@ mod tests {
             "benchmarks": []
         }"#;
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidKeyName(_)));
+        assert_matches!(err, ConfigError::InvalidKeyName(_));
         assert_eq!(
             err.to_string(),
             "Invalid key name 'Build': must match [a-z][a-z0-9_]{1,63}"
@@ -2407,7 +2402,7 @@ mod tests {
             "benchmarks": []
         }"#;
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidValue(_)));
+        assert_matches!(err, ConfigError::InvalidValue(_));
         assert_eq!(
             err.to_string(),
             "Invalid value 'debug release': must match [a-zA-Z0-9_-]{1,128}"
@@ -2429,7 +2424,7 @@ mod tests {
             ]
         }"#;
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownPreset { .. }));
+        assert_matches!(err, ConfigError::UnknownPreset { .. });
         assert_eq!(
             err.to_string(),
             "Unknown preset 'nonexistent' for key 'build'"
@@ -2554,10 +2549,7 @@ mod tests {
 
         // Test missing placeholder
         let result = config.expand_template("{missing}");
-        assert!(matches!(
-            result,
-            Err(ConfigError::UnknownKeyInPlaceholder(_))
-        ));
+        assert_matches!(result, Err(ConfigError::UnknownKeyInPlaceholder(_)));
 
         // Test malformed placeholder (no closing brace)
         assert_eq!(
@@ -2567,7 +2559,7 @@ mod tests {
 
         // Test nested braces - the first } closes the placeholder
         let err = config.expand_template("{{key}}").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownKeyInPlaceholder(v) if v == "{key"));
+        assert_matches!(err, ConfigError::UnknownKeyInPlaceholder(v) if v == "{key");
     }
 
     #[test]
@@ -2649,7 +2641,7 @@ mod tests {
 
         let tmp_dir = TempDir::new().unwrap();
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownKeyInPlaceholder(_)));
+        assert_matches!(err, ConfigError::UnknownKeyInPlaceholder(_));
     }
 
     #[test]
@@ -2933,11 +2925,11 @@ mod tests {
 
         // Test unknown key
         let err = config_file.config_from_string("unknown=debug").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownKey(_)));
+        assert_matches!(err, ConfigError::UnknownKey(_));
 
         // Test unknown value
         let err = config_file.config_from_string("build=unknown").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownValueForKey { .. }));
+        assert_matches!(err, ConfigError::UnknownValueForKey { .. });
 
         // Test host key
         let config = config_file
@@ -2949,7 +2941,7 @@ mod tests {
         let err = config_file
             .config_without_host_from_string("build=release,host=pi3")
             .unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownKey(_)));
+        assert_matches!(err, ConfigError::UnknownKey(_));
     }
 
     #[test]
@@ -2983,13 +2975,13 @@ mod tests {
         let mut bad_map = BTreeMap::new();
         bad_map.insert("unknown".to_string(), "value".to_string());
         let err = config_file.config_from_map(&bad_map).unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownKey(_)));
+        assert_matches!(err, ConfigError::UnknownKey(_));
 
         // Test unknown value
         let mut bad_map2 = BTreeMap::new();
         bad_map2.insert("build".to_string(), "unknown".to_string());
         let err2 = config_file.config_from_map(&bad_map2).unwrap_err();
-        assert!(matches!(err2, ConfigError::UnknownValueForKey { .. }));
+        assert_matches!(err2, ConfigError::UnknownValueForKey { .. });
     }
 
     #[test]
@@ -3007,19 +2999,19 @@ mod tests {
 
         // Invalid IDs
         let empty_err = BenchmarkId::try_from(String::new()).unwrap_err();
-        assert!(matches!(empty_err, ConfigError::InvalidBenchmarkId(_)));
+        assert_matches!(empty_err, ConfigError::InvalidBenchmarkId(_));
 
         let space_err = BenchmarkId::try_from("test bench").unwrap_err();
-        assert!(matches!(space_err, ConfigError::InvalidBenchmarkId(_)));
+        assert_matches!(space_err, ConfigError::InvalidBenchmarkId(_));
 
         let slash_err = BenchmarkId::try_from("test/bench").unwrap_err();
-        assert!(matches!(slash_err, ConfigError::InvalidBenchmarkId(_)));
+        assert_matches!(slash_err, ConfigError::InvalidBenchmarkId(_));
 
         let special_err = BenchmarkId::try_from("test@bench").unwrap_err();
-        assert!(matches!(special_err, ConfigError::InvalidBenchmarkId(_)));
+        assert_matches!(special_err, ConfigError::InvalidBenchmarkId(_));
 
         let length_err = BenchmarkId::try_from("a".repeat(Key::MAX_VALUE_LEN + 1)).unwrap_err();
-        assert!(matches!(length_err, ConfigError::InvalidBenchmarkId(_)));
+        assert_matches!(length_err, ConfigError::InvalidBenchmarkId(_));
     }
 
     #[test]
@@ -3213,7 +3205,7 @@ mod tests {
 
         // Invalid host name with space
         let err = ConfigFile::from_str(tmp_dir.path(), Some("my machine"), json).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidHost(_)));
+        assert_matches!(err, ConfigError::InvalidHost(_));
         assert_eq!(
             err.to_string(),
             "Invalid host 'my machine': must match the format for config values [a-zA-Z0-9_-]+"
@@ -3221,7 +3213,7 @@ mod tests {
 
         // Invalid host name with special char
         let err2 = ConfigFile::from_str(tmp_dir.path(), Some("my@machine"), json).unwrap_err();
-        assert!(matches!(err2, ConfigError::InvalidHost(_)));
+        assert_matches!(err2, ConfigError::InvalidHost(_));
     }
 
     #[test]
@@ -3239,7 +3231,7 @@ mod tests {
         }"#;
 
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(err, ConfigError::MissingBenchmarkCommand(_)));
+        assert_matches!(err, ConfigError::MissingBenchmarkCommand(_));
         assert_eq!(err.to_string(), "Missing benchmark command for 'test'");
     }
 
@@ -3264,10 +3256,10 @@ mod tests {
         }"#;
 
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::UnusedConfigKeyInTemplate { key, .. } if key == "threads"
-        ));
+        );
     }
 
     #[test]
@@ -3284,10 +3276,10 @@ mod tests {
             ]
         }"#;
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::InvalidBenchmarkOptions(name) if name == "bad"
-        ));
+        );
 
         let json = r#"{
             "config_keys": {},
@@ -3299,10 +3291,10 @@ mod tests {
             ]
         }"#;
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::InvalidBenchmarkOptions(name) if name == "bad"
-        ));
+        );
     }
 
     #[test]
@@ -3332,9 +3324,9 @@ mod tests {
         }"#;
 
         let err = ConfigFile::from_str(tmp_dir.path(), None, json).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConfigError::InvalidBenchmarkOptions(name) if name == "bad-both"
-        ));
+        );
     }
 }
