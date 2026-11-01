@@ -3,6 +3,7 @@ use crate::cli::args::{CommonRunArgs, CommonRunFilterArgs};
 use aoc_bench::config::Benchmark;
 use aoc_bench::engine::{RunEngine, RunMode};
 use aoc_bench::run::{NewGroupOrder, RunScheduleConfig};
+use aoc_bench::shutdown;
 use clap::{Args, ValueEnum};
 use tracing::info;
 
@@ -67,6 +68,7 @@ pub fn execute(args: RunArgs) -> Result<(), CliError> {
         .iter()
         .collect();
 
+    let stop = shutdown::install_handler().map_err(CliError::SignalHandlerError)?;
     let report = engine.run(
         &benchmarks,
         &config_filter,
@@ -76,6 +78,7 @@ pub fn execute(args: RunArgs) -> Result<(), CliError> {
             rerun_only_limit,
             new_order,
         }),
+        &stop,
     )?;
 
     info!(
@@ -83,6 +86,7 @@ pub fn execute(args: RunArgs) -> Result<(), CliError> {
         reused = report.reused,
         executed = report.executed,
         failed = report.failed,
+        stopped = report.stopped,
         "sampling complete"
     );
 

@@ -471,3 +471,60 @@ fn run_command_dry_run_does_not_persist() {
         assert_eq!(cases, 0, "dry-run inserted case rows");
     }
 }
+
+/// SIGTERM lets the in-progress group finish and be recorded, then skips the remaining groups.
+#[cfg(unix)]
+#[test]
+fn run_command_sigterm_finishes_current_group_then_stops() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    // The sampler signals its parent (aoc-bench) as soon as it starts, so the stop request always
+    // arrives while the first group is in progress, then keeps producing samples.
+    let sampler = data_dir.join("sampler.sh");
+    fs::write(
+        &sampler,
+        "#!/bin/sh\nkill -TERM $PPID\nwhile true; do printf 'SAMPLE\\t1000\\t20000000\\n'; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&sampler, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config = serde_json::json!({
+        "config_keys": { "build": { "values": ["a", "b", "c"] } },
+        "benchmarks": [{
+            "benchmark": "bench",
+            "command": [sampler.to_str().unwrap(), "{build}"],
+            "config": { "build": ["a", "b", "c"] },
+            "stats": {
+                "min_samples": 2,
+                "min_time_ns": 1,
+                "runs_per_series": 1,
+                "min_warmup_samples": 1,
+                "min_warmup_time_ns": 1
+            }
+        }]
+    });
+    fs::write(
+        data_dir.join("config.json"),
+        serde_json::to_vec_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let output = run_command(&data_dir);
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stop requested, skipping remaining groups"),
+        "stderr={stderr}"
+    );
+
+    // The group that was running when the signal arrived was recorded; the other two never ran.
+    assert_eq!(
+        measurement_json_files(&data_dir).len(),
+        1,
+        "stderr={stderr}"
+    );
+}

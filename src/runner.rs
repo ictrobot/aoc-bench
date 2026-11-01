@@ -13,6 +13,8 @@ use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tracing::{Span, info, info_span, trace, trace_span, warn};
@@ -32,6 +34,8 @@ pub struct Runner {
     benchmark_config: Config,
     host_config: HostConfig,
     stats: StatsOptions,
+    /// When set, failed runs are not retried so a requested stop is not delayed.
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl Runner {
@@ -86,7 +90,21 @@ impl Runner {
             benchmark_config: config,
             host_config,
             stats: resolved.group_spec.stats,
+            stop: None,
         }
+    }
+
+    /// Give up on retries once `stop` is set.
+    #[must_use]
+    pub fn with_stop_flag(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Relaxed))
     }
 
     /// Execute a complete run series (fixed 3 runs) with no retries on timeout
@@ -120,7 +138,7 @@ impl Runner {
                         warn!(error = %e, "run timed out, not retrying");
                         return Err(e);
                     }
-                    Err(e) if retry < MAX_RETRIES - 1 => {
+                    Err(e) if retry < MAX_RETRIES - 1 && !self.stop_requested() => {
                         warn!(
                             error = %e,
                             "run failed, retrying"

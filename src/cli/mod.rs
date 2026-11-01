@@ -70,6 +70,8 @@ pub enum CliError {
     },
 
     // run command
+    #[error("failed to install signal handler: {0}")]
+    SignalHandlerError(#[source] io::Error),
     #[error("failed to select benchmarks: {0}")]
     BenchmarkSelectionError(#[source] HybridDiskError),
     #[error("running {0} benchmarks failed")]

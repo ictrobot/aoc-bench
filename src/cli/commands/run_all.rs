@@ -2,6 +2,7 @@ use crate::cli::CliError;
 use crate::cli::args::{CommonRunArgs, CommonRunFilterArgs};
 use aoc_bench::config::Benchmark;
 use aoc_bench::engine::{RunEngine, RunMode};
+use aoc_bench::shutdown;
 use clap::Args;
 use tracing::info;
 
@@ -24,7 +25,8 @@ pub fn execute(args: RunAllArgs) -> Result<(), CliError> {
         .iter()
         .collect();
 
-    let report = engine.run(&benchmarks, &config_filter, RunMode::All)?;
+    let stop = shutdown::install_handler().map_err(CliError::SignalHandlerError)?;
+    let report = engine.run(&benchmarks, &config_filter, RunMode::All, &stop)?;
 
     if report.groups_selected == 0 {
         return Err(CliError::NoBenchmarksFound);
@@ -34,6 +36,7 @@ pub fn execute(args: RunAllArgs) -> Result<(), CliError> {
         groups = report.groups_selected,
         reused = report.reused,
         executed = report.executed,
+        stopped = report.stopped,
         "complete"
     );
     Ok(())

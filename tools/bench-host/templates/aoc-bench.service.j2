@@ -19,6 +19,11 @@ ExecStart=/home/{{ bench_user }}/aoc-bench/tools/bench-host/bench-all.sh
 Restart=always
 RestartSec=20
 
+# Only signal the script, which forwards SIGTERM to aoc-bench so the current group finishes first.
+# 10 minutes is enough for typical groups while bounding stop latency. Worst-case groups are killed.
+KillMode=mixed
+TimeoutStopSec=600
+
 # Isolate temporary files under a service-private /tmp to ensure cleanup.
 PrivateTmp=true
 

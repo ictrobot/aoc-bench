@@ -22,6 +22,8 @@ use crate::storage::{
 use crate::workload::{GroupSpec, WorkloadIdentity};
 use rusqlite::Transaction;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tracing::{info, warn};
 
 /// Dependencies and flags supplied by the engine for processing one selected group.
@@ -32,6 +34,7 @@ pub struct ProcessContext<'a> {
     pub storage: &'a HybridDiskStorage,
     pub dry_run: bool,
     pub force_update_stable: bool,
+    pub stop: &'a Arc<AtomicBool>,
 }
 
 /// How a selected group was processed.
@@ -65,6 +68,7 @@ pub fn process_group(
             reuse,
             context.dry_run,
             context.force_update_stable,
+            context.stop,
         )?,
         RunGroup::Isolated(group) => process_isolated(context, group)?,
     };
@@ -95,6 +99,7 @@ pub fn process_shared_group(
     reuse: bool,
     dry_run: bool,
     force_update_stable: bool,
+    stop: &Arc<AtomicBool>,
 ) -> Result<GroupOutcome, RunProcessError> {
     // Before-hash stat guard: every member must still resolve to the same group key.
     group.restat()?;
@@ -145,7 +150,8 @@ pub fn process_shared_group(
         artifacts,
         representative.config.clone(),
         host_config.clone(),
-    );
+    )
+    .with_stop_flag(Arc::clone(stop));
     let series = runner.run_series()?;
 
     // After-measurement stat guard: discard if the executable or stdin changed while running.
@@ -236,7 +242,8 @@ fn process_isolated(
         variant,
         config,
         context.host_config.clone(),
-    )?;
+    )?
+    .with_stop_flag(Arc::clone(context.stop));
     let series = runner.run_series()?;
 
     record_isolated_measurement(
@@ -574,8 +581,16 @@ mod tests {
         let group = group_with(&f, "a");
         assert_eq!(group.case_count(), 2, "hardlinks must group together");
 
-        let outcome =
-            process_shared_group(&f.storage, &f.host_config, &group, true, false, false).unwrap();
+        let outcome = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &group,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
         let workload_id = match outcome {
             GroupOutcome::Executed {
                 workload_id,
@@ -622,8 +637,16 @@ mod tests {
 
         // First, run the hardlinked a/b group to create the shared workload.
         let ab = group_with(&f, "a");
-        let executed =
-            process_shared_group(&f.storage, &f.host_config, &ab, true, false, false).unwrap();
+        let executed = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &ab,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
         let expected_workload = match executed {
             GroupOutcome::Executed { workload_id, .. } => workload_id,
             other => panic!("expected Executed, got {other:?}"),
@@ -632,8 +655,16 @@ mod tests {
         // Now the byte-identical copy c (separate inode, its own group) inherits without re-running
         // the workload.
         let c = group_with(&f, "c");
-        let inherited =
-            process_shared_group(&f.storage, &f.host_config, &c, true, false, false).unwrap();
+        let inherited = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &c,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
         assert_eq!(
             inherited,
             GroupOutcome::Reused {
@@ -680,16 +711,43 @@ mod tests {
         let _lock = f.storage.acquire_lock().unwrap();
 
         let ab = group_with(&f, "a");
-        process_shared_group(&f.storage, &f.host_config, &ab, true, false, false).unwrap();
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &ab,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
 
         let c = group_with(&f, "c");
-        process_shared_group(&f.storage, &f.host_config, &c, true, false, false).unwrap();
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &c,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
 
         // A deliberate rerun of the hardlinked A/B group creates one new measurement. C is not
         // covered by that execution, but it currently points at the same workload and therefore
         // receives the new current measurement in its visible history too.
         let ab = group_with(&f, "a");
-        process_shared_group(&f.storage, &f.host_config, &ab, false, false, false).unwrap();
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &ab,
+            false,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
 
         f.storage
             .read_transaction(|tx| {
@@ -714,7 +772,16 @@ mod tests {
         let _lock = f.storage.acquire_lock().unwrap();
 
         let ab = group_with(&f, "a");
-        process_shared_group(&f.storage, &f.host_config, &ab, true, false, false).unwrap();
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &ab,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
 
         // Simulate a framing bug/collision: the row keeps the same workload hash but its complete
         // stored spec describes a different invocation.
@@ -731,7 +798,15 @@ mod tests {
             .unwrap();
 
         let c = group_with(&f, "c");
-        let _ = process_shared_group(&f.storage, &f.host_config, &c, true, false, false);
+        let _ = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &c,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        );
     }
 
     #[test]
@@ -742,11 +817,28 @@ mod tests {
         let c = group_with(&f, "c");
 
         // First execution.
-        process_shared_group(&f.storage, &f.host_config, &c, true, false, false).unwrap();
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &c,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
 
         // reuse = false => always re-runs the workload, producing a second measurement.
-        let outcome =
-            process_shared_group(&f.storage, &f.host_config, &c, false, false, false).unwrap();
+        let outcome = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &c,
+            false,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
         assert_matches!(outcome, GroupOutcome::Executed { .. });
 
         f.storage
@@ -765,8 +857,16 @@ mod tests {
         let _lock = f.storage.acquire_lock().unwrap();
 
         let a = group_with(&f, "a");
-        let outcome =
-            process_shared_group(&f.storage, &f.host_config, &a, true, true, false).unwrap();
+        let outcome = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &a,
+            true,
+            true,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
         assert_eq!(
             outcome,
             GroupOutcome::WouldExecute {

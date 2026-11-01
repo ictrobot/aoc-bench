@@ -24,6 +24,9 @@ once_cell = { version = "1.21.3" }
 sha2 = "0.11"
 uuid = { version = "1", features = ["v7"] }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.4", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 

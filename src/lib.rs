@@ -6,6 +6,7 @@ pub mod measurement;
 pub mod protocol;
 pub mod run;
 pub mod runner;
+pub mod shutdown;
 pub mod stable;
 pub mod stats;
 pub mod storage;

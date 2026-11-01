@@ -314,6 +314,7 @@ mod tests {
             true,
             false,
             false,
+            &crate::shutdown::never(),
         )
         .unwrap();
 
@@ -340,7 +341,16 @@ mod tests {
             let RunGroup::Shared(group) = group else {
                 unreachable!();
             };
-            process_shared_group(&f.storage, &f.host_config, &group, true, false, false).unwrap();
+            process_shared_group(
+                &f.storage,
+                &f.host_config,
+                &group,
+                true,
+                false,
+                false,
+                &crate::shutdown::never(),
+            )
+            .unwrap();
         }
 
         let mut groups = shared_groups(&f);
@@ -367,7 +377,16 @@ mod tests {
         let _lock = f.storage.acquire_lock().unwrap();
 
         let recorded = first_shared(&f);
-        process_shared_group(&f.storage, &f.host_config, &recorded, true, false, false).unwrap();
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &recorded,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
 
         // Simulate a future serde-only addition plus a serializer formatting change. The decoded
         // GroupSpec and its canonical binary digest are unchanged, despite different JSON text.

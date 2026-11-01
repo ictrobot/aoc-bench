@@ -127,6 +127,19 @@ restart_self() {
     exec "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
 }
 
+# Graceful stop handling. systemd (KillMode=mixed) only signals this script. Forward SIGTERM to
+# aoc-bench so it finishes the current run group and exits, then exit instead of restarting.
+STOP_REQUESTED=0
+BENCH_PID=""
+
+on_stop_signal() {
+    STOP_REQUESTED=1
+    if [[ -n "$BENCH_PID" ]]; then
+        echo "Stop requested, forwarding SIGTERM to aoc-bench (pid $BENCH_PID)" >&2
+        kill -TERM "$BENCH_PID" 2>/dev/null || true
+    fi
+}
+
 run_benchmarks() {
     local command start status end elapsed
     command=("$BENCH_BIN" run --new-order timeline-desc --new-limit 512 --rerun-limit 16 --rerun-only-limit 512)
@@ -135,8 +148,18 @@ run_benchmarks() {
     start=$(date +%s)
 
     set +e
-    "${command[@]}"
+    "${command[@]}" &
+    BENCH_PID=$!
+    trap on_stop_signal TERM INT
+    wait "$BENCH_PID"
     status=$?
+    # A trapped signal interrupts wait with status > 128. Keep waiting while the child is alive.
+    while (( status > 128 )) && kill -0 "$BENCH_PID" 2>/dev/null; do
+        wait "$BENCH_PID"
+        status=$?
+    done
+    trap - TERM INT
+    BENCH_PID=""
     set -e
 
     end=$(date +%s)
@@ -167,6 +190,11 @@ main() {
     maybe_sync_and_deploy
 
     run_benchmarks
+
+    if (( STOP_REQUESTED )); then
+        echo "Stop requested, exiting instead of restarting" >&2
+        exit 0
+    fi
 
     restart_self
 }

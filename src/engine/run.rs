@@ -8,7 +8,9 @@ use crate::run::process::{GroupOutcome, ProcessContext, process_group};
 use crate::run::schedule::{RunScheduleConfig, select_for_run, select_for_run_all};
 use crate::storage::{FileLock, HybridDiskError, HybridDiskStorage, Storage};
 use std::collections::BTreeMap;
-use tracing::{error, info_span};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{error, info, info_span};
 
 #[derive(Debug, Clone)]
 pub struct RunEngineConfig {
@@ -67,11 +69,15 @@ impl RunEngine {
     /// failures matching the command filter are fatal for [`RunMode::All`] and skipped otherwise.
     /// Identity hash/full-value mismatches are invariant violations and panic before execution can
     /// continue with an unsafe association.
+    ///
+    /// Once `stop` is set, no further groups are started. The in-progress group completes and is
+    /// recorded, and the report is returned with `stopped` set.
     pub fn run(
         &self,
         benchmarks: &[&Benchmark],
         config_filter: &Config,
         mode: RunMode,
+        stop: &Arc<AtomicBool>,
     ) -> Result<RunReport, RunEngineError> {
         let (mut groups, failures) = self.build_groups(benchmarks);
 
@@ -119,9 +125,20 @@ impl RunEngine {
             storage: &self.storage,
             dry_run: self.dry_run,
             force_update_stable: self.force_update_stable,
+            stop,
         };
 
         for selection in selected {
+            if stop.load(Ordering::Relaxed) {
+                info!(
+                    remaining =
+                        report.groups_selected - report.reused - report.executed - report.failed,
+                    "stop requested, skipping remaining groups"
+                );
+                report.stopped = true;
+                break;
+            }
+
             let group = &groups[selection.index];
             let _span = info_span!(
                 "group",
@@ -211,6 +228,8 @@ pub struct RunReport {
     pub executed: usize,
     /// Groups or cases that failed to resolve or process.
     pub failed: usize,
+    /// A shutdown signal was received, so selected groups were left unprocessed.
+    pub stopped: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
