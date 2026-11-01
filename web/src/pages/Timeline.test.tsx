@@ -5,7 +5,6 @@ import { Dialog, DialogContent, DialogDescription } from "@/components/ui/dialog
 import * as api from "@/lib/api.ts"
 import { renderWithQueryClient } from "@/test/query-client.tsx"
 import { TEST_HOST, makeGlobalIndex, makeHostIndex } from "@/test/fixtures.ts"
-import type { IndexedHistory } from "@/lib/types.ts"
 
 vi.mock("@/lib/api.ts", () => ({
   loadIndex: vi.fn(),
@@ -35,7 +34,7 @@ describe("DrillDown", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeTimelineHostIndex()))
-    mockLoadHistory.mockResolvedValue({ series: [] } satisfies IndexedHistory)
+    mockLoadHistory.mockResolvedValue([])
     mockHistoryPart.mockReturnValue(0)
     mockDecodeHistory.mockReturnValue([])
   })

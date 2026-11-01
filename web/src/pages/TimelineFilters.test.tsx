@@ -5,7 +5,6 @@ import { Timeline } from "./Timeline.tsx"
 import * as api from "@/lib/api.ts"
 import { renderWithRouterAndQueryClient } from "@/test/query-client.tsx"
 import { TEST_HOST, makeGlobalIndex, makeHostIndex } from "@/test/fixtures.ts"
-import type { IndexedResults } from "@/lib/types.ts"
 import { useLocation } from "react-router"
 
 vi.mock("@/lib/api.ts", () => ({
@@ -93,7 +92,7 @@ describe("Timeline filters", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeTimelineFiltersHostIndex()))
-    mockLoadResults.mockResolvedValue({ results: [] } satisfies IndexedResults)
+    mockLoadResults.mockResolvedValue([])
   })
 
   it("passes filter values in canonical index order", async () => {

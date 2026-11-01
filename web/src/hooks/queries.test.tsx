@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ReactNode } from "react"
-import type { GlobalIndex, HostIndex, IndexedHistory, IndexedResults } from "@/lib/types.ts"
+import type { GlobalIndex, HistoryRow, HostIndex, ResultRow } from "@/lib/types.ts"
 import { useBenchmarkHistory, useBenchmarkResults } from "@/hooks/queries.ts"
 import * as api from "@/lib/api.ts"
 
@@ -45,7 +45,7 @@ function makeHostIndex(resultsPath: string): HostIndex {
 
 function makeIndex(snapshotId: string, hostIndex: HostIndex): GlobalIndex {
   return {
-    schema_version: 3,
+    schema_version: 4,
     snapshot_id: snapshotId,
     hosts: { [HOST]: hostIndex },
   }
@@ -70,7 +70,7 @@ function createWrapper(queryClient: QueryClient) {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mockLoadHistory.mockResolvedValue({ series: [] } satisfies IndexedHistory)
+  mockLoadHistory.mockResolvedValue([])
   mockHistoryPart.mockReturnValue(0)
   mockDecodeHistory.mockReturnValue([])
 })
@@ -84,7 +84,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: IndexedResults = { results: [[0, 0, 0, 100, 5]] }
+    const rawData: ResultRow[] = [[0, 0, 0, 100, 5]]
     const decoded = [
       {
         bench: BENCH,
@@ -117,8 +117,8 @@ describe("useBenchmarkResults", () => {
     const hostIndexB = makeHostIndex("results-b.json")
     const indexA = makeIndex("snapshot-a", hostIndexA)
     const indexB = makeIndex("snapshot-b", hostIndexB)
-    const rawDataA: IndexedResults = { results: [[0, 0, 0, 111, 3]] }
-    const rawDataB: IndexedResults = { results: [[0, 0, 0, 222, 7]] }
+    const rawDataA: ResultRow[] = [[0, 0, 0, 111, 3]]
+    const rawDataB: ResultRow[] = [[0, 0, 0, 222, 7]]
 
     mockLoadIndex.mockResolvedValueOnce(indexA).mockResolvedValueOnce(indexB)
     mockLoadResults.mockResolvedValueOnce(rawDataA).mockResolvedValueOnce(rawDataB)
@@ -127,8 +127,8 @@ describe("useBenchmarkResults", () => {
         bench,
         config: { source: index.results_path },
         measurement_token: 0,
-        mean_ns: data.results[0][3],
-        ci95_half_ns: data.results[0][4],
+        mean_ns: data[0][3],
+        ci95_half_ns: data[0][4],
       },
     ])
 
@@ -154,7 +154,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: IndexedResults = { results: [[0, 0, 0, 333, 2]] }
+    const rawData: ResultRow[] = [[0, 0, 0, 333, 2]]
     const decoded = [
       {
         bench: BENCH,
@@ -207,7 +207,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: IndexedResults = { results: [[0, 0, 0, 100, 5]] }
+    const rawData: ResultRow[] = [[0, 0, 0, 100, 5]]
 
     mockLoadIndex.mockResolvedValue(index)
     mockLoadResults.mockResolvedValue(rawData)
@@ -243,7 +243,7 @@ describe("useBenchmarkHistory", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawHistory: IndexedHistory = { series: [[0, 0, 1_000, 100, 5, 10]] }
+    const rawHistory: HistoryRow[] = [[0, 0, 1_000, 100, 5, 10]]
 
     const configA = { compiler: "stable", input: "small" }
     const configB = { compiler: "stable", input: "large" }
@@ -295,14 +295,12 @@ describe("useBenchmarkHistory", () => {
 
     mockLoadIndex.mockResolvedValue(index)
     mockHistoryPart.mockImplementation((_index, _bench, config) => (config.input === "small" ? 0 : 1))
-    mockLoadHistory.mockImplementation(async (_index, _bench, part) => ({
-      series: [[part, 0, 1_000 * (part + 1), 100, 5, 10]],
-    }))
+    mockLoadHistory.mockImplementation(async (_index, _bench, part) => [[part, 0, 1_000 * (part + 1), 100, 5, 10]])
     mockDecodeHistory.mockImplementation((_index, data, _bench, config) => [
       {
         config: { ...config },
         measurement_token: 0,
-        timestamp: data.series[0][2],
+        timestamp: data[0][2],
         median_run_mean_ns: 100,
         median_run_ci95_half_ns: 5,
         run_count: 10,

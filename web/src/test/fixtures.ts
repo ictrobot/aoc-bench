@@ -1,4 +1,4 @@
-import type { GlobalIndex, HostIndex } from "@/lib/types.ts"
+import type { GlobalIndex, HistoryRow, HostIndex, IndexedHistory, IndexedResults, ResultRow } from "@/lib/types.ts"
 
 export const TEST_HOST = "linux-x64"
 
@@ -29,6 +29,43 @@ export function makeHostIndex(overrides: HostIndexOverrides = {}): HostIndex {
   return index
 }
 
+function column(rows: number[][], c: number, delta: boolean): number[] {
+  let prev = 0
+  return rows.map((row) => {
+    const value = row[c]
+    const out = delta ? value - prev : value
+    prev = value
+    return out
+  })
+}
+
+/** Encode result rows the way the exporter writes results.json. */
+export function columnarResults(rows: ResultRow[]): IndexedResults {
+  return {
+    results: {
+      bench_idx_delta: column(rows, 0, true),
+      config_idx_delta: column(rows, 1, true),
+      measurement_token: column(rows, 2, false),
+      mean_ns: column(rows, 3, false),
+      ci95_half_ns: column(rows, 4, false),
+    },
+  }
+}
+
+/** Encode history rows the way the exporter writes a history part. */
+export function columnarHistory(rows: HistoryRow[]): IndexedHistory {
+  return {
+    series: {
+      config_idx_delta: column(rows, 0, true),
+      measurement_token: column(rows, 1, false),
+      timestamp_s_delta: column(rows, 2, true),
+      mean_ns: column(rows, 3, false),
+      ci95_half_ns: column(rows, 4, false),
+      run_count: column(rows, 5, false),
+    },
+  }
+}
+
 export function makeGlobalIndex(
   hostIndex: HostIndex,
   {
@@ -40,7 +77,7 @@ export function makeGlobalIndex(
   } = {},
 ): GlobalIndex {
   return {
-    schema_version: 3,
+    schema_version: 4,
     snapshot_id: snapshotId,
     hosts: { [host]: hostIndex },
   }

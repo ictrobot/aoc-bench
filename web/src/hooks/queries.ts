@@ -1,4 +1,4 @@
-import type { CompactResult, HistorySeries, HostIndex, IndexedHistory, IndexedResults } from "@/lib/types.ts"
+import type { CompactResult, HistoryRow, HistorySeries, HostIndex, ResultRow } from "@/lib/types.ts"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import * as api from "@/lib/api.ts"
 import { buildConfigSignature } from "@/lib/config-signature.ts"
@@ -82,7 +82,7 @@ export function useCompactResults(host: string) {
   const enabled = !!hostIndex && !!snapshotId
 
   // Used to keep the raw indexed results active
-  useQuery<IndexedResults>({
+  useQuery<ResultRow[]>({
     ...indexedResultsQueryOptions(snapshotId, host, hostIndex),
     enabled,
   })
@@ -90,7 +90,7 @@ export function useCompactResults(host: string) {
   return useQuery<CompactResult[]>({
     queryKey: ["decoded-results", snapshotId, host],
     queryFn: async () => {
-      const data = await queryClient.ensureQueryData<IndexedResults>(
+      const data = await queryClient.ensureQueryData<ResultRow[]>(
         indexedResultsQueryOptions(snapshotId, host, hostIndex),
       )
       return api.decodeResults(hostIndex!, data)
@@ -111,7 +111,7 @@ export function useBenchmarkResults(host: string, bench: string) {
   const enabled = !!hostIndex && !!snapshotId && !!bench
 
   // Used to keep the raw indexed results active
-  useQuery<IndexedResults>({
+  useQuery<ResultRow[]>({
     ...indexedResultsQueryOptions(snapshotId, host, hostIndex),
     enabled,
   })
@@ -119,7 +119,7 @@ export function useBenchmarkResults(host: string, bench: string) {
   return useQuery<CompactResult[]>({
     queryKey: ["decoded-benchmark-results", snapshotId, host, bench],
     queryFn: async () => {
-      const data = await queryClient.ensureQueryData<IndexedResults>(
+      const data = await queryClient.ensureQueryData<ResultRow[]>(
         indexedResultsQueryOptions(snapshotId, host, hostIndex),
       )
       return api.decodeResultsForBenchmark(hostIndex!, data, bench)
@@ -153,7 +153,7 @@ export function useBenchmarkHistory(host: string, bench: string, config: Record<
   }
 
   // Used to keep the raw indexed history part active
-  useQuery<IndexedHistory>({
+  useQuery<HistoryRow[]>({
     ...indexedHistoryQueryOptions(snapshotId, host, bench, part, hostIndex),
     enabled: enabled && part >= 0,
   })
@@ -163,7 +163,7 @@ export function useBenchmarkHistory(host: string, bench: string, config: Record<
     queryFn: async () => {
       if (partError !== undefined) throw partError
       if (part < 0) return []
-      const data = await queryClient.ensureQueryData<IndexedHistory>(
+      const data = await queryClient.ensureQueryData<HistoryRow[]>(
         indexedHistoryQueryOptions(snapshotId, host, bench, part, hostIndex),
       )
       return api.decodeHistory(hostIndex!, data, bench, config)

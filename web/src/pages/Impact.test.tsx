@@ -6,7 +6,6 @@ import { Impact } from "./Impact.tsx"
 import * as api from "@/lib/api.ts"
 import { renderWithRouterAndQueryClient } from "@/test/query-client.tsx"
 import { TEST_HOST, makeGlobalIndex, makeHostIndex } from "@/test/fixtures.ts"
-import type { IndexedResults } from "@/lib/types.ts"
 
 vi.mock("@/lib/api.ts", () => ({
   loadIndex: vi.fn(),
@@ -72,7 +71,7 @@ function LocationProbe() {
 describe("Impact", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockLoadResults.mockResolvedValue({ results: [] } satisfies IndexedResults)
+    mockLoadResults.mockResolvedValue([])
   })
 
   it("excludes zero-baseline comparisons from all counts and avoids Infinity/NaN output", async () => {

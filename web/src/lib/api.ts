@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query"
 import type {
   CompactResult,
   GlobalIndex,
+  HistoryRow,
   HistorySeries,
   HostIndex,
   IndexedHistory,
@@ -10,7 +11,7 @@ import type {
 } from "./types.ts"
 
 const BASE = import.meta.env.BASE_URL + "data"
-const WEB_SCHEMA_VERSION = 3
+const WEB_SCHEMA_VERSION = 4
 
 export class SnapshotNotFoundError extends Error {
   constructor(path: string) {
@@ -85,14 +86,19 @@ export async function loadIndex(): Promise<GlobalIndex> {
   return index
 }
 
-/** Load the compact indexed results payload for one host. */
-export function loadResults(index: HostIndex): Promise<IndexedResults> {
-  return fetchJson<IndexedResults>(index.results_path)
+/**
+ * Load the indexed results for one host, expanded into rows.
+ *
+ * Expansion happens once here so the cached raw data is row-shaped and later per-benchmark
+ * decodes only filter.
+ */
+export async function loadResults(index: HostIndex): Promise<ResultRow[]> {
+  return resultRows(await fetchJson<IndexedResults>(index.results_path))
 }
 
-/** Load one compact history part for one benchmark on one host (see `historyPart`). */
-export function loadHistory(index: HostIndex, bench: string, part: number): Promise<IndexedHistory> {
-  return fetchJson<IndexedHistory>(`${index.history_dir}/${bench}.${part}.json`)
+/** Load one history part for one benchmark on one host (see `historyPart`), expanded into rows. */
+export async function loadHistory(index: HostIndex, bench: string, part: number): Promise<HistoryRow[]> {
+  return historyRows(await fetchJson<IndexedHistory>(`${index.history_dir}/${bench}.${part}.json`))
 }
 
 /**
@@ -126,6 +132,52 @@ function assertValidHistoryParts(parts: number[], bench: string): void {
   if (!valid) {
     throw new Error(`Invalid history_parts for benchmark '${bench}'`)
   }
+}
+
+/** Check that every column is an array of the same length and return that length. */
+function sameLength(what: string, ...columns: unknown[]): number {
+  if (!columns.every(Array.isArray)) throw new Error(`Missing ${what} column`)
+  const length = columns[0].length
+  if (columns.some((column) => column.length !== length)) throw new Error(`Mismatched ${what} column lengths`)
+  return length
+}
+
+/** Expand a results payload into rows, undoing the delta encoding of the index columns. */
+export function resultRows({ results }: IndexedResults): ResultRow[] {
+  const { bench_idx_delta, config_idx_delta, measurement_token, mean_ns, ci95_half_ns } = results
+  const length = sameLength("results", bench_idx_delta, config_idx_delta, measurement_token, mean_ns, ci95_half_ns)
+  const rows: ResultRow[] = new Array<ResultRow>(length)
+  let benchIdx = 0
+  let configIdx = 0
+  for (let i = 0; i < length; i++) {
+    benchIdx += bench_idx_delta[i]
+    configIdx += config_idx_delta[i]
+    rows[i] = [benchIdx, configIdx, measurement_token[i], mean_ns[i], ci95_half_ns[i]]
+  }
+  return rows
+}
+
+/** Expand a history part payload into rows, undoing the delta encoding of config and timestamp. */
+export function historyRows({ series }: IndexedHistory): HistoryRow[] {
+  const { config_idx_delta, measurement_token, timestamp_s_delta, mean_ns, ci95_half_ns, run_count } = series
+  const length = sameLength(
+    "history",
+    config_idx_delta,
+    measurement_token,
+    timestamp_s_delta,
+    mean_ns,
+    ci95_half_ns,
+    run_count,
+  )
+  const rows: HistoryRow[] = new Array<HistoryRow>(length)
+  let configIdx = 0
+  let timestamp = 0
+  for (let i = 0; i < length; i++) {
+    configIdx += config_idx_delta[i]
+    timestamp += timestamp_s_delta[i]
+    rows[i] = [configIdx, measurement_token[i], timestamp, mean_ns[i], ci95_half_ns[i], run_count[i]]
+  }
+  return rows
 }
 
 function benchmarkConfigTables(index: HostIndex, benchIdx: number): { keys: string[]; values: string[][] } {
@@ -203,10 +255,10 @@ function assertValidConfigIdx(configIdx: number, configCount: number): void {
   }
 }
 
-export function decodeResults(index: HostIndex, data: IndexedResults): CompactResult[] {
+export function decodeResults(index: HostIndex, rows: ResultRow[]): CompactResult[] {
   const benchNames = index.benchmarks.map((b) => b.name)
   const caches: Record<string, string>[][] = index.benchmarks.map(() => [])
-  return data.results.map((row) => {
+  return rows.map((row) => {
     assertValidBenchIdx(row[0], benchNames.length)
     const { keys, values } = benchmarkConfigTables(index, row[0])
     const configCount = configSpaceSize(values)
@@ -222,11 +274,11 @@ export function decodeResults(index: HostIndex, data: IndexedResults): CompactRe
 }
 
 /** Decode all rows for one benchmark name from a host's compact results payload. */
-export function decodeResultsForBenchmark(index: HostIndex, data: IndexedResults, bench: string): CompactResult[] {
+export function decodeResultsForBenchmark(index: HostIndex, rows: ResultRow[], bench: string): CompactResult[] {
   const benchIdx = index.benchmarks.findIndex((b) => b.name === bench)
   if (benchIdx === -1) return []
   const benchCount = index.benchmarks.length
-  for (const row of data.results) {
+  for (const row of rows) {
     assertValidBenchIdx(row[0], benchCount)
     const { values } = benchmarkConfigTables(index, row[0])
     assertValidConfigIdx(row[1], configSpaceSize(values))
@@ -234,7 +286,7 @@ export function decodeResultsForBenchmark(index: HostIndex, data: IndexedResults
 
   const { keys, values } = benchmarkConfigTables(index, benchIdx)
   const cache: Record<string, string>[] = []
-  return data.results
+  return rows
     .filter((row: ResultRow) => row[0] === benchIdx)
     .map((row: ResultRow) => ({
       bench,
@@ -269,7 +321,7 @@ export function decodeLatestResults(index: HostIndex): CompactResult[] | null {
 /** Decode one benchmark history payload and keep only rows for a target config. */
 export function decodeHistory(
   index: HostIndex,
-  data: IndexedHistory,
+  rows: HistoryRow[],
   bench: string,
   config: Record<string, string>,
 ): HistorySeries[] {
@@ -282,10 +334,10 @@ export function decodeHistory(
     return []
   }
   const cache: Record<string, string>[] = []
-  for (const row of data.series) {
+  for (const row of rows) {
     assertValidConfigIdx(row[0], configCount)
   }
-  return data.series
+  return rows
     .filter((row) => row[0] === configIdx)
     .map((row) => ({
       config: cachedDecodeConfig(row[0], cache, keys, values),

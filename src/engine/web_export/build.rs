@@ -66,13 +66,14 @@ where
         .collect();
     let mut measurement_tokens = MeasurementTokens::default();
 
-    // Build indexed results
-    let results = build_indexed_results(
+    // Build indexed results, ordered by benchmark then config so the delta columns stay small.
+    let mut results = build_indexed_results(
         &all_results,
         &benchmarks,
         &config_indexes,
         &mut measurement_tokens,
     );
+    results.sort_by_key(|row| (row.bench_idx, row.config_idx));
 
     // Build latest results (same config index as everything else)
     let latest_results = timeline_key.as_ref().and_then(|tk| {
@@ -387,8 +388,13 @@ fn partition_history(mut rows: Vec<HistoryRow>, target_bytes: usize) -> Vec<Hist
     let mut part_start = 0usize;
     let mut part_bytes = 0usize;
     let mut row_idx = 0usize;
+    let mut prev: Option<&HistoryRow> = None;
     for group in rows.chunk_by(|a, b| a.config_idx == b.config_idx) {
-        let group_bytes: usize = group.iter().map(history_row_json_len).sum();
+        let mut group_bytes = 0usize;
+        for row in group {
+            group_bytes += history_row_json_len(row, prev);
+            prev = Some(row);
+        }
         if row_idx > part_start && part_bytes + group_bytes > target_bytes {
             cuts.push(row_idx);
             part_start = row_idx;
@@ -415,16 +421,26 @@ fn partition_history(mut rows: Vec<HistoryRow>, target_bytes: usize) -> Vec<Hist
     parts
 }
 
-/// Serialized size of one history row including its separating comma.
-fn history_row_json_len(row: &HistoryRow) -> usize {
-    const BRACKETS_AND_COMMAS: usize = 2 + 5 + 1;
-    BRACKETS_AND_COMMAS
-        + unsigned_decimal_len(row.config_idx as u64)
+/// Serialized size one history row contributes to the column layout of [`WebIndexedHistory`],
+/// counting one separator per column.
+///
+/// `prev` is the row before it in the same sequence, used for the delta columns. Deltas restart
+/// at each part boundary, so this is a close estimate rather than exact across a cut.
+fn history_row_json_len(row: &HistoryRow, prev: Option<&HistoryRow>) -> usize {
+    const SEPARATORS: usize = 6;
+    let (prev_config_idx, prev_timestamp_s) =
+        prev.map_or((0, 0), |p| (p.config_idx, p.timestamp_s));
+    SEPARATORS
+        + signed_decimal_len(to_i64(row.config_idx) - to_i64(prev_config_idx))
         + unsigned_decimal_len(u64::from(row.measurement_token))
-        + signed_decimal_len(row.timestamp_s)
+        + signed_decimal_len(row.timestamp_s - prev_timestamp_s)
         + signed_decimal_len(row.mean_ns)
         + signed_decimal_len(row.ci95_half_ns)
         + unsigned_decimal_len(row.run_count as u64)
+}
+
+fn to_i64(value: usize) -> i64 {
+    i64::try_from(value).expect("index fits in i64")
 }
 
 fn unsigned_decimal_len(value: u64) -> usize {
@@ -809,11 +825,22 @@ mod tests {
         }
     }
 
+    fn history_rows_json_len(rows: &[HistoryRow]) -> usize {
+        let mut prev = None;
+        let mut total = 0;
+        for row in rows {
+            total += history_row_json_len(row, prev);
+            prev = Some(row);
+        }
+        total
+    }
+
     #[test]
     fn history_row_json_len_matches_serialized_size() {
-        let rows = [
+        let rows = vec![
             history_row(0, 0),
             history_row(18_413, 1_780_952_018),
+            history_row(18_413, 1_780_952_000),
             HistoryRow {
                 config_idx: 7,
                 measurement_token: 42,
@@ -823,10 +850,15 @@ mod tests {
                 run_count: 100,
             },
         ];
-        for row in &rows {
-            let serialized = serde_json::to_vec(row).unwrap();
-            assert_eq!(history_row_json_len(row), serialized.len() + 1, "{row:?}");
-        }
+        let empty_len = serde_json::to_vec(&WebIndexedHistory { series: vec![] })
+            .unwrap()
+            .len();
+        let estimate = history_rows_json_len(&rows);
+        let serialized = serde_json::to_vec(&WebIndexedHistory { series: rows })
+            .unwrap()
+            .len();
+        // Each row is charged one separator per column; the actual columns have one fewer.
+        assert_eq!(empty_len + estimate - 6, serialized);
     }
 
     #[test]
@@ -865,9 +897,11 @@ mod tests {
             .into_iter()
             .flat_map(|config_idx| (0..3).map(move |n| history_row(config_idx, 1000 + n)))
             .collect();
-        let row_len = history_row_json_len(&rows[0]);
-        // Fits two configs (six rows) per part, but not three.
-        let target = row_len * 7;
+        // Fits two configs (six rows) per part, but not three: the first group is the largest
+        // (its timestamp delta starts from zero), later groups are all the same size.
+        let target = history_rows_json_len(&rows[..6]);
+        assert!(history_rows_json_len(&rows[6..12]) <= target);
+        assert!(history_rows_json_len(&rows[6..15]) > target);
 
         let parts = partition_history(rows, target);
 
@@ -876,7 +910,7 @@ mod tests {
             vec![0, 3, 6]
         );
         for part in &parts {
-            let bytes: usize = part.rows.iter().map(history_row_json_len).sum();
+            let bytes = history_rows_json_len(&part.rows);
             assert!(bytes <= target, "part exceeds target: {bytes} > {target}");
         }
         let configs_per_part: Vec<Vec<usize>> = parts

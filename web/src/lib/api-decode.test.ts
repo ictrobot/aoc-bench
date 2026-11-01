@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest"
-import type { HostIndex, IndexedHistory, IndexedResults } from "./types.ts"
-import { decodeHistory, decodeLatestResults, decodeResults, decodeResultsForBenchmark, historyPart } from "./api.ts"
+import type { HistoryRow, HostIndex, ResultRow } from "./types.ts"
+import {
+  decodeHistory,
+  decodeLatestResults,
+  decodeResults,
+  decodeResultsForBenchmark,
+  historyPart,
+  historyRows,
+  resultRows,
+} from "./api.ts"
+import { columnarHistory, columnarResults } from "@/test/fixtures.ts"
 
 function makeHostIndex(): HostIndex {
   return {
@@ -22,13 +31,11 @@ function makeHostIndex(): HostIndex {
 describe("api decode helpers", () => {
   it("decodes benchmark-local config indices and measurement tokens", () => {
     const index = makeHostIndex()
-    const data: IndexedResults = {
-      results: [
-        [0, 2, 7, 100, 5], // bench-a: nightly/small
-        [1, 1, 0, 110, 6], // bench-b: nightly (isolated)
-        [0, 2, 7, 120, 7],
-      ],
-    }
+    const data: ResultRow[] = [
+      [0, 2, 7, 100, 5], // bench-a: nightly/small
+      [1, 1, 0, 110, 6], // bench-b: nightly (isolated)
+      [0, 2, 7, 120, 7],
+    ]
 
     const decoded = decodeResults(index, data)
 
@@ -61,12 +68,10 @@ describe("api decode helpers", () => {
 
   it("filters rows to the requested benchmark", () => {
     const index = makeHostIndex()
-    const data: IndexedResults = {
-      results: [
-        [0, 0, 1, 100, 5],
-        [1, 1, 2, 200, 10],
-      ],
-    }
+    const data: ResultRow[] = [
+      [0, 0, 1, 100, 5],
+      [1, 1, 2, 200, 10],
+    ]
 
     expect(decodeResultsForBenchmark(index, data, "bench-b")).toEqual([
       {
@@ -98,13 +103,11 @@ describe("api decode helpers", () => {
 
   it("decodes benchmark history and filters by config", () => {
     const index = makeHostIndex()
-    const data: IndexedHistory = {
-      series: [
-        [0, 0, 1000, 100, 5, 10],
-        [3, 4, 2000, 200, 7, 11],
-        [3, 5, 3000, 210, 8, 12],
-      ],
-    }
+    const data: HistoryRow[] = [
+      [0, 0, 1000, 100, 5, 10],
+      [3, 4, 2000, 200, 7, 11],
+      [3, 5, 3000, 210, 8, 12],
+    ]
 
     expect(
       decodeHistory(index, data, "bench-a", {
@@ -154,17 +157,47 @@ describe("api decode helpers", () => {
     }
   })
 
+  it("round-trips delta columns into rows", () => {
+    const rows: [number, number, number, number, number][] = [
+      [0, 3, 0, 100, 5],
+      [0, 7, 2, 110, 6],
+      [1, 1, 2, 120, 7],
+    ]
+    const encoded = columnarResults(rows)
+    expect(encoded.results.bench_idx_delta).toEqual([0, 0, 1])
+    expect(encoded.results.config_idx_delta).toEqual([3, 4, -6])
+    expect(resultRows(encoded)).toEqual(rows)
+
+    const history: [number, number, number, number, number, number][] = [
+      [2, 1, 1000, 100, 5, 3],
+      [2, 0, 1500, 101, 4, 1],
+      [5, 0, 900, 200, 9, 3],
+    ]
+    expect(columnarHistory(history).series.timestamp_s_delta).toEqual([1000, 500, -600])
+    expect(historyRows(columnarHistory(history))).toEqual(history)
+    expect(historyRows(columnarHistory([]))).toEqual([])
+  })
+
+  it("rejects missing or mismatched columns", () => {
+    const good = columnarResults([[0, 0, 0, 100, 5]])
+    expect(() => resultRows({ results: { ...good.results, mean_ns: undefined } } as never)).toThrow(
+      /Missing results column/,
+    )
+    expect(() => resultRows({ results: { ...good.results, ci95_half_ns: [] } })).toThrow(/Mismatched results column/)
+    expect(() => historyRows({ series: {} } as never)).toThrow(/Missing history column/)
+  })
+
   it("rejects malformed benchmark, config, and key indices", () => {
     const index = makeHostIndex()
-    expect(() => decodeResults(index, { results: [[5, 0, 1, 100, 5]] })).toThrow(/Invalid bench_idx/)
+    expect(() => decodeResults(index, [[5, 0, 1, 100, 5]])).toThrow(/Invalid bench_idx/)
     expect(() =>
-      decodeHistory(index, { series: [[999, 1, 1000, 100, 5, 10]] }, "bench-a", {
+      decodeHistory(index, [[999, 1, 1000, 100, 5, 10]], "bench-a", {
         compiler: "stable",
         input: "small",
       }),
     ).toThrow(/Invalid config_idx/)
 
     index.benchmarks[0].config_keys = [99]
-    expect(() => decodeResults(index, { results: [[0, 0, 1, 100, 5]] })).toThrow(/Invalid config key index/)
+    expect(() => decodeResults(index, [[0, 0, 1, 100, 5]])).toThrow(/Invalid config key index/)
   })
 })

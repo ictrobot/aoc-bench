@@ -1,4 +1,7 @@
-/** A row in results.json: `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns]`. */
+/**
+ * A row of results.json or of `latest_results`:
+ * `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns]`.
+ */
 export type ResultRow = [
   bench_idx: number,
   config_idx: number,
@@ -7,7 +10,7 @@ export type ResultRow = [
   ci95_half_ns: number,
 ]
 
-/** A row in history/{bench}.{part}.json: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`. */
+/** A row of a history part: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`. */
 export type HistoryRow = [
   config_idx: number,
   measurement_token: number,
@@ -44,12 +47,30 @@ export interface HostIndex {
   latest_results?: ResultRow[]
 }
 
+/**
+ * results.json: one array per `ResultRow` field, all the same length. `*_delta` columns hold
+ * the difference from the previous row's value, starting from zero.
+ */
 export interface IndexedResults {
-  results: ResultRow[]
+  results: {
+    bench_idx_delta: number[]
+    config_idx_delta: number[]
+    measurement_token: number[]
+    mean_ns: number[]
+    ci95_half_ns: number[]
+  }
 }
 
+/** history/{bench}.{part}.json: one array per `HistoryRow` field, delta-encoded like `IndexedResults`. */
 export interface IndexedHistory {
-  series: HistoryRow[]
+  series: {
+    config_idx_delta: number[]
+    measurement_token: number[]
+    timestamp_s_delta: number[]
+    mean_ns: number[]
+    ci95_half_ns: number[]
+    run_count: number[]
+  }
 }
 
 export interface CompactResult {

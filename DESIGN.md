@@ -1350,14 +1350,16 @@ The web UI is a static SPA that loads exported snapshot JSON from `aoc-bench exp
     - Compare two values of a selected config key
     - Group regressions, improvements, and unchanged results with threshold control
 
-Web export schema 3 records the config keys used by each benchmark and encodes configs in a
+Web export schema 4 records the config keys used by each benchmark and encodes configs in a
 benchmark-local index space. Within one host snapshot, equal positive measurement tokens mean two
 rows display the exact same shared measurement; zero identifies isolated measurements. Timeline
 merges only contiguous rows with the same positive token and matching metrics/fixed config.
 Each benchmark's history is split into size-bounded part files (`history/{bench}.{n}.json`)
 covering contiguous `config_idx` ranges, keeping every file well under static-host file size
 limits; `history_parts` in the host index lists the first `config_idx` of each part and the UI
-fetches only the part holding the config being drilled into.
+fetches only the part holding the config being drilled into. `results.json` and history parts
+store rows column-wise, with the sorted index columns and timestamps delta-encoded, which keeps
+the files compact under the transfer compression applied by static hosts.
 Export permits partial result sets by default; `--require-complete` refuses to publish unless every
 currently configured case has a stable result on every discovered host.
 

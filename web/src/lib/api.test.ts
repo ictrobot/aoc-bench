@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { HostIndex } from "./types.ts"
 import { createSnapshotRetry, loadHistory, loadIndex, loadResults, SnapshotNotFoundError } from "./api.ts"
+import { columnarHistory } from "@/test/fixtures.ts"
 
 function makeQueryClient(snapshotId?: string) {
   const qc = new QueryClient()
@@ -139,16 +140,23 @@ describe("fetchJson snapshot handling", () => {
     await expect(loadHistory(makeSnapshotHostIndex(), "bench-a", 0)).rejects.toBeInstanceOf(SnapshotNotFoundError)
   })
 
-  it("fetches the requested history part file", async () => {
+  it("fetches the requested history part file and expands it into rows", async () => {
+    const payload = columnarHistory([
+      [4, 0, 1000, 100, 5, 1],
+      [4, 2, 1600, 110, 6, 3],
+    ])
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response('{"series":[]}', {
+      new Response(JSON.stringify(payload), {
         status: 200,
         statusText: "OK",
         headers: { "content-type": "application/json" },
       }),
     )
 
-    await expect(loadHistory(makeSnapshotHostIndex(), "bench-a", 2)).resolves.toEqual({ series: [] })
+    await expect(loadHistory(makeSnapshotHostIndex(), "bench-a", 2)).resolves.toEqual([
+      [4, 0, 1000, 100, 5, 1],
+      [4, 2, 1600, 110, 6, 3],
+    ])
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringMatching(/snapshots\/snap-1\/linux-x64\/history\/bench-a\.2\.json$/),
     )
@@ -180,7 +188,7 @@ describe("loadIndex", () => {
       multiversion: { values: ["default"] },
     }
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ schema_version: 3, snapshot_id: "snap-1", hosts: { h1: host } }), {
+      new Response(JSON.stringify({ schema_version: 4, snapshot_id: "snap-1", hosts: { h1: host } }), {
         status: 200,
         statusText: "OK",
         headers: { "content-type": "application/json" },
