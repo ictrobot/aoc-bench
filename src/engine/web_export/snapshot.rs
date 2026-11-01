@@ -3,8 +3,9 @@ use super::error::WebSnapshotExportError;
 use super::format::WebHostIndex;
 use crate::config::{Benchmark, ConfigFile};
 use crate::host_config::HostConfig;
+use crate::workload::Sha256;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufWriter, Write};
@@ -340,14 +341,12 @@ fn snapshot_id_from_manifest(
 }
 
 fn hash_bytes_sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    Sha256::hash_bytes(bytes).to_string()
 }
 
 struct HashingWriter<'a, W> {
     inner: &'a mut W,
-    hasher: Sha256,
+    hasher: sha2::Sha256,
     written_bytes: u64,
 }
 
@@ -355,13 +354,14 @@ impl<'a, W: Write> HashingWriter<'a, W> {
     fn new(inner: &'a mut W) -> Self {
         Self {
             inner,
-            hasher: Sha256::new(),
+            hasher: sha2::Sha256::new(),
             written_bytes: 0,
         }
     }
 
     fn finish(self) -> (u64, String) {
-        (self.written_bytes, format!("{:x}", self.hasher.finalize()))
+        let digest: [u8; 32] = self.hasher.finalize().into();
+        (self.written_bytes, Sha256::from(digest).to_string())
     }
 }
 

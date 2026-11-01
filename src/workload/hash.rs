@@ -56,6 +56,12 @@ impl Sha256 {
     }
 }
 
+impl From<[u8; 32]> for Sha256 {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
 impl Display for Sha256 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for byte in self.0 {

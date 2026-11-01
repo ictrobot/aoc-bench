@@ -168,7 +168,7 @@ impl HybridDiskStorage {
         if tracing::enabled!(tracing::Level::TRACE) {
             conn.trace_v2(
                 TraceEventCodes::SQLITE_TRACE_STMT,
-                Some(|event| {
+                Some(|event: TraceEvent<'_>| {
                     if let TraceEvent::Stmt(stmt, sql) = event {
                         let expanded_sql = stmt.expanded_sql();
                         let sql = expanded_sql.as_ref().map_or(sql, |sql| sql.as_str());
@@ -183,7 +183,7 @@ impl HybridDiskStorage {
                         trace!(sql = sql.trim_ascii(), "running query");
                     }
                 }),
-            );
+            )?;
         }
 
         self.run_migrations(&mut conn)?;

@@ -5,7 +5,7 @@
 #![allow(clippy::cast_sign_loss)]
 
 use rand::prelude::*;
-use rand_xoshiro::Xoshiro256PlusPlus;
+use rand::rngs::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, trace, warn};
@@ -480,7 +480,7 @@ impl StatsAccumulator {
         #[cfg(test)]
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
         #[cfg(not(test))]
-        let mut rng = Xoshiro256PlusPlus::from_os_rng();
+        let mut rng: Xoshiro256PlusPlus = rand::make_rng();
 
         let mut bootstrap_estimates = Vec::with_capacity(n_bootstrap);
 
