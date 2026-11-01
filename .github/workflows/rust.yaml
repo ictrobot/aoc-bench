@@ -11,10 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup component add --toolchain stable rustc cargo rust-std clippy
-          rustup default stable
+        run: rustup toolchain install
       - name: cargo build
         run: cargo build --all --release
       - name: cargo test
