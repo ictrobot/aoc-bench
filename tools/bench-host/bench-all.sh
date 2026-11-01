@@ -122,6 +122,34 @@ maybe_sync_and_deploy() {
     fi
 }
 
+share_build() {
+    # Make the freshly built aoc-bench and this host's config available to the rbench runs, which run as
+    # another user that cannot read this home directory. Each file is written under a temporary name and renamed so a
+    # run already in progress keeps the file it opened.
+    local shared_dir="${AOC_BENCH_SHARED_DIR:-}"
+    local host_file="$DATA_DIR/hosts/${BENCH_HOST:-$(hostname)}.json"
+
+    if [[ -z "$shared_dir" ]]; then
+        return 0
+    fi
+    if [[ ! -d "$shared_dir" ]]; then
+        echo "Shared directory '$shared_dir' does not exist, skipping share" >&2
+        return 0
+    fi
+
+    install -m 0755 "$BENCH_BIN" "$shared_dir/.aoc-bench.tmp"
+    mv -f "$shared_dir/.aoc-bench.tmp" "$shared_dir/aoc-bench"
+
+    if [[ -f "$host_file" ]]; then
+        install -m 0644 "$host_file" "$shared_dir/.host.json.tmp"
+    else
+        echo "{}" > "$shared_dir/.host.json.tmp"
+    fi
+    mv -f "$shared_dir/.host.json.tmp" "$shared_dir/host.json"
+
+    echo "Copied aoc-bench and host config to $shared_dir" >&2
+}
+
 restart_self() {
     echo "Restarting script..." >&2
     exec "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
@@ -180,6 +208,7 @@ main() {
         exec "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
     fi
     run_on_all_cores cargo build --release
+    share_build
 
     cd "$AOC_RS_BENCH_DIR"
     run_on_all_cores ./build.sh "$DATA_DIR/"

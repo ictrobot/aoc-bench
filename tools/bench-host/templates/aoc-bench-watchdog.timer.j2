@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every minute whether aoc-bench should be resumed after rbench runs
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

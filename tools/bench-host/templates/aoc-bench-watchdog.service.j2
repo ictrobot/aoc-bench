@@ -1,0 +1,7 @@
+[Unit]
+Description=Resume aoc-bench after rbench runs
+
+[Service]
+Type=oneshot
+Environment=RBENCH_USER={{ rbench_user }}
+ExecStart=/usr/local/libexec/aoc-bench-watchdog

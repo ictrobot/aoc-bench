@@ -15,6 +15,7 @@ Environment="AOC_BENCH_PROFILES={{ bench_profiles | default([]) | join(',') }}"
 Environment="AOC_BENCH_THREADS={{ bench_threads | default([]) | join(',') }}"
 Environment="AOC_BENCH_MULTIVERSION={{ bench_multiversion | default([]) | join(',') }}"
 Environment="AOC_BENCH_ENABLE_WEB_EXPORT={{ bench_enable_web_export | ternary('true', 'false') }}"
+Environment="AOC_BENCH_SHARED_DIR=/var/lib/aoc-bench"
 ExecStart=/home/{{ bench_user }}/aoc-bench/tools/bench-host/bench-all.sh
 Restart=always
 RestartSec=20
@@ -27,9 +28,10 @@ TimeoutStopSec=600
 # Isolate temporary files under a service-private /tmp to ensure cleanup.
 PrivateTmp=true
 
-# Make the system mostly read-only while still allowing writes under bench user's home.
+# Make the system mostly read-only while still allowing writes under bench user's home and the directory the built
+# aoc-bench is copied to for rbench runs.
 ProtectSystem=strict
-ReadWritePaths=/home/{{ bench_user }}
+ReadWritePaths=/home/{{ bench_user }} /var/lib/aoc-bench
 
 # Restrict privilege and attack surface.
 PrivateDevices=true

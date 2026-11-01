@@ -1,0 +1,58 @@
+#!/bin/bash
+# Resume the main aoc-bench service after rbench runs, run every minute as root by aoc-bench-watchdog.timer.
+#
+# aoc-bench-rbench stops the service and leaves a marker. It does not restart the service itself, so a crash or a
+# dropped connection cannot leave the host idle: this script restarts the service once the marker is present, the
+# service is down, no run holds the lock and a few minutes have passed since the last run started or ended. The lock
+# is a flock, which the kernel releases when its holder exits, so no cleanup code has to run for it to be free.
+#
+# A lock held for far longer than any run can take means a stuck run, and its owner's processes are killed.
+set -euo pipefail
+
+RUN_DIR=/run/aoc-bench-rbench
+LOCK_FILE="$RUN_DIR/lock"
+PAUSED_FILE="$RUN_DIR/paused"
+MAIN_SERVICE=aoc-bench.service
+RBENCH_USER="${RBENCH_USER:-rbench}"
+RESUME_AFTER=300
+STALE_AFTER=3600
+
+mtime() {
+    stat -c %Y -- "$1" 2>/dev/null || echo 0
+}
+
+# No lock file means no run has ever happened, so there is nothing to resume. It is never created here, as that
+# would leave it owned by root and unwritable for the runs.
+[[ -e "$LOCK_FILE" ]] || exit 0
+
+now="$(date +%s)"
+
+# Hold the lock until this script exits so a run cannot start between the decision below and the service start,
+# which would put both workloads on the benchmark cores at once. Runs wait a few seconds for the lock to cover this.
+exec 9< "$LOCK_FILE"
+if ! flock -n 9; then
+    if (( now - $(mtime "$LOCK_FILE") > STALE_AFTER )); then
+        echo "rbench lock held for over ${STALE_AFTER}s, killing $RBENCH_USER processes"
+        pkill -KILL -u "$RBENCH_USER" || true
+    fi
+    exit 0
+fi
+
+[[ -e "$PAUSED_FILE" ]] || exit 0
+
+state="$(systemctl show -p ActiveState --value "$MAIN_SERVICE")"
+case "$state" in
+    inactive|failed) ;;
+    *) exit 0 ;;
+esac
+
+last="$(mtime "$LOCK_FILE")"
+paused="$(mtime "$PAUSED_FILE")"
+if (( paused > last )); then
+    last="$paused"
+fi
+(( now - last >= RESUME_AFTER )) || exit 0
+
+echo "resuming $MAIN_SERVICE ${RESUME_AFTER}s after the last rbench"
+rm -f -- "$PAUSED_FILE"
+systemctl start "$MAIN_SERVICE"

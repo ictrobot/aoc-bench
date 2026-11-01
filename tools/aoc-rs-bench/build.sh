@@ -1,22 +1,42 @@
 #!/bin/bash
 set -eou pipefail
 
+# Paths given by the caller are relative to where it ran this script, not to the script's directory
+caller_dir="$PWD"
 cd "$(dirname -- "$0")"
 
-if (( $# < 1 )); then
-    echo "usage: $0 <data_dir>" >&2
-    exit 1
-fi
+# Resolve a caller-supplied path to an absolute one, creating it first when asked to
+resolve_path() {
+    local path="$1"
+    if [[ "$path" != /* ]]; then
+        path="$caller_dir/$path"
+    fi
+    if [[ "${2:-}" == "--create" ]]; then
+        mkdir -p -- "$path"
+    fi
+    realpath -- "$path"
+}
 
-data_dir="$1"
-if [[ ! -d "$data_dir" ]]; then
-    echo "error: '$data_dir' does not exist" >&2
-    exit 1
-fi
+usage() {
+    cat >&2 <<USAGE
+usage: $0 <data_dir>
+       $0 --single <checkout> <year> <day> <profile> <out_dir>
+       $0 --checksum
 
-builds_dir="$data_dir/builds"
-builds_commit_list="$builds_dir/commits.txt"
-builds_checksum_file="$builds_dir/checksum.txt"
+The first form builds every commit of the upstream repository for the enabled profiles into <data_dir>/builds.
+
+The second form builds a single day from a local checkout's working tree, including uncommitted and untracked
+changes, and leaves the binary at <out_dir>/<year>-<day>. The checkout itself is never modified. Setting
+AOC_BENCH_SINGLE_CACHE_DIR keeps the source copy and cargo target directory between builds so unchanged
+dependencies are reused. Setting AOC_BENCH_TARGET_CPU makes native profiles target that CPU instead of the
+build machine's.
+
+The third form prints the build checksum for the current files, which is what the first form compares against
+<data_dir>/builds/checksum.txt to decide whether existing builds are still valid.
+USAGE
+    exit 1
+}
+
 repo="https://github.com/ictrobot/aoc-rs"
 start_ref="main"
 
@@ -58,6 +78,10 @@ checksum_delete=(
     ".cache.json" # config.py cache
 )
 
+known_profile() {
+    printf '%s\n' "${known_profiles[@]}" | grep -qx -- "$1"
+}
+
 read_profiles() {
     local raw="${AOC_BENCH_PROFILES:-generic,native}"
     local profile
@@ -71,7 +95,7 @@ read_profiles() {
     )
 
     for profile in "${raw_profiles[@]}"; do
-        if ! printf '%s\n' "${known_profiles[@]}" | grep -qx -- "$profile"; then
+        if ! known_profile "$profile"; then
             echo "error: unknown build profile '$profile'" >&2
             exit 1
         fi
@@ -115,29 +139,40 @@ build_binaries() (
     # (...) used instead of {...} so the following commands always run in a subshell, allowing it to have a separate
     # trap EXIT command
 
-    # Create a temporary copy of aoc-rs-bench, used to dynamically generate binary targets for each of the benchmarks.
+    # Create a copy of aoc-rs-bench, used to dynamically generate binary targets for each of the benchmarks.
     # Generating one binary per benchmark seems to significantly decrease commit-to-commit layout variance by ensuring
     # each executable only includes functions needed for that benchmark.
-    tmp_crate="$(mktemp -d)"
-    trap 'rm -rf "$tmp_crate"' EXIT
+    #
+    # A persistent crate_dir keeps cargo's target directory between builds so unchanged dependencies are reused.
+    # Stale generated targets from a previous build are removed first so only this build's binaries are declared.
+    if [[ -n "$crate_dir" ]]; then
+        tmp_crate="$crate_dir"
+        mkdir -p "$tmp_crate"
+        rm -rf "$tmp_crate/src/bin"
+    else
+        tmp_crate="$(mktemp -d)"
+        trap 'rm -rf "$tmp_crate"' EXIT
+    fi
     mkdir -p "$tmp_crate/src/bin"
     cp "src/lib.rs" "$tmp_crate/src/lib.rs"
     cp "Cargo.toml" "$tmp_crate/Cargo.toml"
     cp "rustc-wrapper-strip-metadata.sh" "$tmp_crate/rustc-wrapper-strip-metadata.sh"
     cp "layout.ld" "$tmp_crate/layout.ld"
     cp "prune.py" "$tmp_crate/prune.py"
-    cd "$tmp_crate"
+    cd "$tmp_crate" || exit 1
+
+    # Discards the previous build's pruned lib.rs files
+    source_reset
 
     rust_version="$(
-        git -C "$tmp_clone" show "$commit:Cargo.toml" \
-          | sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([0-9]\+\.[0-9]\+\).*/\1/p' \
+        sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([0-9]\+\.[0-9]\+\).*/\1/p' "$tmp_clone/Cargo.toml" \
           | head -n1
     )"
     rust_version="${rust_version:-1.75}"
 
     framework_version=""
     for (( i=${#framework_revisions[@]}-1 ; i>=0 ; i-- )); do
-        if git -C "$tmp_clone" merge-base --is-ancestor "${framework_revisions[i]}" "$commit"; then
+        if git -C "$src_git" merge-base --is-ancestor "${framework_revisions[i]}" "$commit"; then
             framework_version="$i"
             break
         fi
@@ -150,17 +185,24 @@ build_binaries() (
     binaries=0
     declare -A day_bins=() base_uses=()
     while read -r path; do
-        if [[ $path =~ ^crates/year([0-9]{4})/src/day([0-9]{2})\.rs$ ]]; then
+        if [[ $path =~ /crates/year([0-9]{4})/src/day([0-9]{2})\.rs$ ]]; then
             year="${BASH_REMATCH[1]}"
             day="${BASH_REMATCH[2]}"
+            if [[ -n "$only_bin" && "$year-$day" != "$only_bin" ]]; then
+                continue
+            fi
             echo "::aoc_rs_bench::main!{year$year Day$day}" > "$tmp_crate/src/bin/$year-$day.rs"
             day_bins[$day]+=" --bin $year-$day"
             binaries=$((binaries + 1))
         fi
-    done < <(git -C "$tmp_clone" ls-tree -r --name-only "$commit")
+    done < <(printf '%s\n' "$tmp_clone"/crates/year*/src/day*.rs | LC_ALL=C sort)
 
     if (( binaries == 0 )); then
-        echo "Failed to create individual benchmark executables for $commit" 1>&2
+        if [[ -n "$only_bin" ]]; then
+            echo "No day source file for $only_bin in $commit" 1>&2
+        else
+            echo "Failed to create individual benchmark executables for $commit" 1>&2
+        fi
         exit 1
     fi
 
@@ -181,14 +223,11 @@ build_binaries() (
         patch_crates+=("year2016")
     fi
 
-    # Patch each direct dependency to use the temporary clone.
+    # Patch each direct dependency to use the source tree.
     # Using path dependencies for the patches makes it easier to use `remap-path-prefix` compared to using git
     # dependencies (where the checkout is a path inside ~/.cargo), but does cause each crate to have an unstable
     # SourceId due to the `$tmp_clone` path being different each build.
     # However, this is mitigated by the RUSTC_WRAPPER (see below).
-    #
-    # --force discards the previous commit's pruned lib.rs files
-    git -C "$tmp_clone" checkout --force "$commit" -q
     for crate in "${patch_crates[@]}"; do
         args+=(
             "--config" "patch.\"$repo\".$crate.path = \"$tmp_clone/crates/$crate\""
@@ -268,8 +307,10 @@ build_binaries() (
     # produce byte-identical files.
     export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,--build-id=none"
 
+    # The native profiles target the CPU of the machine building the binaries. AOC_BENCH_TARGET_CPU names a
+    # specific CPU instead, so a build elsewhere can target the benchmark host.
     if [[ "$profile" == "native"* ]]; then
-        export RUSTFLAGS="$RUSTFLAGS -C target_cpu=native"
+        export RUSTFLAGS="$RUSTFLAGS -C target_cpu=${AOC_BENCH_TARGET_CPU:-native}"
     fi
 
     if [[ "$profile" == *"_lto" ]]; then
@@ -401,38 +442,150 @@ build_binaries() (
     fi
 
     # Every commit since multiversion support was added has at least one binary using it, and every commit since
-    # multithreading support was added has at least one binary using that.
-    if (( framework_version >= multiversion_framework )) && [[ "${base_uses[*]:-}" != *multiversion* ]]; then
-        echo "No binaries used multiversion when building $commit" 1>&2
-        exit 1
-    fi
-    if (( framework_version >= multithreading_framework )) && [[ "${base_uses[*]:-}" != *multithreading* ]]; then
-        echo "No binaries used multithreading when building $commit" 1>&2
-        exit 1
+    # multithreading support was added has at least one binary using that. A single binary build cannot be checked
+    # this way.
+    if [[ -z "$only_bin" ]]; then
+        if (( framework_version >= multiversion_framework )) && [[ "${base_uses[*]:-}" != *multiversion* ]]; then
+            echo "No binaries used multiversion when building $commit" 1>&2
+            exit 1
+        fi
+        if (( framework_version >= multithreading_framework )) && [[ "${base_uses[*]:-}" != *multithreading* ]]; then
+            echo "No binaries used multithreading when building $commit" 1>&2
+            exit 1
+        fi
     fi
 
     mv "$build.tmp" "$build"
 )
 
-read_profiles
-mkdir -p "$builds_dir"
-check_checksum
-mkdir -p "$builds_dir/by-hash"
+# Build every commit of the upstream repository. The source tree is a clone of upstream with each commit checked
+# out in turn, so the clone answers the history questions and pruning reads the clean files from git.
+main_all() {
+    if (( $# < 1 )); then
+        usage
+    fi
 
-tmp_clone="$(mktemp -d)"
-trap 'rm -rf "$tmp_clone"' EXIT
-git -C "$tmp_clone" clone "$repo" . -q
+    local data_dir
+    data_dir="$(resolve_path "$1")"
+    if [[ ! -d "$data_dir" ]]; then
+        echo "error: '$1' does not exist" >&2
+        exit 1
+    fi
 
-git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
-mv "$builds_commit_list.tmp" "$builds_commit_list"
+    builds_dir="$data_dir/builds"
+    local builds_commit_list="$builds_dir/commits.txt"
+    builds_checksum_file="$builds_dir/checksum.txt"
 
-for profile in "${profiles[@]}"; do
-    mkdir -p "$builds_dir/$profile"
+    read_profiles
+    mkdir -p "$builds_dir"
+    check_checksum
+    mkdir -p "$builds_dir/by-hash"
 
-    while read -r commit <&3; do
-        build="$builds_dir/$profile/$commit"
-        if [[ ! -d "$build" ]]; then
-            build_binaries
-        fi
-    done 3< "$builds_commit_list"
-done
+    tmp_clone="$(mktemp -d)"
+    trap 'rm -rf "$tmp_clone"' EXIT
+    git -C "$tmp_clone" clone "$repo" . -q
+    src_git="$tmp_clone"
+    only_bin=""
+    crate_dir=""
+    source_reset() {
+        git -C "$tmp_clone" checkout --force "$commit" -q
+    }
+
+    git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
+    mv "$builds_commit_list.tmp" "$builds_commit_list"
+
+    for profile in "${profiles[@]}"; do
+        mkdir -p "$builds_dir/$profile"
+
+        while read -r commit <&3; do
+            build="$builds_dir/$profile/$commit"
+            if [[ ! -d "$build" ]]; then
+                build_binaries
+            fi
+        done 3< "$builds_commit_list"
+    done
+}
+
+# Build a single day from a local checkout's working tree. Pruning rewrites the year crates in place, so the tree
+# is copied with rsync, which with --delete is also the reset between builds. The copy has no .git, so prune.py
+# reads its clean sources from the copy itself, and the checkout answers the history questions with HEAD standing
+# in for the commit. The checkout itself is never modified.
+main_single() {
+    if (( $# != 5 )); then
+        usage
+    fi
+
+    local checkout year day out_dir
+    checkout="$(resolve_path "$1")"
+    year="$2"
+    day="$3"
+    profile="$4"
+    out_dir="$5"
+
+    if [[ ! -e "$checkout/.git" ]]; then
+        echo "error: '$1' is not a git checkout" >&2
+        exit 1
+    fi
+    if [[ ! "$year" =~ ^[0-9]{4}$ ]]; then
+        echo "error: year must be four digits, got '$year'" >&2
+        exit 1
+    fi
+    if [[ ! "$day" =~ ^[0-9]{1,2}$ ]]; then
+        echo "error: day must be one or two digits, got '$day'" >&2
+        exit 1
+    fi
+    day="$(printf '%02d' "$((10#$day))")"
+    if ! known_profile "$profile"; then
+        echo "error: unknown build profile '$profile'" >&2
+        exit 1
+    fi
+    out_dir="$(resolve_path "$out_dir" --create)"
+
+    # Not local, as the EXIT trap below runs after this function has returned
+    cache_dir="${AOC_BENCH_SINGLE_CACHE_DIR:-}"
+    if [[ -n "$cache_dir" ]]; then
+        cache_dir="$(resolve_path "$cache_dir" --create)"
+        crate_dir="$cache_dir/crate"
+    else
+        cache_dir="$(mktemp -d)"
+        trap 'rm -rf "$cache_dir"' EXIT
+        crate_dir=""
+    fi
+    tmp_clone="$cache_dir/source"
+
+    # Only the source copy and crate directory are worth keeping between builds. The by-hash store would only
+    # grow, so it starts empty every time.
+    builds_dir="$cache_dir/builds"
+    rm -rf "$builds_dir"
+    mkdir -p "$tmp_clone" "$builds_dir/by-hash" "$builds_dir/$profile"
+
+    src_git="$checkout"
+    commit="HEAD"
+    only_bin="$year-$day"
+    source_reset() {
+        rsync -a --delete --exclude=/.git --exclude=/target/ "$checkout/" "$tmp_clone/"
+    }
+
+    build="$builds_dir/$profile/single"
+    build_binaries
+
+    # The stored binary is a read-only hardlink into by-hash, so give the caller a writable copy
+    install -m 0755 "$build/$only_bin" "$out_dir/$only_bin"
+    echo "Built $out_dir/$only_bin"
+}
+
+case "${1:-}" in
+    --single)
+        shift
+        main_single "$@"
+        ;;
+    --checksum)
+        sha256sum "${checksum_files[@]}"
+        ;;
+    -h|--help)
+        usage
+        ;;
+    *)
+        main_all "$@"
+        ;;
+esac

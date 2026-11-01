@@ -11,8 +11,9 @@ The script errors on code not matching the expected format, ensuring pruning is 
 Entries and mod declarations must also match the day and module files exactly, or an error is raised.
 
 The committed file contents are read from git, so pruning for one day after another needs no restore step in
-between. The worktree file is only written when the output actually differs, which keeps cargo from recompiling
-crates whose pruned contents are the same as the previous day's.
+between. A checkout without a .git directory is a clean copy of a tree, such as the one build.sh --single makes, and
+its files are read directly instead. The worktree file is only written when the output actually differs, which keeps
+cargo from recompiling crates whose pruned contents are the same as the previous day's.
 
 Usage: prune.py <checkout> <day-number>
 """
@@ -33,7 +34,12 @@ DAY_NAME = re.compile(r"day\d{2}")
 
 
 def committed(checkout: Path, rel: str) -> str:
-    """The checked out commit's version of a file, which is the clean source regardless of any earlier lib pruning."""
+    """The checked out commit's version of a file, which is the clean source regardless of any earlier lib pruning.
+
+    Without a .git directory the checkout is a clean copy, so the file itself is the clean source. Pruning an already
+    pruned copy fails the entry and file consistency check rather than producing wrong output."""
+    if not (checkout / ".git").exists():
+        return (checkout / rel).read_text()
     r = subprocess.run(["git", "-C", str(checkout), "show", f"HEAD:{rel}"], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"git show HEAD:{rel}: {r.stderr.strip()[:200]}")

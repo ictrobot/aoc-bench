@@ -18,6 +18,8 @@ bench_multiversion:
 
 bench_enable_web_export: false
 
+bench_enable_rbench: false
+
 # yamllint disable rule:line-length
 host_description: >-
   [aoc-rs](https://github.com/ictrobot/aoc-rs) benchmarks running on an AMD Athlon 64 X2 3800+.

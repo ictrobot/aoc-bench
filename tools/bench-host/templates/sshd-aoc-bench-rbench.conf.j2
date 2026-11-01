@@ -1,0 +1,12 @@
+# Every login as the rbench user runs the aoc-bench-rbench command.
+Match User {{ rbench_user }}
+    ForceCommand /usr/local/libexec/aoc-bench-rbench
+    DisableForwarding yes
+    PermitTTY no
+    PermitTunnel no
+    PermitUserRC no
+    PasswordAuthentication no
+    AuthenticationMethods publickey
+
+# Return to the global section so the directives in the main config after the Include are not part of the above block.
+Match all

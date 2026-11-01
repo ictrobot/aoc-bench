@@ -7,6 +7,8 @@ isolated_cores: "0-11"
 
 bench_enable_web_export: true
 
+bench_enable_rbench: true
+
 # yamllint disable rule:line-length
 host_description: >-
   [aoc-rs](https://github.com/ictrobot/aoc-rs) benchmarks running on a

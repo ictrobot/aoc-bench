@@ -28,6 +28,11 @@
     - name: Gather service facts
       ansible.builtin.service_facts:
 
+    - name: Cancel any pending rbench resume of aoc-bench
+      ansible.builtin.file:
+        path: /run/aoc-bench-rbench/paused
+        state: absent
+
     - name: Stop aoc-bench service before updates
       ansible.builtin.systemd:
         name: aoc-bench.service
@@ -422,6 +427,15 @@
         - (wrangler_version.rc | default(1)) != 0 or (wrangler_version.stdout | default('') is not search('^4\\.'))
       changed_when: true
 
+    # Where bench-all.sh copies the built aoc-bench and host config for rbench runs
+    - name: Ensure aoc-bench shared directory exists
+      ansible.builtin.file:
+        path: /var/lib/aoc-bench
+        state: directory
+        owner: "{{ bench_user }}"
+        group: "{{ bench_user }}"
+        mode: "0755"
+
     - name: Install aoc-bench systemd unit
       ansible.builtin.template:
         src: templates/aoc-bench.service.j2
@@ -451,3 +465,183 @@
       ansible.builtin.systemd:
         name: aoc-bench.service
         state: restarted
+
+# rbench: one-off benchmark binaries pushed over SSH, see README.md.
+- name: Configure rbench
+  hosts: bench_hosts
+  become: true
+  tags: rbench
+
+  vars:
+    rbench_user: rbench
+    # The bench user's key unless a host sets rbench_ssh_pubkeys
+    rbench_keys: "{{ rbench_ssh_pubkeys | default([bench_ssh_pubkey]) }}"
+    rbench_files:
+      - /etc/systemd/system/aoc-bench-watchdog.timer
+      - /etc/systemd/system/aoc-bench-watchdog.service
+      - /etc/ssh/sshd_config.d/aoc-bench-rbench.conf
+      - /etc/polkit-1/rules.d/50-aoc-bench-rbench.rules
+      - /etc/tmpfiles.d/aoc-bench-rbench.conf
+      - /usr/local/libexec/aoc-bench-rbench
+      - /usr/local/libexec/aoc-bench-watchdog
+      - /run/aoc-bench-rbench
+
+  tasks:
+    - name: Validate rbench SSH keys
+      ansible.builtin.assert:
+        that:
+          - rbench_keys is sequence
+          - rbench_keys is not string
+          - rbench_keys | length > 0
+        fail_msg: >-
+          rbench_ssh_pubkeys must be a non-empty YAML list of public keys.
+      when: bench_enable_rbench | bool
+
+    # The login shell must be real as sshd runs ForceCommand through it. The
+    # forced command is the only thing it ever runs. The password is locked so
+    # only the public keys below can log in.
+    - name: Ensure rbench user exists
+      ansible.builtin.user:
+        name: "{{ rbench_user }}"
+        shell: /bin/bash
+        create_home: true
+        password_lock: true
+        state: present
+      when: bench_enable_rbench | bool
+
+    - name: Add SSH keys for rbench user
+      ansible.posix.authorized_key:
+        user: "{{ rbench_user }}"
+        key: "{{ item }}"
+        state: present
+      loop: "{{ rbench_keys }}"
+      when: bench_enable_rbench | bool
+
+    - name: Install rbench scripts
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/usr/local/libexec/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - aoc-bench-rbench
+        - aoc-bench-watchdog
+      when: bench_enable_rbench | bool
+
+    - name: Install rbench runtime directory config
+      ansible.builtin.template:
+        src: templates/aoc-bench-rbench.tmpfiles.conf.j2
+        dest: /etc/tmpfiles.d/aoc-bench-rbench.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: rbench_tmpfiles
+      when: bench_enable_rbench | bool
+
+    - name: Create rbench runtime directory
+      ansible.builtin.command: >-
+        systemd-tmpfiles --create /etc/tmpfiles.d/aoc-bench-rbench.conf
+      when:
+        - bench_enable_rbench | bool
+        - rbench_tmpfiles.changed or not (ansible_check_mode | default(false))
+      changed_when: rbench_tmpfiles.changed
+
+    - name: Install polkit rule for rbench user
+      ansible.builtin.template:
+        src: templates/50-aoc-bench-rbench.rules.j2
+        dest: /etc/polkit-1/rules.d/50-aoc-bench-rbench.rules
+        owner: root
+        group: root
+        mode: "0644"
+      when: bench_enable_rbench | bool
+
+    - name: Install aoc-bench-watchdog units
+      ansible.builtin.template:
+        src: "templates/{{ item.src }}"
+        dest: "/etc/systemd/system/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - src: aoc-bench-watchdog.service.j2
+          dest: aoc-bench-watchdog.service
+        - src: aoc-bench-watchdog.timer.j2
+          dest: aoc-bench-watchdog.timer
+      notify:
+        - Reload systemd daemon
+      when: bench_enable_rbench | bool
+
+    # The fragment is validated on its own before being written. The whole
+    # configuration is validated below before sshd is reloaded, which catches
+    # the fragment interacting badly with the main file.
+    - name: Install sshd config for rbench user
+      ansible.builtin.template:
+        src: templates/sshd-aoc-bench-rbench.conf.j2
+        dest: /etc/ssh/sshd_config.d/aoc-bench-rbench.conf
+        owner: root
+        group: root
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s
+      notify:
+        - Reload sshd
+      when: bench_enable_rbench | bool
+
+    - name: Validate complete sshd configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+      when: bench_enable_rbench | bool
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure aoc-bench-watchdog timer is enabled and running
+      ansible.builtin.systemd:
+        name: aoc-bench-watchdog.timer
+        enabled: true
+        state: started
+      when: bench_enable_rbench | bool
+
+    # Removal. service_facts only lists .service units, so the timer is
+    # checked by its unit file.
+    - name: Check whether aoc-bench-watchdog timer is installed
+      ansible.builtin.stat:
+        path: /etc/systemd/system/aoc-bench-watchdog.timer
+      register: watchdog_timer
+      when: not bench_enable_rbench | bool
+
+    - name: Stop and disable aoc-bench-watchdog timer
+      ansible.builtin.systemd:
+        name: aoc-bench-watchdog.timer
+        enabled: false
+        state: stopped
+      when:
+        - not bench_enable_rbench | bool
+        - watchdog_timer.stat.exists
+
+    - name: Remove rbench files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ rbench_files }}"
+      notify:
+        - Reload systemd daemon
+        - Reload sshd
+      when: not bench_enable_rbench | bool
+
+    - name: Remove rbench user
+      ansible.builtin.user:
+        name: "{{ rbench_user }}"
+        state: absent
+        remove: true
+      when: not bench_enable_rbench | bool
+
+  handlers:
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Reload sshd
+      ansible.builtin.systemd:
+        name: ssh.service
+        state: reloaded

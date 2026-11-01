@@ -1,0 +1,181 @@
+#!/bin/bash
+# Benchmark one aoc-rs puzzle from a local checkout on a benchmark host.
+#
+# The puzzle's binary is built here with the same pipeline the host uses for its own builds, checked locally for
+# the expected answers, then pushed with its input over SSH to the host's aoc-bench-rbench command. The host pauses
+# its regular benchmarks, runs the binary under aoc-bench without recording anything and streams the run series
+# back, which is printed like the local bench alias does. The host resumes its regular benchmarks a few minutes
+# after the last push.
+#
+# Nothing on the host is read from or written to the checkout. Uncommitted and untracked changes are built.
+set -euo pipefail
+
+usage() {
+    cat >&2 <<USAGE
+usage: rbench [options] <year> <day> [threads] [multiversion]
+
+  threads       thread count, or n for the binary's default (default 1)
+  multiversion  multiversion implementation to force (default default)
+
+options:
+  --profile <p>     build profile, generic or native (default \$RBENCH_PROFILE or generic)
+  --checkout <dir>  aoc-rs checkout (default \$RBENCH_CHECKOUT or ~/aoc-rs)
+  --host <host>     ssh destination (default \$RBENCH_HOST or aoc-bench-rbench)
+  --raw             print the run series JSON instead of a summary
+  --status          print the host's status and exit
+  -v, --verbose     show progress from here and the host
+  -h, --help        show this help
+
+environment:
+  RBENCH_TARGET_CPU  target CPU for native builds (default raptorlake)
+  RBENCH_CACHE_DIR   build cache (default /tmp/aoc-bench-rbench-<uid>)
+USAGE
+    exit 1
+}
+
+build_sh="$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/build.sh"
+
+profile="${RBENCH_PROFILE:-generic}"
+checkout="${RBENCH_CHECKOUT:-$HOME/aoc-rs}"
+host="${RBENCH_HOST:-aoc-bench-rbench}"
+target_cpu="${RBENCH_TARGET_CPU:-raptorlake}"
+cache_dir="${RBENCH_CACHE_DIR:-${TMPDIR:-/tmp}/aoc-bench-rbench-$(id -u)}"
+raw=0
+status_only=0
+verbose=0
+
+log() {
+    if (( verbose )); then
+        echo "$*" >&2
+    fi
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --profile) profile="${2:?--profile needs a value}"; shift 2 ;;
+        --checkout) checkout="${2:?--checkout needs a value}"; shift 2 ;;
+        --host) host="${2:?--host needs a value}"; shift 2 ;;
+        --raw) raw=1; shift ;;
+        --status) status_only=1; shift ;;
+        -v|--verbose) verbose=1; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        -*) echo "rbench: unknown option '$1'" >&2; usage ;;
+        *) break ;;
+    esac
+done
+
+if (( status_only )); then
+    exec ssh -o BatchMode=yes -- "$host" status
+fi
+
+if (( $# < 2 || $# > 4 )); then
+    usage
+fi
+year="$1"
+day="$2"
+threads="${3:-1}"
+multiversion="${4:-default}"
+
+if [[ ! "$year" =~ ^20[0-9]{2}$ ]]; then
+    echo "rbench: invalid year '$year'" >&2
+    exit 1
+fi
+if [[ ! "$day" =~ ^[0-9]{1,2}$ ]] || (( 10#$day < 1 || 10#$day > 25 )); then
+    echo "rbench: invalid day '$day'" >&2
+    exit 1
+fi
+day="$(printf '%02d' "$((10#$day))")"
+if [[ ! "$threads" =~ ^([1-9][0-9]?|n)$ ]]; then
+    echo "rbench: invalid threads '$threads', expected 1-99 or n" >&2
+    exit 1
+fi
+if [[ ! "$multiversion" =~ ^[A-Za-z0-9_]{1,32}$ ]]; then
+    echo "rbench: invalid multiversion '$multiversion'" >&2
+    exit 1
+fi
+
+input="$checkout/inputs/year$year/day$day.txt"
+if [[ ! -f "$input" ]]; then
+    echo "rbench: input file not found: $input" >&2
+    exit 1
+fi
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf -- "$work_dir"' EXIT
+
+# Build with the host's pipeline. Its progress goes to stderr so stdout only ever carries the result.
+log "building $year-$day ($profile)..."
+AOC_BENCH_SINGLE_CACHE_DIR="$cache_dir" AOC_BENCH_TARGET_CPU="$target_cpu" \
+    "$build_sh" --single "$checkout" "$year" "$day" "$profile" "$work_dir" > "$work_dir/build.log" 2>&1 \
+    || { cat "$work_dir/build.log" >&2; echo "rbench: build failed" >&2; exit 1; }
+mv -- "$work_dir/$year-$day" "$work_dir/bench"
+cp -- "$input" "$work_dir/input.txt"
+
+# Check the answers here, which is unaffected by this machine being noisy, and confirm the requested variant exists
+# before bothering the host. The checksum is sent so the host can verify the binary it received computes the same.
+if ! check_output="$("$work_dir/bench" check < "$work_dir/input.txt")"; then
+    echo "rbench: local check run failed" >&2
+    exit 1
+fi
+checksum="$(sed -n 's/^Checksum: //p' <<< "$check_output")"
+check_multiversion="$(sed -n 's/^Multiversion: //p' <<< "$check_output")"
+check_multithreading="$(sed -n 's/^Multithreading: //p' <<< "$check_output")"
+if [[ ! "$checksum" =~ ^[0-9a-f]{16}$ ]]; then
+    echo "rbench: unexpected check output:" >&2
+    echo "$check_output" >&2
+    exit 1
+fi
+if ! grep -qx -- "$multiversion" <<< "${check_multiversion//,/$'\n'}"; then
+    echo "rbench: multiversion '$multiversion' not available, this binary offers: $check_multiversion" >&2
+    exit 1
+fi
+if [[ "$threads" != "1" && "$threads" != "n" && "$check_multithreading" != "true" ]]; then
+    echo "rbench: threads=$threads requested but $year-$day does not use multithreading" >&2
+    exit 1
+fi
+
+format_series() {
+    if (( raw )); then
+        cat
+        return
+    fi
+    jq -r '
+        def fixed2:
+            (. * 100 | round) as $n
+            | "\(($n / 100) | floor).\($n % 100 | tostring | if length < 2 then "0" + . else . end)";
+        def duration:
+            if . >= 1000000000 then (. / 1000000000 | fixed2) + " s"
+            elif . >= 1000000 then (. / 1000000 | fixed2) + " ms"
+            elif . >= 1000 then (. / 1000 | fixed2) + " µs"
+            else "\(round) ns"
+            end;
+
+        . as $series
+        | ($series.runs | length) as $run_count
+        | ($series.runs[($run_count / 2 | floor)].mean_ns_per_iter) as $median_mean
+        | ($series.runs
+            | sort_by(.timestamp)
+            | to_entries[]
+            | .key as $index
+            | .value
+            | "  run \($index + 1): \(.mean_ns_per_iter | duration)/iter "
+                + "±\(.ci95_half_width_ns / .mean_ns_per_iter * 100 | fixed2)% "
+                + "(\(.samples | length) samples, \(.outlier_count) outliers)"
+                + if .mean_ns_per_iter == $median_mean then " *" else "" end),
+          "  \($median_mean / 1000 | fixed2) µs/iter "
+            + "±\(($series.runs[($run_count / 2 | floor)].ci95_half_width_ns
+                / $median_mean * 100) | fixed2)%"
+            + if $run_count == 1 then "" else " (median of \($run_count) runs)" end
+    '
+}
+
+log "pushing $year-$day threads=$threads multiversion=$multiversion to $host..."
+remote=(run "$year" "$day" "$threads" "$multiversion" "$checksum")
+if (( verbose )); then
+    remote+=(-v)
+fi
+tar -C "$work_dir" -cf - bench input.txt \
+    | zstd -q -3 \
+    | ssh -o BatchMode=yes -- "$host" "${remote[@]}" \
+    | format_series

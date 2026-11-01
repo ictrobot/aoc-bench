@@ -71,3 +71,22 @@ For single-core benchmarks, it is roughly equivalent to the Socket 939 Venice re
 [Athlon 64 3200+](https://en.wikipedia.org/wiki/Athlon_64), released in April 2005. That makes the single-threaded
 numbers comparable to a much more mainstream 2005 CPU, while still giving a high-end dual-core reference for
 multithreaded solutions.
+
+## rbench
+
+With `bench_enable_rbench` set, a host accepts one-off benchmark binaries pushed by `tools/aoc-rs-bench/rbench` and
+runs them without recording anything. The binaries are trusted: anyone holding an accepted key can run whatever
+they build on the host. Installed by `setup.yml`:
+
+* An `rbench` user whose every login runs `/usr/local/libexec/aoc-bench-rbench` via an sshd `Match User` block.
+  It accepts the bench user's key, or the keys in `rbench_ssh_pubkeys` if set.
+* `aoc-bench-rbench` stops `aoc-bench.service`, receives the upload, verifies the answers and runs the binary under
+  `aoc-bench debug`, confined by Landlock to its job directory, in an empty network namespace, with a time limit. A
+  lock allows one run at a time.
+* A polkit rule allowing `rbench` to stop `aoc-bench.service`.
+* `aoc-bench-watchdog.timer`, a root check every minute that restarts `aoc-bench.service` five minutes after the last
+  run. A lock held for over an hour is treated as stuck and the user's processes are killed.
+* `bench-all.sh` copies the built `aoc-bench` and host config to `/var/lib/aoc-bench` for the runs to use.
+
+`ssh rbench@<host> status` shows the service and lock state. To resume immediately after a cut-off run,
+`systemctl start aoc-bench.service`. To disable, set `bench_enable_rbench` to false and rerun the playbook.
