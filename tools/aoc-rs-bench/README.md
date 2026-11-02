@@ -25,7 +25,7 @@ host's `aoc-bench-rbench` command and prints the run series it streams back, `--
 its regular benchmarks for the run and resumes five minutes after the last one. One run at a time. Host side in
 `../bench-host/`.
 
-Needs `rsync`, `zstd`, `jq`, `python3`, `readelf`, `objcopy` and `rustup`. `threads` defaults to 1, or `n` for the
+Needs `rsync`, `zstd`, `jq`, `python3`, `rustup`, and binutils for `readelf`, `objcopy`, `nm`, `ar` and `ld.bfd`. `threads` defaults to 1, or `n` for the
 binary's default, and `multiversion` to `default`. Options and their environment variable fallbacks:
 
 | option       | variable            | default                       |

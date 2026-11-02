@@ -69,6 +69,7 @@ checksum_files=(
     "rustc-wrapper-strip-metadata.sh"
     "layout.ld"
     "prune.py"
+    "gc-relink-wrapper.sh"
 )
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
@@ -159,6 +160,7 @@ build_binaries() (
     cp "rustc-wrapper-strip-metadata.sh" "$tmp_crate/rustc-wrapper-strip-metadata.sh"
     cp "layout.ld" "$tmp_crate/layout.ld"
     cp "prune.py" "$tmp_crate/prune.py"
+    cp "gc-relink-wrapper.sh" "$tmp_crate/gc-relink-wrapper.sh"
     cd "$tmp_crate" || exit 1
 
     # Discards the previous build's pruned lib.rs files
@@ -307,6 +309,20 @@ build_binaries() (
     # produce byte-identical files.
     export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,--build-id=none"
 
+    # Garbage-collect the rlibs before the final link using a linker wrapper.
+    #
+    # The linker discards the functions a binary does not use, but only after building its symbol table from every
+    # object. A discarded utils function therefore still affects the output in two ways: its exception table is kept,
+    # as rustc emits it without a link to the function, and its references decide the order of symbols and GOT slots.
+    # Every binary links utils, so adding a function to it can change every binary.
+    #
+    # The wrapper links once, prunes each rlib down to the symbols that survived, and links again. Codegen is
+    # untouched, so the same functions are linked at the same sizes. It runs whatever linker rustc selected and
+    # checks the second link kept every function of the first. Its cache lives in the crate directory, so it is
+    # shared by every batch and commit within a build and discarded with it.
+    export RUSTFLAGS="$RUSTFLAGS -C linker=$tmp_crate/gc-relink-wrapper.sh"
+    export AOC_BENCH_GC_CACHE="$tmp_crate/gc-relink-cache"
+
     # The native profiles target the CPU of the machine building the binaries. AOC_BENCH_TARGET_CPU names a
     # specific CPU instead, so a build elsewhere can target the benchmark host.
     if [[ "$profile" == "native"* ]]; then
@@ -384,8 +400,9 @@ build_binaries() (
             fi
 
             # Strip the GCC_except_tableN symbols, whose numbering changes with unrelated code changes and which
-            # are the only symbols that do. Together with --build-id=none above, rebuilds which produce the same
-            # code then often produce byte-identical files. All the function symbols are kept for perf and gdb.
+            # are the only symbols that do. The numbers are assigned at codegen, before the linker wrapper removes
+            # dead functions. Together with --build-id=none above, rebuilds which produce the same code then produce
+            # byte-identical files. All the function symbols are kept for perf and gdb.
             objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
 
             # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave
@@ -416,11 +433,11 @@ build_binaries() (
 
     # Build the binaries in day batches, with the year crates pruned down to one day number per batch.
     #
-    # Each crate is compiled as a single unit (codegen-units = 1), so without pruning a change to one day still
-    # changes every other binary in its year. Some leftover pieces of the other days, like their constants, survive
-    # into every binary, and the changed code shifts the addresses of things unchanged code points at, which changes
-    # its instruction bytes too. Pruning removes the other days from compilation entirely, so a binary only changes
-    # when code it actually uses changes.
+    # Each crate is compiled as a single unit (codegen-units = 1), so without pruning a change to one day can still
+    # change every other binary in its year: a helper shared between days is inlined or not depending on its number
+    # of callers, and LLVM merges identical functions and constants across the unit. Pruning removes the other days
+    # from compilation entirely, so a day's code is generated the same way whatever the other days do. Dead code that
+    # only survives into the link is removed by gc-relink-wrapper.sh instead.
     #
     # Batching by day number compiles utils and the other dependencies once and the small year crates once per day
     # number, which measured around 3x the unpruned build time, compared to around 30x for building one binary at a
@@ -553,10 +570,10 @@ main_single() {
     fi
     tmp_clone="$cache_dir/source"
 
-    # Only the source copy and crate directory are worth keeping between builds. The by-hash store would only
-    # grow, so it starts empty every time.
+    # Only the source copy and crate directory are worth keeping between builds. The by-hash store and the linker
+    # wrapper's cache would only grow, so they start empty every time.
     builds_dir="$cache_dir/builds"
-    rm -rf "$builds_dir"
+    rm -rf "$builds_dir" "$cache_dir/crate/gc-relink-cache"
     mkdir -p "$tmp_clone" "$builds_dir/by-hash" "$builds_dir/$profile"
 
     src_git="$checkout"
