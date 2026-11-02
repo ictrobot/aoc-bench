@@ -30,16 +30,15 @@ const TARGET_SAMPLE_DURATIONS: [Duration; 18] = [
 
 const EWMA_ALPHA: f64 = 0.2;
 
-pub fn main<P1, P2, E>(
-    puzzle_fn: fn(&str) -> Result<(P1, P2), E>,
+pub fn main<I, E>(
+    prepare: fn(&str) -> Result<(u64, I), E>,
     multiversion_used: fn() -> bool,
     get_supported_versions: fn() -> Vec<String>,
     set_override: fn(&str),
     set_thread_count: fn(NonZeroUsize),
     multithreading: bool,
 ) where
-    P1: ToString,
-    P2: ToString,
+    I: Fn(&str) -> bool,
     E: Display,
 {
     let mut input = String::new();
@@ -50,11 +49,8 @@ pub fn main<P1, P2, E>(
     input = input.strip_suffix('\n').unwrap_or(&input).to_string();
 
     // Benchmark runner doesn't need to recover from errors and should exit immediately
-    let bench_fn = || match puzzle_fn(std::hint::black_box(&input)) {
-        Ok((p1, p2)) => (
-            std::hint::black_box(p1).to_string(),
-            std::hint::black_box(p2).to_string(),
-        ),
+    let prepare = |input: &str| match prepare(input) {
+        Ok(prepared) => prepared,
         // Print InputError display implementation
         Err(err) => {
             eprintln!("{}", err);
@@ -66,8 +62,10 @@ pub fn main<P1, P2, E>(
     let args = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>();
     match args.as_slice() {
         ["check"] => {
-            let (part1, part2) = bench_fn();
-            println!("Checksum: {}", checksum(&part1, &part2));
+            // The reference solve has to come before the multiversion probe below, which detects
+            // whether solving used the dispatch
+            let (checksum, _) = prepare(&input);
+            println!("Checksum: {checksum:016x}");
 
             if multiversion_used() {
                 println!(
@@ -93,15 +91,18 @@ pub fn main<P1, P2, E>(
 
             println!("META\tversion=1");
 
+            // Only solve once the thread count and variant are set: the first solve initialises
+            // the dispatch, after which set_override panics
+            let (checksum, iterate) = prepare(&input);
+
             let mut iters_per_sample = 1;
             let mut ewma_iter_seconds = 0.0;
             for i in 0.. {
-                let (duration, (part1, part2)) = sample(bench_fn, iters_per_sample);
-                let checksum = checksum(&part1, &part2);
+                let duration = sample(&iterate, &input, iters_per_sample);
 
                 if writeln!(
                     stdout(),
-                    "SAMPLE\t{iters_per_sample}\t{}\tchecksum={checksum}",
+                    "SAMPLE\t{iters_per_sample}\t{}\tchecksum={checksum:016x}",
                     duration.as_nanos()
                 )
                 .is_err()
@@ -132,43 +133,46 @@ pub fn main<P1, P2, E>(
     }
 }
 
-fn sample(f: impl Fn() -> (String, String), n: u32) -> (Duration, (String, String)) {
-    // These need to be empty strings to avoid the hot loop needing to drop allocations
-    let mut results = vec![(String::new(), String::new()); n as usize];
-
+/// Times `n` iterations, each one solve compared against the reference answers and dropped.
+///
+/// The harness never allocates in here: the allocation history would otherwise depend on the
+/// timing-derived sample sizes, changing the heap layout from launch to launch and with it the
+/// measured speed of layout-sensitive solutions. Whatever the puzzle code itself allocates is
+/// released again before the next iteration, so the harness adds nothing that varies.
+#[inline(never)]
+fn sample(iterate: &impl Fn(&str) -> bool, input: &str, n: u32) -> Duration {
     let start = Instant::now();
-    for r in results.iter_mut() {
-        *r = std::hint::black_box(f());
+    let mut mismatch = false;
+    for _ in 0..n {
+        mismatch |= iterate(input);
     }
     let duration = start.elapsed();
 
-    let (part1, part2) = results.pop().unwrap();
-    for (p1, p2) in results {
-        assert_eq!(p1, part1, "part 1 results differ");
-        assert_eq!(p2, part2, "part 2 results differ");
-    }
+    assert!(!mismatch, "results differ between iterations");
 
-    (duration, (part1, part2))
+    duration
 }
 
-fn checksum(part1: &str, part2: &str) -> String {
-    // Match the output of `--stdin` mode
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(part1.as_bytes());
-    bytes.push(b'\n');
-    bytes.extend_from_slice(part2.as_bytes());
-    bytes.push(b'\n');
+/// Checksum of the two answers, matching the output of `--stdin` mode: FNV-1a over
+/// `"{part1}\n{part2}\n"`
+pub fn checksum(part1: &impl Display, part2: &impl Display) -> u64 {
+    use std::fmt::Write;
 
-    format!("{:016x}", fnv1a64(&bytes))
+    let mut hasher = Fnv1a64(0xcbf2_9ce4_8422_2325);
+    write!(hasher, "{part1}\n{part2}\n").expect("hashing answers failed");
+    hasher.0
 }
 
-fn fnv1a64(data: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for &b in data {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+struct Fnv1a64(u64);
+
+impl std::fmt::Write for Fnv1a64 {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for &b in s.as_bytes() {
+            self.0 ^= b as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Ok(())
     }
-    hash
 }
 
 // The optional trailing identifiers select the real multiversion or multithreading glue instead of
@@ -252,7 +256,7 @@ macro_rules! main {
     (@impl $year:ident $day:ident) => {
         fn main() {
             $crate::main(
-                puzzle_fn,
+                prepare,
                 multiversion_used,
                 get_supported_versions,
                 set_override,
@@ -261,13 +265,43 @@ macro_rules! main {
             );
         }
 
+        /// Solves the puzzle once as the reference and returns the checksum of its answers along
+        /// with the iteration the harness times: one fresh solve, compared against the reference.
+        ///
+        /// This lives in the macro so the answers keep their concrete types: some days return
+        /// `&str` borrowed from the solution, so `to_owned` copies those into a `String` and the
+        /// solution itself is dropped before any timing. `#[inline(never)]` so the reference solve
+        /// exists once in the binary rather than once per caller.
         #[inline(never)]
-        fn puzzle_fn(input: &str) -> Result<(String, String), $crate::puzzle_glue::InputError> {
-            let solution =
-                $crate::puzzle_glue::$year::$day::new(input, $crate::puzzle_glue::InputType::Real)?;
-            let part1 = solution.part1();
-            let part2 = solution.part2();
-            Ok((part1.to_string(), part2.to_string()))
+        fn prepare(
+            input: &str,
+        ) -> Result<(u64, impl Fn(&str) -> bool), $crate::puzzle_glue::InputError> {
+            let reference = $crate::puzzle_glue::$year::$day::new(
+                std::hint::black_box(input),
+                $crate::puzzle_glue::InputType::Real,
+            )?;
+            let part1 = std::hint::black_box(reference.part1()).to_owned();
+            let part2 = std::hint::black_box(reference.part2()).to_owned();
+            // Guards against a borrowed answer type slipping through: it would fail to build here
+            drop(reference);
+            let checksum = $crate::checksum(&part1, &part2);
+
+            Ok((checksum, move |input: &str| {
+                let solution = match $crate::puzzle_glue::$year::$day::new(
+                    std::hint::black_box(input),
+                    $crate::puzzle_glue::InputType::Real,
+                ) {
+                    Ok(solution) => solution,
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        std::process::exit(1);
+                    }
+                };
+                // The barriers on the answers keep them from being folded into the comparison:
+                // f(x) == f(y) simplifies to x == y for any injective f the optimiser can see
+                (std::hint::black_box(solution.part1()) != part1)
+                    | (std::hint::black_box(solution.part2()) != part2)
+            }))
         }
     };
 }
