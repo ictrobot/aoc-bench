@@ -524,7 +524,9 @@ main_all() {
 }
 
 # Build a single day from a local checkout's working tree. Pruning rewrites the year crates in place, so the tree
-# is copied with rsync, which with --delete is also the reset between builds. The copy has no .git, so prune.py
+# is copied with rsync, which with --delete is also the reset between builds. Files are compared by content and
+# copied without their timestamps, so cargo only sees a new mtime on files whose content changed since the
+# previous build, regardless of the timestamps in the checkout. The copy has no .git, so prune.py
 # reads its clean sources from the copy itself, and the checkout answers the history questions with HEAD standing
 # in for the commit. The checkout itself is never modified.
 main_single() {
@@ -580,7 +582,7 @@ main_single() {
     commit="HEAD"
     only_bin="$year-$day"
     source_reset() {
-        rsync -a --delete --exclude=/.git --exclude=/target/ "$checkout/" "$tmp_clone/"
+        rsync -rlp --checksum --delete --exclude=/.git --exclude=/target/ "$checkout/" "$tmp_clone/"
     }
 
     build="$builds_dir/$profile/single"
