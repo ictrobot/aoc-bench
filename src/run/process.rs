@@ -76,10 +76,17 @@ pub fn process_group(
     // Log the stable/drift outcome for executions; inheritance logs in the shared path.
     match &outcome {
         GroupOutcome::Executed {
-            outcome: record, ..
-        }
-        | GroupOutcome::WouldExecute { outcome: record } => {
-            log_outcome(record, context.dry_run);
+            outcome: record,
+            measurement_id,
+            ..
+        } => log_outcome(
+            record,
+            Some(measurement_id),
+            group.case_count(),
+            context.dry_run,
+        ),
+        GroupOutcome::WouldExecute { outcome: record } => {
+            log_outcome(record, None, group.case_count(), context.dry_run);
         }
         GroupOutcome::Reused { .. } | GroupOutcome::WouldReuse => {}
     }
@@ -175,7 +182,6 @@ pub fn process_shared_group(
         force_update_stable,
     )?;
 
-    info!(%measurement_id, cases = group.case_count(), "recorded measurement");
     Ok(GroupOutcome::Executed {
         workload_id,
         measurement_id,
@@ -254,33 +260,49 @@ fn process_isolated(
     )
 }
 
-/// Log a stable/drift outcome at the appropriate level.
-fn log_outcome(outcome: &RecordOutcome, dry_run: bool) {
+/// Log a stable/drift outcome at the appropriate level, with the measurement it came from.
+fn log_outcome(
+    outcome: &RecordOutcome,
+    measurement_id: Option<&MeasurementId>,
+    cases: usize,
+    dry_run: bool,
+) {
+    let id = measurement_id.map_or_else(String::new, ToString::to_string);
     match outcome {
-        RecordOutcome::Initial if dry_run => info!("would have recorded new measurement"),
-        RecordOutcome::Initial => info!("recorded new measurement"),
-        RecordOutcome::Matched => info!("matched existing stable result"),
+        RecordOutcome::Initial if dry_run => info!(cases, "would have recorded new measurement"),
+        RecordOutcome::Initial => info!(measurement_id = %id, cases, "recorded new measurement"),
+        RecordOutcome::Matched => {
+            info!(measurement_id = %id, cases, "matched existing stable result");
+        }
         RecordOutcome::Suspicious {
             current_stable,
             suspicious_count,
         } => warn!(
+            measurement_id = %id,
+            cases,
             suspicious_count,
             stable_ns = current_stable.median_run_mean_ns,
             "didn't match stable result, suspicious"
         ),
         RecordOutcome::Replaced { old_stable } if dry_run => warn!(
+            cases,
             old_stable_ns = old_stable.median_run_mean_ns,
             "didn't match stable result, would have replaced"
         ),
         RecordOutcome::Replaced { old_stable } => warn!(
+            measurement_id = %id,
+            cases,
             old_stable_ns = old_stable.median_run_mean_ns,
             "didn't match stable result, replaced"
         ),
         RecordOutcome::Forced { old_stable } if dry_run => warn!(
+            cases,
             old_stable_ns = old_stable.median_run_mean_ns,
             "would have forced replacement of stable result"
         ),
         RecordOutcome::Forced { old_stable } => warn!(
+            measurement_id = %id,
+            cases,
             old_stable_ns = old_stable.median_run_mean_ns,
             "forced replacement of stable result"
         ),

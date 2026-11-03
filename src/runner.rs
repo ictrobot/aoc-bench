@@ -119,6 +119,22 @@ impl Runner {
         let run_count = self.stats.runs_per_series.get();
         assert!(!run_count.is_multiple_of(2));
 
+        info!(
+            config = %self.benchmark_config,
+            command = %std::iter::once(self.executable.display().to_string())
+                .chain(self.args.iter().map(|arg| {
+                    if arg.chars().any(char::is_whitespace) {
+                        format!("{arg:?}")
+                    } else {
+                        arg.clone()
+                    }
+                }))
+                .collect::<Vec<_>>()
+                .join(" "),
+            runs = run_count,
+            "starting run series"
+        );
+
         let mut runs = Vec::with_capacity(run_count);
         for run in 0..run_count {
             let _span = info_span!("run", run).entered();
