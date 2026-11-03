@@ -311,6 +311,55 @@
         key: "{{ bench_ssh_pubkey }}"
         state: present
 
+    # Package power for power_limit_watts. The RAPL energy counters are root-only by default (they
+    # can be used as a side channel), so a udev rule opens them to a dedicated group instead.
+    - name: Validate power limit config
+      ansible.builtin.assert:
+        that:
+          - power_limit_watts > 0
+        fail_msg: "power_limit_watts must be positive."
+      when: power_limit_watts is defined
+
+    - name: Ensure rapl group exists
+      ansible.builtin.group:
+        name: rapl
+        system: true
+        state: present
+      when: power_limit_watts is defined
+
+    - name: Add bench user to rapl group
+      ansible.builtin.user:
+        name: "{{ bench_user }}"
+        groups: rapl
+        append: true
+      when: power_limit_watts is defined
+
+    - name: Install udev rule for RAPL energy counters
+      ansible.builtin.copy:
+        src: files/90-aoc-bench-rapl.rules
+        dest: /etc/udev/rules.d/90-aoc-bench-rapl.rules
+        owner: root
+        group: root
+        mode: "0644"
+      register: rapl_udev_rule
+      when: power_limit_watts is defined
+
+    - name: Apply udev rule for RAPL energy counters
+      ansible.builtin.shell: |
+        udevadm control --reload-rules
+        udevadm trigger --action=add --subsystem-match=powercap
+        udevadm settle
+      changed_when: true
+      when:
+        - power_limit_watts is defined
+        - rapl_udev_rule.changed
+
+    - name: Remove udev rule for RAPL energy counters
+      ansible.builtin.file:
+        path: /etc/udev/rules.d/90-aoc-bench-rapl.rules
+        state: absent
+      when: power_limit_watts is not defined
+
     - name: Check whether rustup is already installed for bench user
       become: true
       become_user: "{{ bench_user }}"
@@ -378,6 +427,7 @@
             {}
             | combine({'cpu_affinity': isolated_cores} if isolated_cores is defined else {})
             | combine({'description': host_description} if host_description is defined else {})
+            | combine({'power_limit_watts': power_limit_watts} if power_limit_watts is defined else {})
           }}
 
     - name: Ensure benchmark config directory exists
@@ -516,6 +566,15 @@
         state: present
       loop: "{{ rbench_keys }}"
       when: bench_enable_rbench | bool
+
+    - name: Add rbench user to rapl group
+      ansible.builtin.user:
+        name: "{{ rbench_user }}"
+        groups: rapl
+        append: true
+      when:
+        - bench_enable_rbench | bool
+        - power_limit_watts is defined
 
     - name: Install rbench scripts
       ansible.builtin.copy:

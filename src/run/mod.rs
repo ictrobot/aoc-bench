@@ -9,6 +9,6 @@ pub mod schedule;
 #[cfg(all(test, unix))]
 mod test_support;
 
-pub use model::{Run, RunSeries};
+pub use model::{PowerSummary, Run, RunSeries};
 pub use process::RunProcessError;
 pub use schedule::{NewGroupOrder, RunScheduleConfig};

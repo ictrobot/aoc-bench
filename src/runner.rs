@@ -6,8 +6,10 @@ use crate::host_config::{CpuAffinity, HostConfig};
 use crate::protocol::{
     ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
 };
-use crate::run::{Run, RunSeries};
-use crate::stats::{StatsAccumulator, StatsError, StatsOptions, StatsState};
+use crate::rapl::{PackagePower, RaplError};
+use crate::run::{PowerSummary, Run, RunSeries};
+use crate::stats::{Sample, StatsAccumulator, StatsError, StatsOptions, StatsState};
+use crate::warmup::{Batch, PowerBand, PowerSource, Warmup, WarmupError};
 use jiff::Timestamp;
 use std::io;
 use std::io::{BufRead, BufReader, Write};
@@ -129,13 +131,27 @@ impl Runner {
                         info!(
                             samples = run_result.stats.samples.len(),
                             mean_ns = run_result.stats.mean_ns_per_iter,
+                            warmup_samples = run_result.warmup.map(|w| w.samples),
+                            warmup_s = run_result
+                                .warmup
+                                .map(|w| Duration::from_nanos(w.total_ns).as_secs_f64()),
+                            waited_s = run_result
+                                .warmup
+                                .map(|w| Duration::from_nanos(w.waited_ns).as_secs_f64()),
+                            power_w = run_result.power.map(|p| p.measured_watts),
                             "run successful"
                         );
                         runs.push(run_result);
                         break;
                     }
-                    Err(e @ RunError::Timeout { .. }) => {
-                        warn!(error = %e, "run timed out, not retrying");
+                    Err(
+                        e @ (RunError::Timeout { .. }
+                        | RunError::Warmup(
+                            WarmupError::PowerWaitTimeout { .. }
+                            | WarmupError::SamplesBehindClock { .. },
+                        )),
+                    ) => {
+                        warn!(error = %e, "not retrying");
                         return Err(e);
                     }
                     Err(e) if retry < MAX_RETRIES - 1 && !self.stop_requested() => {
@@ -195,10 +211,23 @@ impl Runner {
         let start_time = Timestamp::now();
         let start_instant = Instant::now();
 
+        // Opened before the spawn so the first reading, discarded with the initial batch, covers
+        // process startup
+        let limit = self.host_config.power_limit_watts;
+        let mut power = match PowerMonitor::open(limit) {
+            Ok(monitor) => Some(monitor),
+            Err(error) if limit.is_some() => return Err(error.into()),
+            Err(error) => {
+                trace!(%error, "package power not recorded");
+                None
+            }
+        };
+
         // Spawn the child process
         let (mut child, stdout) = self.spawn_child()?;
 
         // Collect samples from stdout
+        let mut warmup = Warmup::new(&self.stats);
         let mut stats = StatsAccumulator::with_options(self.stats);
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -256,7 +285,21 @@ impl Runner {
                         return Err(RunError::InvalidChecksum(e));
                     }
 
-                    // Add sample to accumulator
+                    if !warmup.done() {
+                        let sample = Sample {
+                            iters: sample.iters,
+                            total_ns: sample.total_ns,
+                        };
+                        if let (Some(batch), Some(monitor)) =
+                            (warmup.push(sample, &mut power)?, &mut power)
+                        {
+                            monitor.attribute(batch);
+                        }
+                        continue;
+                    }
+                    if let Some(monitor) = &mut power {
+                        monitor.observe()?;
+                    }
                     match stats.add_sample(sample.iters, sample.total_ns) {
                         StatsState::MoreSamplesRequired | StatsState::MoreSamplesOptional => {}
                         StatsState::Abort(err) => {
@@ -272,8 +315,15 @@ impl Runner {
             }
         }
 
+        let power = match power {
+            Some(power) => Some(power.finish()?),
+            None => None,
+        };
+
         Ok(Run {
             timestamp: start_time,
+            warmup: warmup.summary(),
+            power,
             stats: stats.finish(),
         })
     }
@@ -384,6 +434,135 @@ pub enum RunError {
     InvalidChecksum(ParseError),
     #[error("statistics collection failed: {0}")]
     StatsFailed(StatsError),
+    #[error("failed to open package power counter: {0}")]
+    PackagePower(#[from] RaplError),
+    #[error("warmup failed: {0}")]
+    Warmup(#[from] WarmupError),
+}
+
+/// Without a limit every band is unavailable but power is still recorded.
+struct PowerMonitor {
+    limit_watts: Option<f64>,
+    reader: PackagePower,
+    /// Last warmup reading as (watts, seconds), until the gate says what its batch was
+    pending: Option<(f64, f64)>,
+    last_batch: Instant,
+    warmup_joules: f64,
+    warmup_seconds: f64,
+    measured_joules: f64,
+    measured_seconds: f64,
+}
+
+impl PowerMonitor {
+    /// The limiter holds the average at the limit, so steady state sits just below it
+    const SETTLED_MARGIN_WATTS: f64 = 2.0;
+    /// A workload with phases can briefly exceed the limiter's moving average at steady state
+    const ELEVATED_MARGIN_WATTS: f64 = 4.0;
+    /// A drop this large suggests throttling set in after warmup
+    const DROP_WARN_FRACTION: f64 = 0.9;
+    /// Only so no interval spans more than one wrap of the energy counter, which takes under
+    /// five minutes on the smallest counters at full load
+    const MEASURE_INTERVAL: Duration = Duration::from_secs(1);
+    /// Batches are closed in sample time. One that covers more sample time than has elapsed on
+    /// the wall clock, beyond this slack, arrived late, so its reading describes other work
+    const PACING_SLACK: Duration = Duration::from_millis(100);
+
+    fn open(limit_watts: Option<f64>) -> Result<Self, RaplError> {
+        let reader = PackagePower::open()?;
+        trace!(counter = %reader, "opened package power counter");
+        Ok(Self::with_reader(limit_watts, reader))
+    }
+
+    fn with_reader(limit_watts: Option<f64>, reader: PackagePower) -> Self {
+        Self {
+            limit_watts,
+            reader,
+            pending: None,
+            last_batch: Instant::now(),
+            warmup_joules: 0.0,
+            warmup_seconds: 0.0,
+            measured_joules: 0.0,
+            measured_seconds: 0.0,
+        }
+    }
+
+    fn attribute(&mut self, batch: Batch) {
+        let Some((watts, seconds)) = self.pending.take() else {
+            return;
+        };
+        if batch == Batch::Warmup {
+            self.warmup_joules += watts * seconds;
+            self.warmup_seconds += seconds;
+        }
+    }
+
+    fn observe(&mut self) -> Result<(), RaplError> {
+        let interval = self.reader.since_last();
+        if interval >= Self::MEASURE_INTERVAL {
+            let watts = self.reader.sample_watts()?;
+            self.measured_joules += watts * interval.as_secs_f64();
+            self.measured_seconds += interval.as_secs_f64();
+            trace!(watts, "package power");
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<PowerSummary, RaplError> {
+        let seconds = self.reader.since_last().as_secs_f64();
+        if seconds > 0.0 {
+            let watts = self.reader.sample_watts()?;
+            self.measured_joules += watts * seconds;
+            self.measured_seconds += seconds;
+        }
+        let mean = |joules: f64, seconds: f64| if seconds > 0.0 { joules / seconds } else { 0.0 };
+        let summary = PowerSummary {
+            warmup_watts: mean(self.warmup_joules, self.warmup_seconds),
+            measured_watts: mean(self.measured_joules, self.measured_seconds),
+        };
+        if summary.measured_watts < summary.warmup_watts * Self::DROP_WARN_FRACTION {
+            warn!(
+                warmup_watts = summary.warmup_watts,
+                measured_watts = summary.measured_watts,
+                "package power dropped during measurement"
+            );
+        }
+        Ok(summary)
+    }
+}
+
+impl PowerSource for PowerMonitor {
+    fn band(&mut self, batch_ns: u64) -> Result<PowerBand, WarmupError> {
+        let wall = self.last_batch.elapsed();
+        self.last_batch = Instant::now();
+        if self.limit_watts.is_some() && Duration::from_nanos(batch_ns) > wall + Self::PACING_SLACK
+        {
+            return Err(WarmupError::SamplesBehindClock {
+                sample_ns: batch_ns,
+                wall_ns: u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX),
+            });
+        }
+
+        let interval = self.reader.since_last();
+        let watts = self.reader.sample_watts()?;
+        self.pending = Some((watts, interval.as_secs_f64()));
+        let band = match self.limit_watts {
+            None => PowerBand::Unavailable,
+            Some(limit) if watts <= limit + Self::SETTLED_MARGIN_WATTS => PowerBand::Settled,
+            Some(limit) if watts <= limit + Self::ELEVATED_MARGIN_WATTS => PowerBand::Elevated,
+            Some(_) => PowerBand::Above,
+        };
+        trace!(watts, ?band, "package power");
+        Ok(band)
+    }
+}
+
+impl PowerSource for Option<PowerMonitor> {
+    fn band(&mut self, batch_ns: u64) -> Result<PowerBand, WarmupError> {
+        match self {
+            Some(monitor) => monitor.band(batch_ns),
+            None => Ok(PowerBand::Unavailable),
+        }
+    }
 }
 
 impl std::fmt::Display for RunSeries {
@@ -538,12 +717,14 @@ mod tests {
 
         let run_count = variant.stats_options().runs_per_series.get();
 
-        // Check runs match, ignoring timestamp
+        // Check runs match, ignoring the timestamp and the package power readings, which are
+        // live measurements on hosts where the counter is readable
         result.timestamp = Timestamp::now();
-        series_result
-            .runs
-            .iter_mut()
-            .for_each(|r| r.timestamp = result.timestamp);
+        result.power = None;
+        series_result.runs.iter_mut().for_each(|r| {
+            r.timestamp = result.timestamp;
+            r.power = None;
+        });
         assert_eq!(series_result.runs, vec![result; run_count]);
     }
 
@@ -687,5 +868,41 @@ mod tests {
         assert_matches!(runner.run_single(), Err(RunError::ProcessCrashed(_)));
 
         assert_matches!(runner.run_series(), Err(RunError::ProcessCrashed(_)));
+    }
+
+    #[test]
+    fn power_monitor_bands_paced_batches_and_rejects_late_ones() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let zone = dir.path().join("intel-rapl:0");
+        std::fs::create_dir_all(&zone).unwrap();
+        std::fs::write(zone.join("name"), "package-0\n").unwrap();
+        std::fs::write(zone.join("max_energy_range_uj"), "1000000000000\n").unwrap();
+        std::fs::write(zone.join("energy_uj"), "0\n").unwrap();
+        let reader = crate::rapl::PackagePower::open_zone(&zone).unwrap();
+        let mut monitor = PowerMonitor::with_reader(Some(65.0), reader);
+
+        // 200ms of samples cannot have arrived in a few microseconds
+        assert_matches!(
+            monitor.band(200_000_000),
+            Err(WarmupError::SamplesBehindClock { .. })
+        );
+        assert!(monitor.pending.is_none());
+
+        // A paced batch at 65 W is settled
+        std::thread::sleep(Duration::from_millis(200));
+        let seconds = monitor.reader.since_last().as_secs_f64();
+        // 65 W over the elapsed interval, in microjoules
+        let energy_uj = (65.0 * seconds * 1e6).round().to_string();
+        std::fs::write(zone.join("energy_uj"), format!("{energy_uj}\n")).unwrap();
+        assert_matches!(monitor.band(150_000_000), Ok(PowerBand::Settled));
+        assert!(monitor.pending.is_some());
+        monitor.attribute(Batch::Warmup);
+        assert!(monitor.pending.is_none());
+        assert!(monitor.warmup_seconds >= seconds);
+
+        // Without a limit pacing is not checked and the band is unavailable
+        let reader = crate::rapl::PackagePower::open_zone(&zone).unwrap();
+        let mut monitor = PowerMonitor::with_reader(None, reader);
+        assert_matches!(monitor.band(200_000_000), Ok(PowerBand::Unavailable));
     }
 }

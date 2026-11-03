@@ -1,0 +1,3 @@
+# Let the rapl group read the RAPL package energy counters, which aoc-bench uses for power_limit_watts.
+# udev's GROUP= and MODE= only apply to device nodes, so sysfs attributes are changed with RUN.
+ACTION=="add", SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", TEST=="energy_uj", RUN+="/usr/bin/chgrp rapl /sys%p/energy_uj", RUN+="/usr/bin/chmod 0440 /sys%p/energy_uj"

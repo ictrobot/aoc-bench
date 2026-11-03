@@ -233,6 +233,8 @@ mod tests {
             runs: vec![Run {
                 timestamp: run_ts,
                 stats,
+                warmup: None,
+                power: None,
             }],
             checksum: None,
         }

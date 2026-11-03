@@ -1,7 +1,7 @@
 use crate::cli::CliError;
 use aoc_bench::config::{Benchmark, BenchmarkId, Config, ConfigError, ConfigFile};
 use aoc_bench::engine::{RunEngine, RunEngineConfig, StatsEngine};
-use aoc_bench::host_config::{CpuAffinity, HostConfig};
+use aoc_bench::host_config::{CpuAffinity, HostConfig, parse_power_limit};
 use clap::Args;
 use std::path::PathBuf;
 
@@ -137,6 +137,9 @@ pub struct HostConfigArgs {
     /// Override whether ASLR is disabled for child processes
     #[arg(long)]
     disable_aslr: Option<bool>,
+    /// Discard samples until package power settles below this sustained limit (watts)
+    #[arg(long, value_parser = parse_power_limit)]
+    power_limit_watts: Option<f64>,
 }
 
 impl From<HostConfigArgs> for HostConfig {
@@ -147,6 +150,9 @@ impl From<HostConfigArgs> for HostConfig {
         }
         if let Some(disable_aslr) = overrides.disable_aslr {
             config.disable_aslr = disable_aslr;
+        }
+        if let Some(watts) = overrides.power_limit_watts {
+            config.power_limit_watts = Some(watts);
         }
         config
     }

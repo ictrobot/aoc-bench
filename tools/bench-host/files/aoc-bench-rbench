@@ -81,6 +81,7 @@ sandboxed() {
             --landlock-rule "path-beneath:execute,read-file,read-dir:/usr" \
             --landlock-rule "path-beneath:read-file,read-dir:/etc" \
             --landlock-rule "path-beneath:read-file,read-dir:/proc" \
+            --landlock-rule "path-beneath:read-file,read-dir:/sys" \
             --landlock-rule "path-beneath:read-file,write-file:/dev/null" \
             --landlock-rule "path-beneath:execute,read-file,read-dir:$AOC_BENCH_DIR" \
             --landlock-rule "path-beneath:execute,read-file,read-dir:$job_dir" \
@@ -108,7 +109,7 @@ print_status() {
 run_benchmark() {
     local year="$1" day="$2" threads="$3" multiversion="$4" checksum="$5"
     local upload size check_checksum check_multiversion check_multithreading
-    local affinity disable_aslr started stop_pid paused_here rc
+    local affinity disable_aslr power_limit_watts started stop_pid paused_here rc
     local -a command
 
     [[ "$year" =~ ^20[0-9]{2}$ ]] || die "invalid year '$year'"
@@ -220,6 +221,10 @@ run_benchmark() {
     fi
     if [[ -n "$disable_aslr" ]]; then
         command+=(--disable-aslr "$disable_aslr")
+    fi
+    power_limit_watts="$(jq -r 'select(.power_limit_watts != null) | .power_limit_watts' "$HOST_CONFIG")"
+    if [[ -n "$power_limit_watts" ]]; then
+        command+=(--power-limit-watts "$power_limit_watts")
     fi
     command+=(-- "$job_dir/bench" bench "$threads" "$multiversion")
 

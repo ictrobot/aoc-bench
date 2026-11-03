@@ -69,6 +69,8 @@ mod tests {
                 }],
                 temporal_correlation: 0.0,
             },
+            warmup: None,
+            power: None,
         }
     }
 

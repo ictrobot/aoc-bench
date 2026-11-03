@@ -90,6 +90,8 @@ migration number. Appendix A summarizes V1 and its migration.
 * **`data/hosts/{host}.json`** (optional): Host-specific runner settings
     - `cpu_affinity`: cpuset string (e.g., `"0-3,6"`) or omitted/`null` for all CPUs
     - `disable_aslr`: bool, defaults to `true` on Linux to reduce noise
+    - `power_limit_watts`: the host's sustained package power limit, to delay warmup until package power has
+      settled below it (see section 6.6), or omitted to disable
 
 # 2. Concepts and Terminology
 
@@ -553,7 +555,7 @@ Where:
 * `iters`: number of iterations in the sample.
 * `total_ns`: integer wall-clock nanoseconds for that sample.
 
-Fields on each line are **tab-separated**.
+Fields on each line are **tab-separated**. Each `SAMPLE` line must be flushed as soon as the sample completes.
 
 Each line may end in one or more comma-separated percent-encoded key=value pairs. These may contain arbitrary data.
 `[a-zA-Z0-9_.~-]` are safe characters and do not need to be encoded. All other characters (including spaces, tabs,
@@ -638,7 +640,8 @@ Supported keys:
 ```json
 {
   "cpu_affinity": "0-3,6",
-  "disable_aslr": true
+  "disable_aslr": true,
+  "power_limit_watts": 65
 }
 ```
 
@@ -665,6 +668,13 @@ It defaults to `true` on Linux where it is supported, and is implemented using a
 **Rationale**: ASLR randomizes the location of code and data in memory, which can affect cache behavior and branch
 prediction. While the median-of-means approach in run series helps mitigate this, disabling ASLR provides more
 consistent measurements within individual runs.
+
+## 6.6 Power-Limit Warmup (Linux)
+
+The `power_limit_watts` host config option is optional and names the host's sustained package power limit (PL1 on
+Intel). When set, the runner reads package power from the RAPL energy counter (`/sys/class/powercap`, which covers
+Intel and modern AMD) and discards samples until it has settled at the limit before warmup starts, in 200ms batches.
+Waiting longer than 120s fails the run without retry.
 
 ---
 
@@ -707,9 +717,10 @@ const RUN_TIMEOUT_NS: u64 = 600_000_000_000; // Default per-run timeout; overrid
 
 Process:
 
-* **Warmup**: collect samples until both minima are met (≥4 samples and ≥1s total),
-  then stop when either (a) the last 8 warmup samples are all within ±5% of their mean,
-  or (b) cumulative warmup time reaches 15s. All warmup samples are ignored for stats.
+* **Warmup**: discard the first 200ms batch of samples (process startup), then any batches the host's power-limit
+  warmup (section 6.6) rejects. Then collect samples until both minima are met (≥4 samples and ≥1s total), and stop
+  when either (a) the last 8 warmup samples are all within ±5% of their mean, or (b) cumulative warmup time reaches
+  15s. Completion is checked at the end of each 200ms batch. All discarded samples are ignored for stats.
 
 * After warmup, for each new sample:
     * Append `(N_i, T_i)` to accumulated data

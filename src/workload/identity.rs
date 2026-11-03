@@ -84,7 +84,6 @@ impl GroupSpec {
             min_samples,
             min_total_time_ns,
             target_rel_ci,
-            skip_warmup,
             min_warmup_samples,
             min_warmup_time_ns,
             runs_per_series,
@@ -93,7 +92,8 @@ impl GroupSpec {
         out.u64(min_samples.get() as u64);
         out.u64(min_total_time_ns.get());
         out.u64(target_rel_ci.to_bits());
-        out.u8(u8::from(skip_warmup));
+        // Formerly the test-only `skip_warmup` flag, always false. Kept so identities are stable.
+        out.u8(0);
         out.u64(min_warmup_samples.get() as u64);
         out.u64(min_warmup_time_ns.get());
         out.u64(runs_per_series.get() as u64);

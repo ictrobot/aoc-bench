@@ -441,6 +441,8 @@ mod tests {
                         total_ns: 100,
                     }],
                 },
+                warmup: None,
+                power: None,
             }],
             checksum: None,
         }

@@ -8,6 +8,10 @@ StartLimitIntervalSec=0
 Type=simple
 User={{ bench_user }}
 Group={{ bench_user }}
+{% if power_limit_watts is defined %}
+# Read access to the RAPL energy counters for power_limit_watts
+SupplementaryGroups=rapl
+{% endif %}
 WorkingDirectory=/home/{{ bench_user }}/aoc-bench
 Environment=HOME=/home/{{ bench_user }}
 Environment=PATH=/home/{{ bench_user }}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

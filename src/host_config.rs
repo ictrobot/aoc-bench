@@ -14,6 +14,10 @@ pub struct HostConfig {
     pub disable_aslr: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Sustained package power limit in watts (PL1 on Intel). Set it above the real limit for more
+    /// headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_limit_watts: Option<f64>,
 }
 
 impl HostConfig {
@@ -30,9 +34,29 @@ impl HostConfig {
                 path: path.clone(),
                 source,
             })?;
+        if let Some(watts) = parsed.power_limit_watts {
+            validate_power_limit(watts).map_err(HostConfigError::Invalid)?;
+        }
 
         Ok(parsed)
     }
+}
+
+pub fn validate_power_limit(watts: f64) -> Result<(), &'static str> {
+    if watts.is_finite() && watts > 0.0 {
+        Ok(())
+    } else {
+        Err("power_limit_watts must be positive")
+    }
+}
+
+/// Parses a `power_limit_watts` command line value with the same rule as the host config file.
+pub fn parse_power_limit(value: &str) -> Result<f64, String> {
+    let watts: f64 = value
+        .parse()
+        .map_err(|_| format!("{value:?} is not a number"))?;
+    validate_power_limit(watts).map_err(str::to_string)?;
+    Ok(watts)
 }
 
 impl Default for HostConfig {
@@ -41,6 +65,7 @@ impl Default for HostConfig {
             cpu_affinity: CpuAffinity::All,
             disable_aslr: default_disable_aslr(),
             description: None,
+            power_limit_watts: None,
         }
     }
 }
@@ -168,6 +193,8 @@ pub enum HostConfigError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid host config: {0}")]
+    Invalid(&'static str),
 }
 
 #[cfg(test)]
@@ -195,6 +222,41 @@ mod tests {
     }
 
     #[test]
+    fn test_parses_power_limit() {
+        let dir = TempDir::new().unwrap();
+        let hosts = dir.path().join("hosts");
+        fs::create_dir_all(&hosts).unwrap();
+        fs::write(hosts.join("ex44.json"), r#"{ "power_limit_watts": 65 }"#).unwrap();
+
+        let cfg = HostConfig::load(dir.path(), "ex44").unwrap();
+        assert_eq!(cfg.power_limit_watts, Some(65.0));
+    }
+
+    #[test]
+    fn test_parse_power_limit_applies_the_same_rule() {
+        assert_eq!(parse_power_limit("65").unwrap(), 65.0);
+        assert_eq!(parse_power_limit("65.5").unwrap(), 65.5);
+        for bad in ["0", "-1", "NaN", "inf", "-inf", "sixty"] {
+            assert!(parse_power_limit(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_rejects_invalid_power_limit() {
+        let dir = TempDir::new().unwrap();
+        let hosts = dir.path().join("hosts");
+        fs::create_dir_all(&hosts).unwrap();
+        for json in [
+            r#"{ "power_limit_watts": 0 }"#,
+            r#"{ "power_limit_watts": -1 }"#,
+            r#"{ "power_limit_watts": "65" }"#,
+        ] {
+            fs::write(hosts.join("bad.json"), json).unwrap();
+            assert!(HostConfig::load(dir.path(), "bad").is_err(), "{json}");
+        }
+    }
+
+    #[test]
     fn test_parses_affinity_and_aslr() {
         let dir = TempDir::new().unwrap();
         let hosts = dir.path().join("hosts");
@@ -216,6 +278,7 @@ mod tests {
             cpu_affinity: CpuAffinity::Cpus(vec![0, 1, 2, 4]),
             disable_aslr: false,
             description: None,
+            power_limit_watts: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"cpu_affinity\":\"0-2,4\""));

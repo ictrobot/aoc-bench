@@ -1106,6 +1106,8 @@ mod tests {
                         total_ns: 300_000,
                     }],
                 },
+                warmup: None,
+                power: None,
             }],
             checksum: None,
         }

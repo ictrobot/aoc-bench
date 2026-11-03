@@ -211,9 +211,6 @@ class MatrixBuilder:
                     thread_groups.append("multi")
                 for threads in thread_groups:
                     stats = {**(extra_stats or {})}
-                    if threads == "multi":
-                        # 10s warmup to reach PL1 steady state before measurement
-                        stats["min_warmup_time_ns"] = 10_000_000_000
                     variant = {
                         "checksum": chunk_metadata["checksum"],
                         "config": {

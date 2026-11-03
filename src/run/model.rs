@@ -1,5 +1,6 @@
 use crate::config::{BenchmarkId, Config};
 use crate::stats::StatsResult;
+use crate::warmup::WarmupSummary;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,19 @@ pub struct Run {
     pub timestamp: Timestamp,
     #[serde(flatten)]
     pub stats: StatsResult,
+    /// Absent in run files written before it was recorded
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup: Option<WarmupSummary>,
+    /// Present when the host's package energy counter is readable
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<PowerSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PowerSummary {
+    /// Mean over warmup, from the batch that opened it
+    pub warmup_watts: f64,
+    pub measured_watts: f64,
 }
 
 /// A complete run series containing multiple individual runs
@@ -88,7 +102,9 @@ mod tests {
                         outlier_count: 0,
                         samples: vec![],
                         temporal_correlation: 0.0,
-                    }
+                    },
+                    warmup: None,
+                    power: None,
                 };
                 7
             ],
@@ -136,6 +152,8 @@ mod tests {
                     }],
                     temporal_correlation: 0.0,
                 },
+                warmup: None,
+                power: None,
             }],
             checksum: Some("8f024a8e".to_string()),
         };

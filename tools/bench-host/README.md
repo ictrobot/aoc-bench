@@ -14,8 +14,13 @@ Hetzner's [installimage](https://docs.hetzner.com/robot/dedicated-server/operati
 
 ### Power Limits
 
-The i5-13500 has a 117W burst power limit (PL2) and 65W sustained power limit (PL1) after ~8s. Multithreaded benchmarks
-use a 10s minimum warmup to reach steady state before measurement.
+The i5-13500 has a 117W burst power limit (PL2) and a 65W sustained power limit (PL1), both locked by the BIOS. PL1
+is enforced on an exponentially weighted moving average of package power with an 8s time constant, not a timer that
+resets when the CPU goes idle, so how long a run can exceed 65W depends on what ran before it. Multithreaded
+benchmarks can exceed it and then settle at 65W with lower effective clocks.
+
+The host config sets `power_limit_watts` to PL1, so the runner discards samples until the RAPL package power counter
+shows the limit has engaged before warmup starts. `setup.yml` makes the counter readable by the `rapl` group.
 
 ```
 > powercap-info
