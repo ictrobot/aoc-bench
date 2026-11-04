@@ -688,7 +688,7 @@ one source of it.
 
 The `power_limit_watts` host config option is optional and names the host's sustained package power limit (PL1 on
 Intel). When set, the runner reads package power from the RAPL energy counter (`/sys/class/powercap`, which covers
-Intel and modern AMD) and discards samples until it has settled at the limit, in 200ms batches; the batch that shows
+Intel and modern AMD) and discards samples until it has settled at the limit, in 100ms batches; the batch that shows
 it settled is the first warmup batch. Waiting longer than 120s fails the run without retry.
 
 ---
@@ -736,7 +736,7 @@ measurement has the same number of runs, so there is no sequential stopping to a
 
 Process:
 
-* **Warmup**: discard the first 200ms batch of samples (process startup), then any batches the host's power-limit
+* **Warmup**: discard the first 100ms batch of samples (process startup), then any batches the host's power-limit
   warmup (section 6.6) rejects. The batch that shows power settled is the first warmup batch. Warmup is complete at
   the end of the first batch at which both minima are met (≥2 samples and ≥0.5s). All discarded samples are ignored for
   stats. The first batch absorbs process startup and the boost ramp, the next half second lets caches and the batch-size

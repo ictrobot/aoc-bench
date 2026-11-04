@@ -93,7 +93,7 @@ pub struct Warmup {
 }
 
 impl Warmup {
-    pub const BATCH_NS: u64 = 200_000_000; // 200 ms
+    pub const BATCH_NS: u64 = 100_000_000; // 100 ms
     pub const WAIT_LIMIT_NS: u64 = 120_000_000_000; // 120 s
 
     #[must_use]
@@ -281,11 +281,11 @@ mod tests {
     #[test]
     fn first_batch_always_discarded() {
         let mut gate = gate();
-        let batches = push_n(&mut gate, &mut Script::default(), 2, 150_000_000);
+        let batches = push_n(&mut gate, &mut Script::default(), 2, 75_000_000);
         assert_eq!(batches, [Batch::Discarded]);
         assert_eq!(gate.phase, Phase::Warmup);
         assert_eq!(gate.discarded_samples, 2);
-        assert_eq!(gate.discarded_ns, 300_000_000);
+        assert_eq!(gate.discarded_ns, 150_000_000);
         assert!(gate.summary().is_none());
 
         let mut gate = self::gate();
@@ -293,7 +293,7 @@ mod tests {
             &mut gate,
             &mut Script::of(&[PowerBand::Settled]),
             2,
-            150_000_000,
+            75_000_000,
         );
         assert_eq!(gate.phase, Phase::Waiting, "discarded even when settled");
     }
@@ -303,16 +303,16 @@ mod tests {
         let mut gate = gate();
         let mut power = Script::default();
 
-        // Initial batch (2 x 150ms) is discarded. Batches close every 2 samples (300ms): the
-        // first warmup batch (0.3s) is under the 0.5s minimum, the second (0.6s) completes it.
-        for i in 0..6 {
+        // Each 150ms sample is its own batch. The initial one is discarded, then warmup needs
+        // four more to pass the 0.5s minimum, so it ends on the fifth sample
+        for i in 0..5 {
             let _ = gate.push(sample(150_000_000), &mut power).unwrap();
-            assert!(!gate.done() || i == 5, "finished early at sample {i}");
+            assert!(!gate.done() || i == 4, "finished early at sample {i}");
         }
         assert!(gate.done());
         let summary = gate.summary().unwrap();
-        assert_eq!(summary.samples, 6);
-        assert_eq!(summary.total_ns, 900_000_000);
+        assert_eq!(summary.samples, 5);
+        assert_eq!(summary.total_ns, 750_000_000);
         assert_eq!(summary.waited_samples, 0);
     }
 
@@ -360,37 +360,39 @@ mod tests {
             PowerBand::Above,    // waiting
             PowerBand::Elevated, // still waiting: elevated is not settled
             PowerBand::Above,
-            PowerBand::Settled,  // opens warmup
+            PowerBand::Settled, // opens warmup
+            PowerBand::Settled,
             PowerBand::Elevated, // tolerated during warmup
+            PowerBand::Settled,
         ]);
 
+        // Every sample here is its own batch
         let batches = push_n(&mut gate, &mut power, 1, 250_000_000);
         assert_eq!(batches, [Batch::Discarded]);
         assert_eq!(gate.phase, Phase::Waiting);
 
-        let batches = push_n(&mut gate, &mut power, 6, 150_000_000);
+        let batches = push_n(&mut gate, &mut power, 3, 150_000_000);
         assert_eq!(batches, [Batch::Discarded; 3]);
         assert_eq!(gate.phase, Phase::Waiting);
-        assert_eq!(gate.waited_samples, 6);
-        assert_eq!(gate.waited_ns, 900_000_000);
-        assert_eq!(gate.discarded_samples, 7);
+        assert_eq!(gate.waited_samples, 3);
+        assert_eq!(gate.waited_ns, 450_000_000);
+        assert_eq!(gate.discarded_samples, 4);
 
-        // The settled batch opens warmup with its own samples counted whole (0.3s, under the
-        // 0.5s minimum)
-        let batches = push_n(&mut gate, &mut power, 2, 150_000_000);
+        // The settled batch opens warmup with its own sample counted (0.15s, under the minimums)
+        let batches = push_n(&mut gate, &mut power, 1, 150_000_000);
         assert_eq!(batches, [Batch::Warmup]);
         assert_eq!(gate.phase, Phase::Warmup);
-        assert_eq!(gate.stable_samples, 2);
-        assert_eq!(gate.stable_ns, 300_000_000);
+        assert_eq!(gate.stable_samples, 1);
+        assert_eq!(gate.stable_ns, 150_000_000);
         assert!(!gate.done());
 
-        // The next batch takes warmup to 0.6s and completes it
-        let batches = push_n(&mut gate, &mut power, 2, 150_000_000);
-        assert_eq!(batches, [Batch::Warmup]);
+        // Three more batches take warmup to 4 samples and 0.6s and complete it
+        let batches = push_n(&mut gate, &mut power, 3, 150_000_000);
+        assert_eq!(batches, [Batch::Warmup; 3]);
         assert!(gate.done());
         let summary = gate.summary().unwrap();
-        assert_eq!(summary.samples, 11);
-        assert_eq!(summary.waited_samples, 6);
+        assert_eq!(summary.samples, 8);
+        assert_eq!(summary.waited_samples, 3);
         assert!(power.0.is_empty(), "every scripted reading was consumed");
     }
 
@@ -444,17 +446,17 @@ mod tests {
         let _ = gate.push(sample(250_000_000), &mut power).unwrap();
         assert_eq!(gate.phase, Phase::Waiting);
 
-        // A waiting batch of 100,000 tiny samples is held only as counts
-        for _ in 0..99_999 {
+        // A waiting batch of 50,000 tiny samples is held only as counts
+        for _ in 0..49_999 {
             assert_eq!(gate.push(sample(2_000), &mut power).unwrap(), None);
         }
-        assert_eq!(gate.batch_samples, 99_999);
+        assert_eq!(gate.batch_samples, 49_999);
 
         // Closing it settled opens warmup with every sample counted
         let batch = gate.push(sample(2_000), &mut power).unwrap();
         assert_eq!(batch, Some(Batch::Warmup));
-        assert_eq!(gate.stable_samples, 100_000);
-        assert_eq!(gate.stable_ns, 200_000_000);
+        assert_eq!(gate.stable_samples, 50_000);
+        assert_eq!(gate.stable_ns, 100_000_000);
         assert_eq!(gate.summary().map(|s| s.samples), None);
     }
 

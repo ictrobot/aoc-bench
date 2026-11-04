@@ -465,7 +465,7 @@ impl PowerMonitor {
     const MEASURE_INTERVAL: Duration = Duration::from_secs(1);
     /// Batches are closed in sample time. One that covers more sample time than has elapsed on
     /// the wall clock, beyond this slack, arrived late, so its reading describes other work
-    const PACING_SLACK: Duration = Duration::from_millis(100);
+    const PACING_SLACK: Duration = Duration::from_millis(50);
 
     fn open(limit_watts: Option<f64>) -> Result<Self, RaplError> {
         let reader = PackagePower::open()?;
