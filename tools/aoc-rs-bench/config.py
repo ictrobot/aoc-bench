@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import hashlib
+import io
 import json
 import math
 import os
@@ -364,9 +365,21 @@ class MatrixBuilder:
 
 
 def write_atomic(file: Path, binary: bool, write_fn):
+    # Render in memory first and skip the write if the file already has identical content
+    buf = io.BytesIO() if binary else io.StringIO()
+    write_fn(buf)
+    data = buf.getvalue()
+    if not binary:
+        data = data.encode("utf-8")
+
+    try:
+        if file.stat().st_size == len(data) and file.read_bytes() == data:
+            return
+    except OSError:
+        pass
+
     tmp_file = file.with_suffix(".tmp")
-    with open(tmp_file, "wb" if binary else "w") as f:
-        write_fn(f)
+    tmp_file.write_bytes(data)
     os.replace(tmp_file, file)
 
 
