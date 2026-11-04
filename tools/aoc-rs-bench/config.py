@@ -45,6 +45,8 @@ class MatrixBuilder:
         self.required_inputs = {}
         self.input_cache = {}
         self.total_combinations = 0
+        # Builds are hardlinked when identical, so a binary only needs checking once per input
+        self.check_tasks: dict[tuple[int, int, str], asyncio.Task[BuildPuzzleDetails]] = {}
 
         # self.cache[commit][kind][year][day] = details
         self.cache_file = self.builds_dir / ".cache.json"
@@ -56,15 +58,17 @@ class MatrixBuilder:
     def build(self):
         commits = self.load_commits()
         self.check_binaries(commits)
-        results = asyncio.run(self.process_all(commits))
+        try:
+            results = asyncio.run(self.process_all(commits))
+        finally:
+            # Entries are only added once validated, so what a failed run finished is safe to keep
+            write_atomic(self.cache_file, False, lambda f: json.dump(self.cache, f, indent=2))
 
         os.makedirs(self.data_dir / "inputs", exist_ok=True)
         for input_hash, input_bytes in self.required_inputs.items():
             write_atomic(self.data_dir / "inputs" / input_hash, True, lambda f: f.write(input_bytes))
 
         write_atomic(self.data_dir / "config.json", False, lambda f: json.dump(results, f, indent=2))
-
-        write_atomic(self.cache_file, False, lambda f: json.dump(self.cache, f, indent=2))
 
     def load_commits(self):
         commits_file = self.builds_dir / "commits.txt"
@@ -96,7 +100,8 @@ class MatrixBuilder:
             raise RuntimeError(f"error: missing builds:\n{missing_lines}")
 
     async def process_all(self, commits: list[str]):
-        sem = asyncio.Semaphore(8)
+        # Threaded puzzles use every core, so running more than this at once only risks timeouts on slow hosts
+        sem = asyncio.Semaphore(len(os.sched_getaffinity(0)))
 
         multiversion_values = []
         multiversion_presets = {}
@@ -147,7 +152,7 @@ class MatrixBuilder:
         # Reorder multiversion values: use the last commit's 2015-04 generic build ordering as canonical
         # (from cache, so no subprocess is spawned), then append any values from earlier commits
         # that are no longer present
-        last_details = await self.get_build_puzzle_details(commits[-1], self.builds[0], ("2015", "04"))
+        last_details = await self.get_build_puzzle_details(commits[-1], self.builds[0], ("2015", "04"), sem)
         last_mv = last_details["multiversion"] if last_details is not None else []
         seen = results["config_keys"]["multiversion"]["values"]
         results["config_keys"]["multiversion"]["values"] = last_mv + [v for v in seen if v not in last_mv]
@@ -164,17 +169,16 @@ class MatrixBuilder:
         return results
 
     async def process_build(self, commit: str, kind: str, sem: asyncio.Semaphore, results: dict):
-        async with sem:
-            puzzles = self.get_build_puzzles(commit, kind)
-            for puzzle in puzzles:
-                details = await self.get_build_puzzle_details(commit, kind, puzzle)
-                if details is None:
-                    continue
-                for v in details["multiversion"]:
-                    if v not in results["config_keys"]["multiversion"]["values"]:
-                        results["config_keys"]["multiversion"]["values"].append(v)
+        puzzles = self.get_build_puzzles(commit, kind)
+        for puzzle in puzzles:
+            details = await self.get_build_puzzle_details(commit, kind, puzzle, sem)
+            if details is None:
+                continue
+            for v in details["multiversion"]:
+                if v not in results["config_keys"]["multiversion"]["values"]:
+                    results["config_keys"]["multiversion"]["values"].append(v)
 
-                results["benchmarks"][f"{puzzle[0]}-{puzzle[1]}"][commit] = details
+            results["benchmarks"][f"{puzzle[0]}-{puzzle[1]}"][commit] = details
 
     def post_process_benchmark(self, name: str, benchmark: dict, config_keys: dict) -> dict:
         variants = []
@@ -266,35 +270,19 @@ class MatrixBuilder:
 
         return puzzles
 
-    async def get_build_puzzle_details(self, commit: str, kind: str,
-                                       puzzle: tuple[str, str]) -> BuildPuzzleDetails | None:
+    async def get_build_puzzle_details(self, commit: str, kind: str, puzzle: tuple[str, str],
+                                       sem: asyncio.Semaphore) -> BuildPuzzleDetails | None:
         year, day = puzzle
         cache = self.cache[commit][kind][year][day]
         if not cache:
-            build = str(self.build_path(commit, kind, puzzle))
+            build = self.build_path(commit, kind, puzzle)
             input_hash = self.get_input_hash(year, day)
 
-            code, stdout, stderr, trace = await strace_run(build, "check",
-                                                           stdin=self.required_inputs[input_hash],
-                                                           strace_filter="trace=clone,clone3,fork,vfork")
-            if code != 0 or stderr != "":
-                raise RuntimeError(f"error: running {build} on {puzzle} failed with exit code {code}:\n{stderr}")
-
-            matches = re.fullmatch(
-                r'^Checksum: ([a-f0-9]+)\r?\nMultiversion: ([a-zA-z0-9_,]+)\r?\nMultithreading: (true|false)\r?\n?$',
-                stdout)
-            if not matches:
-                raise RuntimeError(f"error: unexpected output from {build} on {puzzle}: {stdout}")
-
-            cache["checksum"] = matches.group(1)
-            cache["multiversion"] = matches.group(2).split(",")
-            cache["uses_threads"] = trace != b''
-
-            multithreading = matches.group(3) == "true"
-            if multithreading != cache["uses_threads"]:
-                raise RuntimeError(f"error: {build} on {puzzle} was built "
-                                   f"{'with' if multithreading else 'without'} multithreading, but "
-                                   f"{'did not create' if multithreading else 'created'} threads")
+            stat = build.stat()
+            key = (stat.st_dev, stat.st_ino, input_hash)
+            if key not in self.check_tasks:
+                self.check_tasks[key] = asyncio.create_task(self.check_binary(str(build), input_hash, puzzle, sem))
+            cache.update(await self.check_tasks[key])
 
         for version in cache["multiversion"]:
             self.seen_multiversions.add(version)
@@ -308,6 +296,34 @@ class MatrixBuilder:
         details = cache.copy()
         details["multiversion"] = multiversion
         return details
+
+    async def check_binary(self, build: str, input_hash: str, puzzle: tuple[str, str],
+                           sem: asyncio.Semaphore) -> BuildPuzzleDetails:
+        async with sem:
+            code, stdout, stderr, trace = await strace_run(build, "check",
+                                                           stdin=self.required_inputs[input_hash],
+                                                           strace_filter="trace=clone,clone3,fork,vfork")
+        if code != 0 or stderr != "":
+            raise RuntimeError(f"error: running {build} on {puzzle} failed with exit code {code}:\n{stderr}")
+
+        matches = re.fullmatch(
+            r'^Checksum: ([a-f0-9]+)\r?\nMultiversion: ([a-zA-z0-9_,]+)\r?\nMultithreading: (true|false)\r?\n?$',
+            stdout)
+        if not matches:
+            raise RuntimeError(f"error: unexpected output from {build} on {puzzle}: {stdout}")
+
+        uses_threads = trace != b''
+        multithreading = matches.group(3) == "true"
+        if multithreading != uses_threads:
+            raise RuntimeError(f"error: {build} on {puzzle} was built "
+                               f"{'with' if multithreading else 'without'} multithreading, but "
+                               f"{'did not create' if multithreading else 'created'} threads")
+
+        return {
+            "checksum": matches.group(1),
+            "multiversion": matches.group(2).split(","),
+            "uses_threads": uses_threads,
+        }
 
     def get_input_hash(self, year: str, day: str) -> str:
         if (year, day) in self.input_cache:
@@ -430,7 +446,7 @@ async def strace_run(*cmd: str, stdin: bytes = None, strace_filter: str = None):
     trace_task = asyncio.create_task(trace_reader.read())
 
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin), timeout=30)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin), timeout=120)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
