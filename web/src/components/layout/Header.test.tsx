@@ -68,7 +68,7 @@ describe("Header", () => {
   it("preserves existing query params when changing host", async () => {
     const user = userEvent.setup()
     mockLoadIndex.mockResolvedValue({
-      schema_version: 4,
+      schema_version: 5,
       snapshot_id: "snapshot-a",
       hosts: {
         "linux-x64": makeHeaderHostIndex(),

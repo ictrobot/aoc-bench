@@ -1,7 +1,5 @@
 -- Rebuild table to move columns and add new matched_count and replaced_count columns
 
-PRAGMA foreign_keys = OFF;
-
 CREATE TABLE IF NOT EXISTS new_results
 (
     bench                   TEXT    NOT NULL,           -- Benchmark name
@@ -43,6 +41,3 @@ CREATE INDEX IF NOT EXISTS idx_results_bench ON results (bench);
 CREATE INDEX IF NOT EXISTS idx_results_commit ON results (config_commit) WHERE config_commit IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_results_bench_commit ON results (bench, config_commit);
 CREATE INDEX IF NOT EXISTS idx_results_last_series ON results (last_series_timestamp);
-
-PRAGMA foreign_keys = ON;
-PRAGMA foreign_key_check;

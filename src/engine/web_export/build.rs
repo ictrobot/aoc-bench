@@ -289,8 +289,10 @@ fn build_indexed_results(
                 bench_idx,
                 config_idx,
                 measurement_token: measurement_tokens.token(r.stable_measurement_id, r.is_shared),
-                mean_ns: round_ns(r.stable_stats.median_run_mean_ns),
-                ci95_half_ns: round_ns(r.stable_stats.median_run_ci95_half_ns),
+                mean_ns: round_ns(r.stable_stats.mean_ns),
+                ci95_half_ns: r.stable_stats.ci95_half_ns.map(round_ns),
+                run_count: r.stable_stats.run_count,
+                multimodal: r.stable_stats.multimodal.unwrap_or(false),
             })
         })
         .collect()
@@ -324,8 +326,10 @@ fn build_indexed_latest(
                 bench_idx,
                 config_idx,
                 measurement_token: measurement_tokens.token(r.stable_measurement_id, r.is_shared),
-                mean_ns: round_ns(r.stable_stats.median_run_mean_ns),
-                ci95_half_ns: round_ns(r.stable_stats.median_run_ci95_half_ns),
+                mean_ns: round_ns(r.stable_stats.mean_ns),
+                ci95_half_ns: r.stable_stats.ci95_half_ns.map(round_ns),
+                run_count: r.stable_stats.run_count,
+                multimodal: r.stable_stats.multimodal.unwrap_or(false),
             })
         })
         .collect();
@@ -353,9 +357,10 @@ fn build_indexed_history(
                             measurement_token: measurement_tokens
                                 .token(r.measurement_id, r.is_shared),
                             timestamp_s: r.timestamp.as_second(),
-                            mean_ns: round_ns(r.median_run_mean_ns),
-                            ci95_half_ns: round_ns(r.median_run_ci95_half_ns),
-                            run_count: r.run_count,
+                            mean_ns: round_ns(r.stats.mean_ns),
+                            ci95_half_ns: r.stats.ci95_half_ns.map(round_ns),
+                            run_count: r.stats.run_count,
+                            multimodal: r.stats.multimodal.unwrap_or(false),
                         }
                     }),
             );
@@ -427,7 +432,7 @@ fn partition_history(mut rows: Vec<HistoryRow>, target_bytes: usize) -> Vec<Hist
 /// `prev` is the row before it in the same sequence, used for the delta columns. Deltas restart
 /// at each part boundary, so this is a close estimate rather than exact across a cut.
 fn history_row_json_len(row: &HistoryRow, prev: Option<&HistoryRow>) -> usize {
-    const SEPARATORS: usize = 6;
+    const SEPARATORS: usize = 7;
     let (prev_config_idx, prev_timestamp_s) =
         prev.map_or((0, 0), |p| (p.config_idx, p.timestamp_s));
     SEPARATORS
@@ -435,8 +440,9 @@ fn history_row_json_len(row: &HistoryRow, prev: Option<&HistoryRow>) -> usize {
         + unsigned_decimal_len(u64::from(row.measurement_token))
         + signed_decimal_len(row.timestamp_s - prev_timestamp_s)
         + signed_decimal_len(row.mean_ns)
-        + signed_decimal_len(row.ci95_half_ns)
+        + row.ci95_half_ns.map_or("null".len(), signed_decimal_len)
         + unsigned_decimal_len(row.run_count as u64)
+        + 1 // multimodal is a single digit
 }
 
 fn to_i64(value: usize) -> i64 {
@@ -575,11 +581,9 @@ mod tests {
                 timestamp: Timestamp::from_second(ts + 1).unwrap(),
                 stats: StatsResult {
                     mean_ns_per_iter: mean,
-                    ci95_half_width_ns: 1.0,
+                    se_ns: None,
                     mode: EstimationMode::PerIter,
                     intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
                     samples: vec![Sample {
                         iters: 10,
                         total_ns: 100,
@@ -722,7 +726,9 @@ mod tests {
         assert_eq!(r0.config_idx, 0); // x=0
         assert_eq!(r0.measurement_token, 0); // isolated
         assert_eq!(r0.mean_ns, 101); // round(100.5)
-        assert_eq!(r0.ci95_half_ns, 1); // round(1.0)
+        assert_eq!(r0.ci95_half_ns, None); // a single run has no interval
+        assert_eq!(r0.run_count, 1);
+        assert!(!r0.multimodal);
 
         // Second result: bench_idx=0, config_idx=1 (build=y), mean=201, ci=1
         let r1 = &data.compact.results[1];
@@ -806,6 +812,7 @@ mod tests {
         assert_eq!(s0.measurement_token, 0); // isolated
         assert_eq!(s0.timestamp_s, 1000);
         assert_eq!(s0.run_count, 1);
+        assert!(!s0.multimodal);
 
         let s1 = &history.series[1];
         assert_eq!(s1.config_idx, 0); // build=x
@@ -822,8 +829,9 @@ mod tests {
             measurement_token: 0,
             timestamp_s,
             mean_ns: 123_456,
-            ci95_half_ns: 789,
+            ci95_half_ns: Some(789),
             run_count: 3,
+            multimodal: false,
         }
     }
 
@@ -848,8 +856,18 @@ mod tests {
                 measurement_token: 42,
                 timestamp_s: -5,
                 mean_ns: -1_000_000_000,
-                ci95_half_ns: 10,
+                ci95_half_ns: Some(10),
                 run_count: 100,
+                multimodal: true,
+            },
+            HistoryRow {
+                config_idx: 8,
+                measurement_token: 0,
+                timestamp_s: 0,
+                mean_ns: 1,
+                ci95_half_ns: None,
+                run_count: 1,
+                multimodal: false,
             },
         ];
         let empty_len = serde_json::to_vec(&WebIndexedHistory { series: vec![] })
@@ -860,7 +878,7 @@ mod tests {
             .unwrap()
             .len();
         // Each row is charged one separator per column; the actual columns have one fewer.
-        assert_eq!(empty_len + estimate - 6, serialized);
+        assert_eq!(empty_len + estimate - 7, serialized);
     }
 
     #[test]
@@ -1052,13 +1070,11 @@ mod tests {
                         measurement_id,
                         workload_id: workload,
                         timestamp,
-                        schema_version: 2,
                         stats: MeasurementStats {
                             run_count: 1,
-                            median_run_mean_ns: 10.0,
-                            median_run_ci95_half_ns: 1.0,
-                            median_run_outlier_count: 0,
-                            median_run_sample_count: 1,
+                            mean_ns: 10.0,
+                            ci95_half_ns: None,
+                            multimodal: Some(false),
                         },
                         checksum: None,
                     },

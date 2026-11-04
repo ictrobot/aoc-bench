@@ -5,6 +5,7 @@ import { useBenchmarkResults } from "@/hooks/queries.ts"
 import { compareConfigsByOrder } from "@/lib/config-order.ts"
 import { formatDurationNs, shortenValue } from "@/lib/format.ts"
 import { Card, CardContent } from "@/components/ui/card.tsx"
+import { MultimodalBadge } from "@/components/benchmarks/MultimodalBadge.tsx"
 import { withQuery } from "@/lib/routes.ts"
 import { buildConfigSignature } from "@/lib/config-signature.ts"
 import { downsampleSparkValues } from "@/lib/downsample.ts"
@@ -62,7 +63,8 @@ function BenchmarkDetailContent({
       {
         config: Record<string, string>
         mean_ns: number
-        ci95_half_ns: number
+        ci95_half_ns: number | null
+        multimodal: boolean
         representativeTrendIdx: number
         trendPoints: { trendValue: string; mean_ns: number }[]
       }
@@ -79,6 +81,7 @@ function BenchmarkDetailContent({
           config: groupConfig,
           mean_ns: r.mean_ns,
           ci95_half_ns: r.ci95_half_ns,
+          multimodal: r.multimodal,
           representativeTrendIdx: trendIdx,
           trendPoints: [{ trendValue, mean_ns: r.mean_ns }],
         })
@@ -87,6 +90,7 @@ function BenchmarkDetailContent({
         if (trendIdx > existing.representativeTrendIdx) {
           existing.mean_ns = r.mean_ns
           existing.ci95_half_ns = r.ci95_half_ns
+          existing.multimodal = r.multimodal
           existing.representativeTrendIdx = trendIdx
         }
       }
@@ -112,6 +116,7 @@ function BenchmarkDetailContent({
           config: group.config,
           mean_ns: group.mean_ns,
           ci95_half_ns: group.ci95_half_ns,
+          multimodal: group.multimodal,
           sparkData,
           timelineUrl: withQuery("/timeline", { host, bench, ...filterParams }),
         }
@@ -130,7 +135,8 @@ interface CardData {
   key: string
   config: Record<string, string>
   mean_ns: number
-  ci95_half_ns: number
+  ci95_half_ns: number | null
+  multimodal: boolean
   sparkData: number[]
   timelineUrl: string
 }
@@ -144,6 +150,7 @@ function CardGrid({ cards }: { cards: CardData[] }) {
           config={card.config}
           mean_ns={card.mean_ns}
           ci95_half_ns={card.ci95_half_ns}
+          multimodal={card.multimodal}
           sparkData={card.sparkData}
           timelineUrl={card.timelineUrl}
         />
@@ -152,7 +159,7 @@ function CardGrid({ cards }: { cards: CardData[] }) {
   )
 }
 
-function ConfigCard({ config, mean_ns, sparkData, timelineUrl }: CardData) {
+function ConfigCard({ config, mean_ns, multimodal, sparkData, timelineUrl }: CardData) {
   return (
     <Link to={timelineUrl} style={{ contentVisibility: "auto", containIntrinsicSize: "auto 220px" }}>
       <Card className="hover:bg-muted/50 transition-colors cursor-pointer h-full">
@@ -166,7 +173,10 @@ function ConfigCard({ config, mean_ns, sparkData, timelineUrl }: CardData) {
               ))}
             </div>
           )}
-          <div className="text-3xl font-bold tabular-nums">{formatDurationNs(mean_ns)}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-3xl font-bold tabular-nums">{formatDurationNs(mean_ns)}</div>
+            {multimodal && <MultimodalBadge />}
+          </div>
           {sparkData.length > 1 && <SparkStep data={sparkData} />}
         </CardContent>
       </Card>

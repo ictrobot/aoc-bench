@@ -29,14 +29,19 @@ export function makeHostIndex(overrides: HostIndexOverrides = {}): HostIndex {
   return index
 }
 
-function column(rows: number[][], c: number, delta: boolean): number[] {
+function column(rows: (number | null)[][], c: number, delta: boolean): number[] {
   let prev = 0
   return rows.map((row) => {
     const value = row[c]
+    if (value === null) throw new Error(`Column ${c} is not nullable`)
     const out = delta ? value - prev : value
     prev = value
     return out
   })
+}
+
+function nullableColumn(rows: (number | null)[][], c: number): (number | null)[] {
+  return rows.map((row) => row[c])
 }
 
 /** Encode result rows the way the exporter writes results.json. */
@@ -47,7 +52,9 @@ export function columnarResults(rows: ResultRow[]): IndexedResults {
       config_idx_delta: column(rows, 1, true),
       measurement_token: column(rows, 2, false),
       mean_ns: column(rows, 3, false),
-      ci95_half_ns: column(rows, 4, false),
+      ci95_half_ns: nullableColumn(rows, 4),
+      run_count: column(rows, 5, false),
+      multimodal: column(rows, 6, false),
     },
   }
 }
@@ -60,8 +67,9 @@ export function columnarHistory(rows: HistoryRow[]): IndexedHistory {
       measurement_token: column(rows, 1, false),
       timestamp_s_delta: column(rows, 2, true),
       mean_ns: column(rows, 3, false),
-      ci95_half_ns: column(rows, 4, false),
+      ci95_half_ns: nullableColumn(rows, 4),
       run_count: column(rows, 5, false),
+      multimodal: column(rows, 6, false),
     },
   }
 }
@@ -77,7 +85,7 @@ export function makeGlobalIndex(
   } = {},
 ): GlobalIndex {
   return {
-    schema_version: 4,
+    schema_version: 5,
     snapshot_id: snapshotId,
     hosts: { [host]: hostIndex },
   }

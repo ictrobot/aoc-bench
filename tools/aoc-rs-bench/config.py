@@ -190,11 +190,26 @@ class MatrixBuilder:
             while commits_reversed and benchmark[commits_reversed[-1]] == chunk_metadata:
                 chunk_commits.append(commits_reversed.pop())
 
+            multiversion_values = chunk_metadata["multiversion"]
+            remaining_multiversion = [v for v in multiversion_values if v != "default"]
+
+            # The default multiversion gets every thread count. Explicit multiversions only get 1
+            # and n: the intermediate counts scale the same way for every version, so they add
+            # measurement time without telling anything new
+            default_thread_groups = [["1"]]
+            explicit_thread_groups = [["1"]]
+            if chunk_metadata["uses_threads"]:
+                if self.multi_threads:
+                    default_thread_groups.append("multi")
+                if "n" in self.multi_threads:
+                    explicit_thread_groups.append(["n"])
+
+            default_cases = len(self.threads) if chunk_metadata["uses_threads"] else 1
+            explicit_cases = len(explicit_thread_groups) * len(remaining_multiversion)
             combinations = [
                 len(chunk_commits),
                 len(config_keys["build"]["presets"]["all"]),
-                len(self.threads) if chunk_metadata["uses_threads"] else 1,
-                len(chunk_metadata["multiversion"]),
+                (default_cases if "default" in multiversion_values else 0) + explicit_cases,
             ]
             self.total_combinations += math.prod(combinations)
 
@@ -203,16 +218,9 @@ class MatrixBuilder:
                 config_keys["commit"]["presets"][preset_name] = chunk_commits
                 chunk_commits = preset_name
 
-            multiversion_values = chunk_metadata["multiversion"]
-            remaining_multiversion = [v for v in multiversion_values if v != "default"]
-
-            def add_variant(multiversion, extra_stats=None):
-                thread_groups = [["1"]]
-                if chunk_metadata["uses_threads"] and self.multi_threads:
-                    thread_groups.append("multi")
+            def add_variant(multiversion, thread_groups):
                 for threads in thread_groups:
-                    stats = {**(extra_stats or {})}
-                    variant = {
+                    variants.append({
                         "checksum": chunk_metadata["checksum"],
                         "config": {
                             "commit": chunk_commits,
@@ -220,18 +228,13 @@ class MatrixBuilder:
                             "threads": threads,
                             "multiversion": multiversion,
                         },
-                    }
-                    if stats:
-                        variant["stats"] = stats
-                    variants.append(variant)
+                    })
 
             if "default" in multiversion_values:
-                add_variant("default")
+                add_variant("default", default_thread_groups)
 
             if remaining_multiversion:
-                # 1 run per series isn't ideal but is a trade-off to keep all the multiversion thread combinations while
-                # speeding up how long benchmarks for each commit take
-                add_variant(remaining_multiversion, {"runs_per_series": 1})
+                add_variant(remaining_multiversion, explicit_thread_groups)
 
         return {
             "benchmark": name,

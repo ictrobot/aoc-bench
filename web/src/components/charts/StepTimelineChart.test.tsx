@@ -13,6 +13,8 @@ function makeGroup(overrides: Partial<TimelineChartGroup>): TimelineChartGroup {
     endIndex: 0,
     mean_ns: 100,
     ci95_half_ns: 2,
+    run_count: 3,
+    multimodal: false,
     configs: [{ commit: "a" }],
     measurement_token: 1,
     caseCount: 1,
@@ -104,6 +106,59 @@ describe("StepTimelineChart", () => {
 
     fireEvent.pointerLeave(svg)
     expect(screen.queryByText(/Mean:/)).not.toBeInTheDocument()
+  })
+
+  it("shows the run count and a multimodal badge only for flagged groups", () => {
+    const flagged = [
+      makeGroup({ run_count: 1, ci95_half_ns: null }),
+      makeGroup({
+        startValue: "b",
+        endValue: "b",
+        startIndex: 1,
+        endIndex: 1,
+        configs: [{ commit: "b" }],
+        run_count: 5,
+        multimodal: true,
+      }),
+    ]
+    render(
+      <StepTimelineChart
+        groups={flagged}
+        varyingKey="commit"
+        significantGroupIndices={new Set()}
+        xLabels="all"
+        onGroupClick={vi.fn()}
+      />,
+    )
+    const svg = screen.getByRole("img", { name: "Performance by commit" })
+
+    // slot 0: a single run has no interval and no badge
+    fireEvent.pointerMove(svg, { clientX: 85, clientY: 100 })
+    expect(screen.getByText(/Runs: 1/)).toBeInTheDocument()
+    expect(screen.getByText(/no interval/)).toBeInTheDocument()
+    expect(screen.queryByText("multimodal")).not.toBeInTheDocument()
+
+    // slot 1 (plot is 700px wide, two slots): flagged, with an interval
+    fireEvent.pointerMove(svg, { clientX: 600, clientY: 100 })
+    expect(screen.getByText(/Runs: 5/)).toBeInTheDocument()
+    expect(screen.getByText(/±2 ns/)).toBeInTheDocument()
+    expect(screen.getByText("multimodal")).toBeInTheDocument()
+  })
+
+  it("renders a genuine zero-width interval as ±0 ns", () => {
+    render(
+      <StepTimelineChart
+        groups={[makeGroup({ ci95_half_ns: 0 })]}
+        varyingKey="commit"
+        significantGroupIndices={new Set()}
+        xLabels="all"
+        onGroupClick={vi.fn()}
+      />,
+    )
+    const svg = screen.getByRole("img", { name: "Performance by commit" })
+    fireEvent.pointerMove(svg, { clientX: 85, clientY: 100 })
+    expect(screen.getByText(/±0 ns/)).toBeInTheDocument()
+    expect(screen.queryByText(/no interval/)).not.toBeInTheDocument()
   })
 
   it("selects the containing slot, not the nearest slot edge", () => {

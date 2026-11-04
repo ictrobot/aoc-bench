@@ -10,7 +10,7 @@ use crate::measurement::{MEASUREMENT_SCHEMA, Measurement};
 use crate::run::RunSeries;
 use crate::workload::WorkloadIdentity;
 
-/// Record one isolated measurement for `series`, writing its schema-2 JSON and a measurement row
+/// Record one isolated measurement for `series`, writing its measurement JSON and a measurement row
 /// (deterministic id keyed by timestamp) linked to its case. Does not set workload state.
 pub(crate) fn seed_measurement(storage: &HybridDiskStorage, series: &RunSeries) -> MeasurementId {
     let hostless = series.config.without_host_key();
@@ -31,6 +31,7 @@ pub(crate) fn seed_measurement(storage: &HybridDiskStorage, series: &RunSeries) 
         covered_cases: vec![hostless.clone()],
         timestamp: series.timestamp,
         checksum: series.checksum.clone(),
+        summary: series.summary(),
         runs: series.runs.clone(),
     };
     storage.write_measurement_json(&measurement).unwrap();
@@ -45,7 +46,6 @@ pub(crate) fn seed_measurement(storage: &HybridDiskStorage, series: &RunSeries) 
                     measurement_id,
                     workload_id: workload,
                     timestamp: series.timestamp,
-                    schema_version: MEASUREMENT_SCHEMA,
                     stats: MeasurementStats::from(series),
                     checksum: series.checksum.clone(),
                 },

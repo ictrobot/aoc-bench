@@ -16,6 +16,7 @@ import type { CompactResult, HostIndex } from "@/lib/types.ts"
 import { relativeChange } from "@/lib/delta.ts"
 import { groupTimelineResults } from "@/lib/timeline-grouping.ts"
 import { GroupValueLabel } from "@/components/config/GroupValueLabel.tsx"
+import { MultimodalBadge } from "@/components/benchmarks/MultimodalBadge.tsx"
 import { configValueUrl } from "@/lib/routes.ts"
 
 export function Timeline() {
@@ -370,6 +371,7 @@ function TimelineContent({ host, bench, hostIndex: index, setBench }: TimelineCo
                             {d.caseCount} identical
                           </Badge>
                         )}
+                        {d.multimodal && <MultimodalBadge className="ml-2 font-sans text-xs text-muted-foreground" />}
                       </TableCell>
                       <TableCell className="text-right">{formatDurationNs(d.mean_ns)}</TableCell>
                       <TableCell className="text-right text-muted-foreground">{formatCi(d.ci95_half_ns)}</TableCell>

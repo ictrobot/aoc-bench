@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// This is part of every workload identity: bumping it splits all durable workloads, which is the
 /// intended escape hatch for "the meaning of a measurement changed". It is deliberately distinct
 /// from the on-the-wire `version=1` protocol field (which only guards line parsing).
-pub const SEMANTICS_VERSION: u32 = 1;
+pub const SEMANTICS_VERSION: u32 = 2;
 
 /// Domain separator for the shared (content-backed) workload hash.
 const DOMAIN_SHARED: &[u8] = b"aoc-bench/workload/shared/v1";
@@ -83,7 +83,6 @@ impl GroupSpec {
         let StatsOptions {
             min_samples,
             min_total_time_ns,
-            target_rel_ci,
             min_warmup_samples,
             min_warmup_time_ns,
             runs_per_series,
@@ -91,9 +90,6 @@ impl GroupSpec {
         } = *stats;
         out.u64(min_samples.get() as u64);
         out.u64(min_total_time_ns.get());
-        out.u64(target_rel_ci.to_bits());
-        // Formerly the test-only `skip_warmup` flag, always false. Kept so identities are stable.
-        out.u8(0);
         out.u64(min_warmup_samples.get() as u64);
         out.u64(min_warmup_time_ns.get());
         out.u64(runs_per_series.get() as u64);
@@ -148,25 +144,31 @@ impl WorkloadIdentity {
         }
     }
 
-    /// Identity of an isolated, case-specific workload derived from benchmark and canonical config.
-    ///
-    /// Used for isolated benchmarks and v1 migration. Both content digests are `None`.
+    /// Identity of an isolated, case-specific workload derived from benchmark, canonical config
+    /// and the current [`SEMANTICS_VERSION`], so a bump splits isolated workloads just as it
+    /// splits shared ones. Both content digests are `None`.
     #[must_use]
     pub fn isolated(benchmark: BenchmarkId, config: &Config) -> Self {
         let config_json =
             serde_json::to_string(config).expect("hostless Config serializes to JSON");
-        Self::isolated_from_json(benchmark, &config_json)
+        Self::isolated_from_json(benchmark, &config_json, SEMANTICS_VERSION)
     }
 
-    /// Identity of an isolated workload from a raw canonical config JSON string.
+    /// Identity of an isolated workload from a raw canonical config JSON string and the
+    /// semantics version its measurements were made under.
     ///
     /// Used by v1 migration, where the stored config JSON is taken verbatim rather than
-    /// reconstructed through today's `ConfigFile`.
+    /// reconstructed through today's `ConfigFile`, and the version is the one in force then.
     #[must_use]
-    pub fn isolated_from_json(benchmark: BenchmarkId, config_json: &str) -> Self {
+    pub fn isolated_from_json(
+        benchmark: BenchmarkId,
+        config_json: &str,
+        semantics_version: u32,
+    ) -> Self {
         let mut framer = Framer::with_domain(DOMAIN_ISOLATED);
         framer.bytes(benchmark.as_str().as_bytes());
         framer.bytes(config_json.as_bytes());
+        framer.u32(semantics_version);
 
         Self {
             benchmark,
@@ -368,6 +370,29 @@ mod tests {
         let config_native = cf.config_from_string("build=opt").unwrap();
         let same = WorkloadIdentity::isolated(bench("b"), &config_native);
         assert_eq!(isolated.workload_sha256, same.workload_sha256);
+    }
+
+    #[test]
+    fn isolated_identity_carries_the_semantics_version() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": { "build": { "values": ["opt"] } },
+            "benchmarks": [
+                { "benchmark": "b", "command": ["cmd", "{build}"], "config": { "build": ["opt"] } }
+            ]
+        }"#;
+        let cf = ConfigFile::from_str(dir.path(), None, json).unwrap();
+        let config = cf.config_from_string("build=opt").unwrap();
+        let config_json = serde_json::to_string(&config).unwrap();
+
+        // A v1-migrated workload and today's identity for the same case differ, so the case is
+        // re-measured under the current semantics rather than keeping its legacy stable value
+        let v1 = WorkloadIdentity::isolated_from_json(bench("b"), &config_json, 1);
+        let current = WorkloadIdentity::isolated(bench("b"), &config);
+        assert_ne!(v1.workload_sha256, current.workload_sha256);
+        let same =
+            WorkloadIdentity::isolated_from_json(bench("b"), &config_json, SEMANTICS_VERSION);
+        assert_eq!(current.workload_sha256, same.workload_sha256);
     }
 
     #[test]

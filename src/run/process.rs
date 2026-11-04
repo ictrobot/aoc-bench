@@ -281,29 +281,29 @@ fn log_outcome(
             measurement_id = %id,
             cases,
             suspicious_count,
-            stable_ns = current_stable.median_run_mean_ns,
+            stable_ns = current_stable.mean_ns,
             "didn't match stable result, suspicious"
         ),
         RecordOutcome::Replaced { old_stable } if dry_run => warn!(
             cases,
-            old_stable_ns = old_stable.median_run_mean_ns,
+            old_stable_ns = old_stable.mean_ns,
             "didn't match stable result, would have replaced"
         ),
         RecordOutcome::Replaced { old_stable } => warn!(
             measurement_id = %id,
             cases,
-            old_stable_ns = old_stable.median_run_mean_ns,
+            old_stable_ns = old_stable.mean_ns,
             "didn't match stable result, replaced"
         ),
         RecordOutcome::Forced { old_stable } if dry_run => warn!(
             cases,
-            old_stable_ns = old_stable.median_run_mean_ns,
+            old_stable_ns = old_stable.mean_ns,
             "would have forced replacement of stable result"
         ),
         RecordOutcome::Forced { old_stable } => warn!(
             measurement_id = %id,
             cases,
-            old_stable_ns = old_stable.median_run_mean_ns,
+            old_stable_ns = old_stable.mean_ns,
             "forced replacement of stable result"
         ),
     }
@@ -324,7 +324,8 @@ fn record_measurement(
     covered_cases: &[Config],
     force_update_stable: bool,
 ) -> Result<(WorkloadId, MeasurementId, RecordOutcome, PathBuf), RunProcessError> {
-    let stats = MeasurementStats::from(series);
+    let summary = series.summary();
+    let stats = MeasurementStats::from(summary);
     let measurement_id = MeasurementId::new_v7();
 
     let measurement = Measurement {
@@ -339,6 +340,7 @@ fn record_measurement(
         covered_cases: covered_cases.to_vec(),
         timestamp: series.timestamp,
         checksum: series.checksum.clone(),
+        summary,
         runs: series.runs.clone(),
     };
 
@@ -353,7 +355,6 @@ fn record_measurement(
                 measurement_id,
                 workload_id,
                 timestamp: series.timestamp,
-                schema_version: MEASUREMENT_SCHEMA,
                 stats,
                 checksum: series.checksum.clone(),
             },

@@ -2,12 +2,12 @@
 # Forced command for the rbench user: run one pushed benchmark binary on the host without persisting anything.
 #
 # Invoked by sshd with the client's request in SSH_ORIGINAL_COMMAND:
-#   run <year> <day> <threads> <multiversion> <checksum> [-v]   # tar.zst of "bench" and "input.txt" on stdin
+#   run <year> <day> <threads> <multiversion> <checksum> [-v] [--raw]   # tar.zst of "bench" and "input.txt" on stdin
 #   status
 #
 # A run stops the main aoc-bench service, then checks the binary, runs it under aoc-bench's debug command and
-# streams the resulting JSON run series to stdout. Only warnings and errors go to stderr unless -v is given. Only
-# one run can be active at a time.
+# streams its summary text to stdout, or the JSON run series with --raw. Only warnings and errors go to stderr
+# unless -v is given, which also lists each run under the summary. Only one run can be active at a time.
 # The main service is not restarted here. aoc-bench-watchdog restarts it a few minutes after the last run.
 #
 # The pushed binary is trusted but still confined: Landlock allows it to read the system and the job directory and
@@ -35,6 +35,7 @@ CHECK_TIMEOUT=300
 BENCH_TIMEOUT=1800
 
 verbose=0
+raw=0
 log_level=warn
 
 die() {
@@ -216,6 +217,12 @@ run_benchmark() {
     affinity="$(jq -r 'select(.cpu_affinity != null) | .cpu_affinity' "$HOST_CONFIG")"
     disable_aslr="$(jq -r 'select(.disable_aslr != null) | .disable_aslr' "$HOST_CONFIG")"
     command=("$AOC_BENCH_BIN" debug --input "$job_dir/input.txt" --checksum "$checksum")
+    if (( ! raw )); then
+        command+=(--summary)
+        if (( verbose )); then
+            command+=(--runs)
+        fi
+    fi
     if [[ -n "$affinity" ]]; then
         command+=(--cpu-affinity "$affinity")
     fi
@@ -253,20 +260,22 @@ main() {
 
     case "${words[0]:-}" in
         run)
-            if (( ${#words[@]} == 7 )) && [[ "${words[6]}" == "-v" ]]; then
-                verbose=1
-                log_level=info
-                unset 'words[6]'
-            fi
-            (( ${#words[@]} == 6 )) || die "usage: run <year> <day> <threads> <multiversion> <checksum> [-v]"
-            run_benchmark "${words[@]:1}"
+            for flag in "${words[@]:6}"; do
+                case "$flag" in
+                    -v) verbose=1; log_level=info ;;
+                    --raw) raw=1 ;;
+                    *) die "usage: run <year> <day> <threads> <multiversion> <checksum> [-v] [--raw]" ;;
+                esac
+            done
+            (( ${#words[@]} >= 6 )) || die "usage: run <year> <day> <threads> <multiversion> <checksum> [-v] [--raw]"
+            run_benchmark "${words[@]:1:5}"
             ;;
         status)
             (( ${#words[@]} == 1 )) || die "usage: status"
             print_status
             ;;
         *)
-            die "usage: run <year> <day> <threads> <multiversion> <checksum> [-v] | status"
+            die "usage: run <year> <day> <threads> <multiversion> <checksum> [-v] [--raw] | status"
             ;;
     esac
 }

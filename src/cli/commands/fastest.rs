@@ -41,11 +41,7 @@ fn print_fastest(fastest: &[FastestResult], config_filter: &Config) -> io::Resul
                 config = config.without_key(kv.key());
             }
 
-            (
-                r.bench.as_str(),
-                config.to_string(),
-                r.stable_stats.median_run_mean_ns,
-            )
+            (r.bench.as_str(), config.to_string(), r.stable_stats.mean_ns)
         })
         .collect();
 

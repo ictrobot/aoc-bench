@@ -1,3 +1,4 @@
+import { MultimodalBadge } from "@/components/benchmarks/MultimodalBadge.tsx"
 import { useDeferredValue, useEffect, useId, useMemo } from "react"
 import { useUrlHostBenchmark, useUrlParam, useUrlFilters, useSetUrlParams } from "@/hooks/use-url-state.tsx"
 import { useCompactResults } from "@/hooks/queries.ts"
@@ -20,6 +21,8 @@ interface ImpactEntry {
   toMean: number
   relChange: number
   direction: "regression" | "improvement"
+  /** Either side's runs fell into more than one cluster, so its mean sits between modes */
+  multimodal: boolean
 }
 
 const validateThreshold = (v: string) => !isNaN(Number(v)) && Number(v) >= 0 && Number(v) <= 100
@@ -104,7 +107,11 @@ function ImpactContent({ host }: { host: string }) {
       const relChange = relativeChange(toResult.mean_ns, fromResult.mean_ns)
       if (relChange === null) continue
 
-      // Check CI overlap
+      // A side without an interval can never show a change, matching the Rust
+      if (fromResult.ci95_half_ns === null || toResult.ci95_half_ns === null) {
+        unchanged++
+        continue
+      }
       const fromLow = fromResult.mean_ns - fromResult.ci95_half_ns
       const fromHigh = fromResult.mean_ns + fromResult.ci95_half_ns
       const toLow = toResult.mean_ns - toResult.ci95_half_ns
@@ -127,6 +134,7 @@ function ImpactContent({ host }: { host: string }) {
         toMean: toResult.mean_ns,
         relChange: Math.abs(relChange),
         direction: relChange > 0 ? "regression" : "improvement",
+        multimodal: fromResult.multimodal || toResult.multimodal,
       }
 
       if (relChange > 0) {
@@ -334,10 +342,13 @@ function ImpactTable({
         cellClassName: "text-right",
         compare: (a: ImpactRow, b: ImpactRow) => a.relChange - b.relChange,
         render: (row: ImpactRow) => (
-          <span className={row.direction === "regression" ? "text-destructive" : "text-improvement"}>
-            {row.direction === "regression" ? "+" : "-"}
-            {(row.relChange * 100).toFixed(2)}%
-          </span>
+          <>
+            <span className={row.direction === "regression" ? "text-destructive" : "text-improvement"}>
+              {row.direction === "regression" ? "+" : "-"}
+              {(row.relChange * 100).toFixed(2)}%
+            </span>
+            {row.multimodal && <MultimodalBadge className="ml-2 font-sans text-xs text-muted-foreground" />}
+          </>
         ),
       },
     ],

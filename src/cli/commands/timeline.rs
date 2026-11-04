@@ -81,8 +81,8 @@ fn print_timeline(timeline: &TimelineSummary) -> io::Result<()> {
         out,
         "{:<max_comparison_key_len$} {:>DURATION_WIDTH$} {:>DURATION_WIDTH$} {:>DELTA_WIDTH$} INITIAL",
         timeline.initial.comparison_value.value_name(),
-        format_duration_ns(timeline.initial.stats.median_run_mean_ns),
-        format_ci(timeline.initial.stats.median_run_ci95_half_ns),
+        format_duration_ns(timeline.initial.stats.mean_ns),
+        format_ci(timeline.initial.stats.ci95_half_ns),
         "--",
     )?;
 
@@ -91,8 +91,8 @@ fn print_timeline(timeline: &TimelineSummary) -> io::Result<()> {
             out,
             "{:<max_comparison_key_len$} {:>DURATION_WIDTH$} {:>DURATION_WIDTH$} {:>DELTA_WIDTH$} {}",
             point.comparison_value.value_name(),
-            format_duration_ns(point.stats.median_run_mean_ns),
-            format_ci(point.stats.median_run_ci95_half_ns),
+            format_duration_ns(point.stats.mean_ns),
+            format_ci(point.stats.ci95_half_ns),
             format_delta(*change),
             change.direction,
         )?;

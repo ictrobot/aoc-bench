@@ -2,6 +2,7 @@ import React, { useLayoutEffect, useMemo, useRef, useState } from "react"
 import { formatCi, formatDurationNs, shortenValue } from "@/lib/format.ts"
 import type { TimelineResultGroup } from "@/lib/timeline-grouping.ts"
 import { GroupValueLabel } from "@/components/config/GroupValueLabel.tsx"
+import { MultimodalBadge } from "@/components/benchmarks/MultimodalBadge.tsx"
 
 export type TimelineChartGroup = TimelineResultGroup & {
   color: string
@@ -69,7 +70,7 @@ export function StepTimelineChart({
       slots += group.caseCount
     })
     let dataMax = 0
-    for (const g of groups) dataMax = Math.max(dataMax, g.mean_ns + g.ci95_half_ns)
+    for (const g of groups) dataMax = Math.max(dataMax, g.mean_ns + (g.ci95_half_ns ?? 0))
     const yMax = dataMax * 1.05 || 1
     return { groupStartSlot, slotToGroup, slots, yMax }
   }, [groups])
@@ -84,7 +85,7 @@ export function StepTimelineChart({
   const paths = useMemo(() => {
     if (plotWidth <= 0 || groups.length === 0) return null
     let line = `M ${x(0)} ${y(groups[0].mean_ns)}`
-    let bandTop = `M ${x(0)} ${y(groups[0].mean_ns + groups[0].ci95_half_ns)}`
+    let bandTop = `M ${x(0)} ${y(groups[0].mean_ns + (groups[0].ci95_half_ns ?? 0))}`
     let bandBottom = ""
     groups.forEach((group, i) => {
       const endX = x(layout.groupStartSlot[i] + group.caseCount)
@@ -93,7 +94,7 @@ export function StepTimelineChart({
       const next = groups[i + 1]
       if (next) {
         if (next.mean_ns !== group.mean_ns) line += ` V ${y(next.mean_ns)}`
-        bandTop += ` V ${y(next.mean_ns + next.ci95_half_ns)}`
+        bandTop += ` V ${y(next.mean_ns + (next.ci95_half_ns ?? 0))}`
       }
     })
     for (let i = groups.length - 1; i >= 0; i--) {
@@ -101,7 +102,7 @@ export function StepTimelineChart({
       const startX = x(layout.groupStartSlot[i])
       const endX = x(layout.groupStartSlot[i] + group.caseCount)
       // a CI half-width larger than the mean must not extend below the axis
-      const yLow = y(Math.max(0, group.mean_ns - group.ci95_half_ns))
+      const yLow = y(Math.max(0, group.mean_ns - (group.ci95_half_ns ?? 0)))
       bandBottom += ` L ${endX} ${yLow} H ${startX}`
     }
     return { line, band: `${bandTop}${bandBottom} Z` }
@@ -390,7 +391,14 @@ export function StepTimelineChart({
           ))}
           <div>
             Mean: {formatDurationNs(hoverGroup.mean_ns)}
-            <span className="text-muted-foreground"> {formatCi(hoverGroup.ci95_half_ns)}</span>
+            <span className="text-muted-foreground">
+              {" "}
+              {hoverGroup.ci95_half_ns === null ? "(no interval)" : formatCi(hoverGroup.ci95_half_ns)}
+            </span>
+          </div>
+          <div className="text-muted-foreground">
+            Runs: {hoverGroup.run_count}
+            {hoverGroup.multimodal && <MultimodalBadge className="ml-2 font-sans text-xs" />}
           </div>
           {hoverGroup.delta !== null && (
             <div className="text-muted-foreground">

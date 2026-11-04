@@ -47,7 +47,7 @@ impl StatsEngine {
         }
         writeln!(
             writer,
-            "\tstable_timestamp\tstable_measurement_id\tmedian_run_mean_ns\tmedian_run_ci95_half_ns"
+            "\tstable_timestamp\tstable_measurement_id\trun_count\tmean_ns\tci95_half_ns\tmultimodal"
         )
         .map_err(StatsEngineError::OutputError)?;
 
@@ -65,13 +65,20 @@ impl StatsEngine {
                 write!(writer, "\t{value}")?;
             }
 
+            let stats = &row.stable_stats;
             writeln!(
                 writer,
-                "\t{}\t{}\t{}\t{}",
+                "\t{}\t{}\t{}\t{}\t{}\t{}",
                 row.row.stable_measurement_timestamp.as_second(),
                 row.stable_measurement_id,
-                row.stable_stats.median_run_mean_ns,
-                row.stable_stats.median_run_ci95_half_ns
+                stats.run_count,
+                stats.mean_ns,
+                stats
+                    .ci95_half_ns
+                    .map_or(String::new(), |ci| ci.to_string()),
+                stats
+                    .multimodal
+                    .map_or(String::new(), |m| u8::from(m).to_string()),
             )?;
 
             Ok(())
@@ -119,9 +126,7 @@ impl StatsEngine {
                                     stable_stats: row.stable_stats,
                                 });
 
-                        if row.stable_stats.median_run_mean_ns
-                            < entry.stable_stats.median_run_mean_ns
-                        {
+                        if row.stable_stats.mean_ns < entry.stable_stats.mean_ns {
                             *entry = FastestResult {
                                 bench: row.row.bench.clone(),
                                 config: row.row.config.clone(),
@@ -519,23 +524,24 @@ mod tests {
                 .config_from_string(&format!("build={build},host={host}"))
                 .unwrap(),
             timestamp: jiff::Timestamp::from_second(i64::from(ts)).unwrap(),
-            runs: vec![Run {
-                timestamp: jiff::Timestamp::from_second(i64::from(ts) + 1).unwrap(),
-                stats: StatsResult {
-                    mean_ns_per_iter: 10.0 + f64::from(ts),
-                    ci95_half_width_ns: 1.0,
-                    mode: EstimationMode::PerIter,
-                    intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
-                    samples: vec![Sample {
-                        iters: 10,
-                        total_ns: 100,
-                    }],
-                },
-                warmup: None,
-                power: None,
-            }],
+            runs: vec![
+                Run {
+                    timestamp: jiff::Timestamp::from_second(i64::from(ts) + 1).unwrap(),
+                    stats: StatsResult {
+                        mean_ns_per_iter: 10.0 + f64::from(ts),
+                        se_ns: None,
+                        mode: EstimationMode::PerIter,
+                        intercept_ns: None,
+                        samples: vec![Sample {
+                            iters: 10,
+                            total_ns: 100,
+                        }],
+                    },
+                    warmup: None,
+                    power: None,
+                };
+                2
+            ],
             checksum: None,
         };
 
@@ -593,23 +599,24 @@ mod tests {
                 .config_from_string(&format!("commit={commit},threads={threads},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(ts).unwrap(),
-            runs: vec![Run {
-                timestamp: Timestamp::from_second(ts + 1).unwrap(),
-                stats: StatsResult {
-                    mean_ns_per_iter: mean,
-                    ci95_half_width_ns: 1.0,
-                    mode: EstimationMode::PerIter,
-                    intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
-                    samples: vec![Sample {
-                        iters: 10,
-                        total_ns: 100,
-                    }],
-                },
-                warmup: None,
-                power: None,
-            }],
+            runs: vec![
+                Run {
+                    timestamp: Timestamp::from_second(ts + 1).unwrap(),
+                    stats: StatsResult {
+                        mean_ns_per_iter: mean,
+                        se_ns: None,
+                        mode: EstimationMode::PerIter,
+                        intercept_ns: None,
+                        samples: vec![Sample {
+                            iters: 10,
+                            total_ns: 100,
+                        }],
+                    },
+                    warmup: None,
+                    power: None,
+                };
+                2
+            ],
             checksum: None,
         };
 
@@ -655,13 +662,40 @@ mod tests {
         assert_eq!(
             lines.next(),
             Some(
-                "host\tbench\tcfg_build\tstable_timestamp\tstable_measurement_id\tmedian_run_mean_ns\tmedian_run_ci95_half_ns"
+                "host\tbench\tcfg_build\tstable_timestamp\tstable_measurement_id\trun_count\tmean_ns\tci95_half_ns\tmultimodal"
             )
         );
         for expected in [
-            ["h1", "bench", "x", "1700000000", "1700000010", "1"],
-            ["h1", "bench", "y", "1700000100", "1700000110", "1"],
-            ["h1", "bench2", "x", "1700000200", "1700000210", "1"],
+            [
+                "h1",
+                "bench",
+                "x",
+                "1700000000",
+                "2",
+                "1700000010",
+                "0",
+                "0",
+            ],
+            [
+                "h1",
+                "bench",
+                "y",
+                "1700000100",
+                "2",
+                "1700000110",
+                "0",
+                "0",
+            ],
+            [
+                "h1",
+                "bench2",
+                "x",
+                "1700000200",
+                "2",
+                "1700000210",
+                "0",
+                "0",
+            ],
         ] {
             let fields: Vec<_> = lines.next().unwrap().split('\t').collect();
             assert_eq!(&fields[..4], &expected[..4]);
@@ -688,11 +722,7 @@ mod tests {
             .collect();
         assert_eq!(values, vec!["x", "y"]);
 
-        let means: Vec<f64> = timeline
-            .points
-            .iter()
-            .map(|p| p.stats.median_run_mean_ns)
-            .collect();
+        let means: Vec<f64> = timeline.points.iter().map(|p| p.stats.mean_ns).collect();
         assert_eq!(means, vec![1_700_000_010.0, 1_700_000_110.0]);
     }
 
@@ -734,23 +764,24 @@ mod tests {
                 .config_from_string(&format!("build={build},commit={commit},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(i64::from(ts)).unwrap(),
-            runs: vec![Run {
-                timestamp: Timestamp::from_second(i64::from(ts) + 1).unwrap(),
-                stats: StatsResult {
-                    mean_ns_per_iter: f64::from(ts),
-                    ci95_half_width_ns: 1.0,
-                    mode: EstimationMode::PerIter,
-                    intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
-                    samples: vec![Sample {
-                        iters: 10,
-                        total_ns: 100,
-                    }],
-                },
-                warmup: None,
-                power: None,
-            }],
+            runs: vec![
+                Run {
+                    timestamp: Timestamp::from_second(i64::from(ts) + 1).unwrap(),
+                    stats: StatsResult {
+                        mean_ns_per_iter: f64::from(ts),
+                        se_ns: None,
+                        mode: EstimationMode::PerIter,
+                        intercept_ns: None,
+                        samples: vec![Sample {
+                            iters: 10,
+                            total_ns: 100,
+                        }],
+                    },
+                    warmup: None,
+                    power: None,
+                };
+                2
+            ],
             checksum: None,
         };
 
@@ -809,23 +840,24 @@ mod tests {
                 .config_from_string(&format!("build={build},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(ts).unwrap(),
-            runs: vec![Run {
-                timestamp: Timestamp::from_second(ts + 1).unwrap(),
-                stats: StatsResult {
-                    mean_ns_per_iter: mean,
-                    ci95_half_width_ns: 1.0,
-                    mode: EstimationMode::PerIter,
-                    intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
-                    samples: vec![Sample {
-                        iters: 10,
-                        total_ns: 100,
-                    }],
-                },
-                warmup: None,
-                power: None,
-            }],
+            runs: vec![
+                Run {
+                    timestamp: Timestamp::from_second(ts + 1).unwrap(),
+                    stats: StatsResult {
+                        mean_ns_per_iter: mean,
+                        se_ns: None,
+                        mode: EstimationMode::PerIter,
+                        intercept_ns: None,
+                        samples: vec![Sample {
+                            iters: 10,
+                            total_ns: 100,
+                        }],
+                    },
+                    warmup: None,
+                    power: None,
+                };
+                2
+            ],
             checksum: None,
         };
 
@@ -943,11 +975,11 @@ mod tests {
 
         assert_eq!(fastest[0].bench, bench);
         assert_eq!(fastest[0].config.to_string(), "build=x,host=h1");
-        assert!((fastest[0].stable_stats.median_run_mean_ns - 1_700_000_010.0).abs() < 1e-4);
+        assert!((fastest[0].stable_stats.mean_ns - 1_700_000_010.0).abs() < 1e-4);
 
         assert_eq!(fastest[1].bench, bench2);
         assert_eq!(fastest[1].config.to_string(), "build=x,host=h1");
-        assert!((fastest[1].stable_stats.median_run_mean_ns - 1_700_000_210.0).abs() < 1e-4);
+        assert!((fastest[1].stable_stats.mean_ns - 1_700_000_210.0).abs() < 1e-4);
     }
 
     #[test]

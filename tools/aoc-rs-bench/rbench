@@ -3,8 +3,8 @@
 #
 # The puzzle's binary is built here with the same pipeline the host uses for its own builds, checked locally for
 # the expected answers, then pushed with its input over SSH to the host's aoc-bench-rbench command. The host pauses
-# its regular benchmarks, runs the binary under aoc-bench without recording anything and streams the run series
-# back, which is printed like the local bench alias does. The host resumes its regular benchmarks a few minutes
+# its regular benchmarks, runs the binary under aoc-bench without recording anything and streams back the summary
+# text aoc-bench prints, or the run series JSON with --raw. The host resumes its regular benchmarks a few minutes
 # after the last push.
 #
 # Nothing on the host is read from or written to the checkout. Uncommitted and untracked changes are built.
@@ -21,9 +21,9 @@ options:
   --profile <p>     build profile, generic or native (default \$RBENCH_PROFILE or generic)
   --checkout <dir>  aoc-rs checkout (default \$RBENCH_CHECKOUT or ~/aoc-rs)
   --host <host>     ssh destination (default \$RBENCH_HOST or aoc-bench-rbench)
-  --raw             print the run series JSON instead of a summary
+  --raw             print the run series JSON instead of the summary
   --status          print the host's status and exit
-  -v, --verbose     show progress from here and the host
+  -v, --verbose     show progress from here and the host, and list each run under the summary
   -h, --help        show this help
 
 environment:
@@ -135,47 +135,14 @@ if [[ "$threads" != "1" && "$threads" != "n" && "$check_multithreading" != "true
     exit 1
 fi
 
-format_series() {
-    if (( raw )); then
-        cat
-        return
-    fi
-    jq -r '
-        def fixed2:
-            (. * 100 | round) as $n
-            | "\(($n / 100) | floor).\($n % 100 | tostring | if length < 2 then "0" + . else . end)";
-        def duration:
-            if . >= 1000000000 then (. / 1000000000 | fixed2) + " s"
-            elif . >= 1000000 then (. / 1000000 | fixed2) + " ms"
-            elif . >= 1000 then (. / 1000 | fixed2) + " µs"
-            else "\(round) ns"
-            end;
-
-        . as $series
-        | ($series.runs | length) as $run_count
-        | ($series.runs[($run_count / 2 | floor)].mean_ns_per_iter) as $median_mean
-        | ($series.runs
-            | sort_by(.timestamp)
-            | to_entries[]
-            | .key as $index
-            | .value
-            | "  run \($index + 1): \(.mean_ns_per_iter | duration)/iter "
-                + "±\(.ci95_half_width_ns / .mean_ns_per_iter * 100 | fixed2)% "
-                + "(\(.samples | length) samples, \(.outlier_count) outliers)"
-                + if .mean_ns_per_iter == $median_mean then " *" else "" end),
-          "  \($median_mean / 1000 | fixed2) µs/iter "
-            + "±\(($series.runs[($run_count / 2 | floor)].ci95_half_width_ns
-                / $median_mean * 100) | fixed2)%"
-            + if $run_count == 1 then "" else " (median of \($run_count) runs)" end
-    '
-}
-
 log "pushing $year-$day threads=$threads multiversion=$multiversion to $host..."
 remote=(run "$year" "$day" "$threads" "$multiversion" "$checksum")
 if (( verbose )); then
     remote+=(-v)
 fi
+if (( raw )); then
+    remote+=(--raw)
+fi
 tar -C "$work_dir" -cf - bench input.txt \
     | zstd -q -3 \
-    | ssh -o BatchMode=yes -- "$host" "${remote[@]}" \
-    | format_series
+    | ssh -o BatchMode=yes -- "$host" "${remote[@]}"

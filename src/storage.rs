@@ -15,6 +15,7 @@
 use crate::config::{BenchmarkId, Config, ConfigFile, KeyValue};
 use crate::measurement::Measurement;
 use crate::run::RunSeries;
+use crate::stats::RunSummary;
 use crate::workload::WorkloadIdentity;
 use jiff::Timestamp;
 use std::fmt::Debug;
@@ -266,13 +267,13 @@ pub struct WorkloadMeta {
     pub group_spec_digest: Option<crate::workload::Sha256>,
 }
 
-/// A measurement row to insert, plus its median-run summary.
+/// A measurement row to insert, plus its run summary. Rows inserted through this always carry the
+/// current measurement schema version; only the v1 migration writes earlier versions.
 #[derive(Debug, Clone)]
 pub struct MeasurementRecord {
     pub measurement_id: MeasurementId,
     pub workload_id: WorkloadId,
     pub timestamp: Timestamp,
-    pub schema_version: u32,
     pub stats: MeasurementStats,
     pub checksum: Option<String>,
 }
@@ -302,35 +303,43 @@ pub struct ResultsRowWithStats {
 }
 
 /// Summary statistics stored for one measurement.
+///
+/// For run-summary rows (measurement schema 3) `mean_ns` is the mean over runs and
+/// `ci95_half_ns` the t-interval half-width over them, `None` for a single run. Legacy rows
+/// (schema 1 and 2) carry the median run's mean, have no interval (their within-run bootstrap
+/// half-width was dropped by migration 05), and have no `multimodal` flag.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeasurementStats {
     pub run_count: usize,
-    pub median_run_mean_ns: f64,
-    pub median_run_ci95_half_ns: f64,
-    pub median_run_outlier_count: usize,
-    pub median_run_sample_count: usize,
+    pub mean_ns: f64,
+    /// `None` where there is no interval: a single run, or a legacy row
+    pub ci95_half_ns: Option<f64>,
+    /// `None` for legacy rows
+    pub multimodal: Option<bool>,
 }
 
 impl MeasurementStats {
-    /// Calculate confidence interval bounds for the mean.
+    /// Interval bounds for the mean, `None` for a measurement without an interval.
     #[must_use]
-    pub fn bounds(&self) -> (f64, f64) {
-        (
-            self.median_run_mean_ns - self.median_run_ci95_half_ns,
-            self.median_run_mean_ns + self.median_run_ci95_half_ns,
-        )
+    pub fn bounds(&self) -> Option<(f64, f64)> {
+        let half = self.ci95_half_ns?;
+        Some((self.mean_ns - half, self.mean_ns + half))
     }
 }
 
 impl From<&RunSeries> for MeasurementStats {
     fn from(series: &RunSeries) -> Self {
-        let stats = series.median_stats();
+        Self::from(series.summary())
+    }
+}
+
+impl From<RunSummary> for MeasurementStats {
+    fn from(summary: RunSummary) -> Self {
         Self {
-            run_count: series.runs.len(),
-            median_run_mean_ns: stats.mean_ns_per_iter,
-            median_run_ci95_half_ns: stats.ci95_half_width_ns,
-            median_run_outlier_count: stats.outlier_count,
-            median_run_sample_count: stats.samples.len(),
+            run_count: summary.run_count,
+            mean_ns: summary.mean_ns,
+            ci95_half_ns: summary.ci95_half_ns,
+            multimodal: Some(summary.multimodal),
         }
     }
 }
@@ -342,7 +351,5 @@ pub struct MeasurementHistoryRow {
     pub measurement_id: MeasurementId,
     pub is_shared: bool,
     pub timestamp: Timestamp,
-    pub median_run_mean_ns: f64,
-    pub median_run_ci95_half_ns: f64,
-    pub run_count: usize,
+    pub stats: MeasurementStats,
 }

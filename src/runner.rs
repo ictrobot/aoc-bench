@@ -8,7 +8,7 @@ use crate::protocol::{
 };
 use crate::rapl::{PackagePower, RaplError};
 use crate::run::{PowerSummary, Run, RunSeries};
-use crate::stats::{Sample, StatsAccumulator, StatsError, StatsOptions, StatsState};
+use crate::stats::{Sample, StatsAccumulator, StatsOptions, StatsState};
 use crate::warmup::{Batch, PowerBand, PowerSource, Warmup, WarmupError};
 use jiff::Timestamp;
 use std::io;
@@ -109,15 +109,15 @@ impl Runner {
             .is_some_and(|stop| stop.load(Ordering::Relaxed))
     }
 
-    /// Execute a complete run series (fixed 3 runs) with no retries on timeout
+    /// Execute a complete run series (a fixed `runs_per_series` runs) with no retries on
+    /// timeout
     ///
-    /// Returns a `RunSeries` containing all runs sorted by mean, with median statistics.
+    /// Returns a `RunSeries` containing all runs sorted by mean.
     #[tracing::instrument(skip(self))]
     pub fn run_series(&self) -> Result<RunSeries, RunError> {
         let series_start = Timestamp::now();
 
         let run_count = self.stats.runs_per_series.get();
-        assert!(!run_count.is_multiple_of(2));
 
         info!(
             config = %self.benchmark_config,
@@ -195,30 +195,25 @@ impl Runner {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Extract median run statistics (middle run after sorting)
-        let median_idx = runs.len() / 2;
-        let median_mean_ns_per_iter = runs[median_idx].stats.mean_ns_per_iter;
-        let median_ci95_half_width_ns = runs[median_idx].stats.ci95_half_width_ns;
-        let median_run_outlier_count = runs[median_idx].stats.outlier_count;
-        let median_run_sample_count = runs[median_idx].stats.samples.len();
-
-        info!(
-            median_run_mean_ns = median_mean_ns_per_iter,
-            median_run_ci95_ns = median_ci95_half_width_ns,
-            median_run_outliers = median_run_outlier_count,
-            median_run_samples = median_run_sample_count,
-            runs = run_count,
-            "completed run series"
-        );
-
-        Ok(RunSeries {
+        let series = RunSeries {
             schema: 1,
             bench: self.benchmark_id.clone(),
             config: self.benchmark_config.clone(),
             timestamp: series_start,
             runs,
             checksum: self.expected_checksum.clone(),
-        })
+        };
+
+        let summary = series.summary();
+        info!(
+            mean_ns = summary.mean_ns,
+            ci95_half_ns = summary.ci95_half_ns,
+            runs = summary.run_count,
+            multimodal = summary.multimodal,
+            "completed run series"
+        );
+
+        Ok(series)
     }
 
     /// Execute a single benchmark run
@@ -250,11 +245,6 @@ impl Runner {
         loop {
             // Check timeout
             if start_instant.elapsed() > Duration::from_nanos(self.stats.run_timeout_ns.get()) {
-                // Return the existing data if the accumulator has sufficient samples
-                if let StatsState::MoreSamplesOptional = stats.state() {
-                    break;
-                }
-
                 return Err(RunError::Timeout {
                     timeout: Duration::from_nanos(self.stats.run_timeout_ns.get()),
                 });
@@ -316,12 +306,8 @@ impl Runner {
                     if let Some(monitor) = &mut power {
                         monitor.observe()?;
                     }
-                    match stats.add_sample(sample.iters, sample.total_ns) {
-                        StatsState::MoreSamplesRequired | StatsState::MoreSamplesOptional => {}
-                        StatsState::Abort(err) => {
-                            return Err(RunError::StatsFailed(err));
-                        }
-                        StatsState::Done => break,
+                    if stats.add_sample(sample.iters, sample.total_ns) == StatsState::Done {
+                        break;
                     }
                 }
                 Err(e) => {
@@ -448,8 +434,6 @@ pub enum RunError {
     PrematureEof,
     #[error("checksum validation failed: {0}")]
     InvalidChecksum(ParseError),
-    #[error("statistics collection failed: {0}")]
-    StatsFailed(StatsError),
     #[error("failed to open package power counter: {0}")]
     PackagePower(#[from] RaplError),
     #[error("warmup failed: {0}")]
@@ -714,7 +698,7 @@ mod tests {
         // Verify all fields are properly populated
         let mut result = result.unwrap();
         assert!((result.stats.mean_ns_per_iter - 20_000.0).abs() < 0.001);
-        assert!((result.stats.ci95_half_width_ns - 0.0).abs() < 0.001); // Can be 0 for identical samples
+        assert!((result.stats.se_ns.unwrap() - 0.0).abs() < 0.001); // Identical samples
         assert_eq!(result.stats.mode, EstimationMode::PerIter);
         assert!(result.stats.intercept_ns.is_none());
         assert!(result.stats.samples.iter().all(|s| matches!(
@@ -746,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_runner_respects_runs_per_series_override() {
-        for runs in [1, 5, 9] {
+        for runs in [1, 2, 9] {
             let tmp_dir = TempDir::new().unwrap();
             let stats = StatsOptions {
                 runs_per_series: NonZeroUsize::new(runs).unwrap(),

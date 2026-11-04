@@ -1,5 +1,5 @@
 use crate::config::{BenchmarkId, Config, ConfigError, ConfigFile, Key, KeyValue};
-use crate::measurement::Measurement;
+use crate::measurement::{MEASUREMENT_SCHEMA, Measurement};
 use crate::storage::measurement_id::MeasurementId;
 use crate::storage::{
     CaseId, MeasurementHistoryRow, MeasurementRecord, MeasurementStats, PerHostStorage, ResultsRow,
@@ -191,7 +191,20 @@ impl HybridDiskStorage {
         Ok(conn)
     }
 
+    /// Apply pending migrations, each in its own transaction, then vacuum if any were applied.
+    /// Foreign keys are off throughout so a migration can rebuild a referenced table, and each
+    /// migration is checked for dangling references before it commits.
     fn run_migrations(&self, conn: &mut Connection) -> Result<(), HybridDiskError> {
+        conn.pragma_update(None, "foreign_keys", false)?;
+        let result = self.run_migrations_without_foreign_keys(conn);
+        conn.pragma_update(None, "foreign_keys", true)?;
+        result
+    }
+
+    fn run_migrations_without_foreign_keys(
+        &self,
+        conn: &mut Connection,
+    ) -> Result<(), HybridDiskError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -236,6 +249,17 @@ impl HybridDiskStorage {
                     version: next_version,
                     source: Box::new(source),
                 })?;
+            }
+            let violations: usize = txn
+                .prepare("PRAGMA foreign_key_check")?
+                .query([])?
+                .mapped(|_| Ok(()))
+                .count();
+            if violations > 0 {
+                return Err(HybridDiskError::MigrationForeignKeyViolation {
+                    version: next_version,
+                    violations,
+                });
             }
             txn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -361,12 +385,8 @@ impl StorageRead for HybridDiskStorage {
                     w.suspicious_count,
                     w.matched_count,
                     w.replaced_count,
-                    sm.run_count,
-                    sm.median_run_mean_ns, sm.median_run_ci95_half_ns,
-                    sm.median_run_outlier_count, sm.median_run_sample_count,
-                    lm.run_count,
-                    lm.median_run_mean_ns, lm.median_run_ci95_half_ns,
-                    lm.median_run_outlier_count, lm.median_run_sample_count,
+                    sm.run_count, sm.mean_ns, sm.ci95_half_ns, sm.multimodal,
+                    lm.run_count, lm.mean_ns, lm.ci95_half_ns, lm.multimodal,
                     sm.measurement_id,
                     w.executable_sha256 IS NOT NULL
              FROM cases c
@@ -388,22 +408,10 @@ impl StorageRead for HybridDiskStorage {
                         matched_count: row.get(3)?,
                         replaced_count: row.get(4)?,
                     },
-                    stable_stats: MeasurementStats {
-                        run_count: row.get(5)?,
-                        median_run_mean_ns: row.get(6)?,
-                        median_run_ci95_half_ns: row.get(7)?,
-                        median_run_outlier_count: row.get(8)?,
-                        median_run_sample_count: row.get(9)?,
-                    },
-                    last_stats: MeasurementStats {
-                        run_count: row.get(10)?,
-                        median_run_mean_ns: row.get(11)?,
-                        median_run_ci95_half_ns: row.get(12)?,
-                        median_run_outlier_count: row.get(13)?,
-                        median_run_sample_count: row.get(14)?,
-                    },
-                    stable_measurement_id: row.get(15)?,
-                    is_shared: row.get(16)?,
+                    stable_stats: stats_from_row(row, 5)?,
+                    last_stats: stats_from_row(row, 9)?,
+                    stable_measurement_id: row.get(13)?,
+                    is_shared: row.get(14)?,
                 })
             })
             .optional()?)
@@ -437,16 +445,8 @@ impl StorageRead for HybridDiskStorage {
                     w.suspicious_count AS suspicious_count,
                     w.matched_count AS matched_count,
                     w.replaced_count AS replaced_count,
-                    sm.run_count,
-                    sm.median_run_mean_ns,
-                    sm.median_run_ci95_half_ns,
-                    sm.median_run_outlier_count,
-                    sm.median_run_sample_count,
-                    lm.run_count,
-                    lm.median_run_mean_ns,
-                    lm.median_run_ci95_half_ns,
-                    lm.median_run_outlier_count,
-                    lm.median_run_sample_count,
+                    sm.run_count, sm.mean_ns, sm.ci95_half_ns, sm.multimodal,
+                    lm.run_count, lm.mean_ns, lm.ci95_half_ns, lm.multimodal,
                     sm.measurement_id,
                     w.executable_sha256 IS NOT NULL
              FROM cases c
@@ -476,26 +476,13 @@ impl StorageRead for HybridDiskStorage {
                 }
             }
 
-            let stable_stats = MeasurementStats {
-                run_count: row.get(7)?,
-                median_run_mean_ns: row.get(8)?,
-                median_run_ci95_half_ns: row.get(9)?,
-                median_run_outlier_count: row.get(10)?,
-                median_run_sample_count: row.get(11)?,
-            };
-
-            let last_stats = MeasurementStats {
-                run_count: row.get(12)?,
-                median_run_mean_ns: row.get(13)?,
-                median_run_ci95_half_ns: row.get(14)?,
-                median_run_outlier_count: row.get(15)?,
-                median_run_sample_count: row.get(16)?,
-            };
+            let stable_stats = stats_from_row(row, 7)?;
+            let last_stats = stats_from_row(row, 11)?;
 
             results.push(ResultsRowWithStats {
                 row: base_row,
-                stable_measurement_id: row.get(17)?,
-                is_shared: row.get(18)?,
+                stable_measurement_id: row.get(15)?,
+                is_shared: row.get(16)?,
                 stable_stats,
                 last_stats,
             });
@@ -517,7 +504,7 @@ impl StorageRead for HybridDiskStorage {
     ) -> Result<(), Self::Error> {
         let mut stmt = tx.prepare_cached(
             "SELECT c.config, m.measurement_id, w.executable_sha256 IS NOT NULL,
-                    m.timestamp, m.median_run_mean_ns, m.median_run_ci95_half_ns, m.run_count
+                    m.timestamp, m.run_count, m.mean_ns, m.ci95_half_ns, m.multimodal
              FROM measurement_cases mc
              JOIN measurements m ON m.measurement_id = mc.measurement_id
              JOIN workloads w ON w.workload_id = m.workload_id
@@ -544,9 +531,7 @@ impl StorageRead for HybridDiskStorage {
                 measurement_id: row.get(1)?,
                 is_shared: row.get(2)?,
                 timestamp: Self::sql_to_ts(row.get_ref(3)?)?,
-                median_run_mean_ns: row.get(4)?,
-                median_run_ci95_half_ns: row.get(5)?,
-                run_count: row.get(6)?,
+                stats: stats_from_row(row, 4)?,
             });
         }
 
@@ -863,20 +848,18 @@ impl Storage for HybridDiskStorage {
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO measurements
                  (measurement_id, workload_id, timestamp, schema_version,
-                  run_count, median_run_mean_ns, median_run_ci95_half_ns,
-                  median_run_outlier_count, median_run_sample_count, checksum)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  run_count, mean_ns, ci95_half_ns, multimodal, checksum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
         stmt.execute(params![
             record.measurement_id,
             record.workload_id.0,
             record.timestamp.as_second(),
-            record.schema_version,
+            MEASUREMENT_SCHEMA,
             record.stats.run_count,
-            record.stats.median_run_mean_ns,
-            record.stats.median_run_ci95_half_ns,
-            record.stats.median_run_outlier_count,
-            record.stats.median_run_sample_count,
+            record.stats.mean_ns,
+            record.stats.ci95_half_ns,
+            record.stats.multimodal,
             record.checksum,
         ])?;
         Ok(())
@@ -903,22 +886,24 @@ impl Storage for HybridDiskStorage {
         measurement_id: MeasurementId,
     ) -> Result<Option<MeasurementStats>, HybridDiskError> {
         let mut stmt = tx.prepare_cached(
-            "SELECT run_count, median_run_mean_ns, median_run_ci95_half_ns,
-                    median_run_outlier_count, median_run_sample_count
+            "SELECT run_count, mean_ns, ci95_half_ns, multimodal
              FROM measurements WHERE measurement_id = ?1",
         )?;
         Ok(stmt
-            .query_row(params![measurement_id], |row| {
-                Ok(MeasurementStats {
-                    run_count: row.get(0)?,
-                    median_run_mean_ns: row.get(1)?,
-                    median_run_ci95_half_ns: row.get(2)?,
-                    median_run_outlier_count: row.get(3)?,
-                    median_run_sample_count: row.get(4)?,
-                })
-            })
+            .query_row(params![measurement_id], |row| stats_from_row(row, 0))
             .optional()?)
     }
+}
+
+/// Read the summary columns `run_count, mean_ns, ci95_half_ns, multimodal` starting at column
+/// `offset`. `ci95_half_ns` is NULL where there is no interval, `multimodal` NULL on legacy rows.
+fn stats_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<MeasurementStats> {
+    Ok(MeasurementStats {
+        run_count: row.get(offset)?,
+        mean_ns: row.get(offset + 1)?,
+        ci95_half_ns: row.get(offset + 2)?,
+        multimodal: row.get(offset + 3)?,
+    })
 }
 
 pub(super) fn parse_ts(seconds: i64, table: &'static str) -> Result<Timestamp, HybridDiskError> {
@@ -998,6 +983,8 @@ pub enum HybridDiskError {
         #[source]
         source: Box<HybridDiskError>,
     },
+    #[error("migration {version:?} left {violations} foreign key violations, rolled back")]
+    MigrationForeignKeyViolation { version: usize, violations: usize },
     #[error("failed to vacuum database after migration {version:?}: {source}")]
     MigrationVacuumError {
         version: usize,
@@ -1068,14 +1055,23 @@ mod tests {
     }
 
     fn open_v1_database(path: &Path) -> Connection {
+        open_database_at(path, 3)
+    }
+
+    /// Open a database with only the first `migrations` migrations applied, running their SQL
+    /// only. Migration 03's Rust step folds v1 rows, of which a fresh database has none.
+    fn open_database_at(path: &Path, migrations: usize) -> Connection {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_migrations
                  (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL DEFAULT (unixepoch()));",
         )
         .unwrap();
-        for (version, migration) in MIGRATIONS.iter().take(3).enumerate() {
-            assert!(migration.apply.is_none());
+        for (version, migration) in MIGRATIONS.iter().take(migrations).enumerate() {
+            assert!(
+                migration.apply.is_none() || version == 3,
+                "migration {version} has a Rust step"
+            );
             conn.execute_batch(migration.sql).unwrap();
             conn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -1096,11 +1092,9 @@ mod tests {
                 timestamp: Timestamp::from_second(1_700_000_001).unwrap(),
                 stats: StatsResult {
                     mean_ns_per_iter: 30_000.0,
-                    ci95_half_width_ns: 300.0,
+                    se_ns: None,
                     mode: EstimationMode::PerIter,
                     intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
                     samples: vec![Sample {
                         iters: 10,
                         total_ns: 300_000,
@@ -1218,7 +1212,7 @@ mod tests {
                 assert_eq!(r.row.last_measurement_timestamp, series.timestamp);
                 assert_eq!(r.stable_measurement_id, measurement_id);
                 assert!(!r.is_shared);
-                assert!((r.stable_stats.median_run_mean_ns - 30_000.0).abs() < 1e-6);
+                assert!((r.stable_stats.mean_ns - 30_000.0).abs() < 1e-6);
                 Ok(())
             })
             .unwrap();
@@ -1440,11 +1434,10 @@ mod tests {
 
     fn op_stats(mean: f64) -> MeasurementStats {
         MeasurementStats {
-            run_count: 3,
-            median_run_mean_ns: mean,
-            median_run_ci95_half_ns: 1.0,
-            median_run_outlier_count: 0,
-            median_run_sample_count: 32,
+            run_count: 9,
+            mean_ns: mean,
+            ci95_half_ns: Some(1.0),
+            multimodal: Some(false),
         }
     }
 
@@ -1540,7 +1533,6 @@ mod tests {
                         measurement_id: measurement,
                         workload_id: workload,
                         timestamp: Timestamp::from_second(100).unwrap(),
-                        schema_version: 2,
                         stats: op_stats(1000.0),
                         checksum: None,
                     },
@@ -1595,7 +1587,6 @@ mod tests {
                             measurement_id: m,
                             workload_id: workload,
                             timestamp: Timestamp::from_second(1).unwrap(),
-                            schema_version: 2,
                             stats: op_stats(1.0),
                             checksum: None,
                         },
@@ -1628,7 +1619,6 @@ mod tests {
                         measurement_id: other_measurement,
                         workload_id: other_workload,
                         timestamp: Timestamp::from_second(2).unwrap(),
-                        schema_version: 2,
                         stats: op_stats(2.0),
                         checksum: None,
                     },
@@ -1723,6 +1713,114 @@ mod tests {
     }
 
     #[test]
+    fn run_summary_migration_keeps_legacy_rows() {
+        let (dir, storage) = temp_storage("pi5");
+        let db_path = dir.path().join(RESULTS_DIR).join("pi5").join(DB_FILE);
+
+        // Seed a median-run summary row as migration 04 left it
+        let measurement_id = MeasurementId::new_v7();
+        {
+            let conn = open_database_at(&db_path, 5);
+            conn.execute(
+                "INSERT INTO workloads (workload_id, workload_sha256, benchmark, group_spec)
+                 VALUES (1, 'sha', '2015-04', '{}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO measurements (measurement_id, workload_id, timestamp, schema_version,
+                     run_count, median_run_mean_ns, median_run_ci95_half_ns,
+                     median_run_outlier_count, median_run_sample_count, checksum)
+                 VALUES (?1, 1, 100, 2, 3, 1000.0, 5.0, 1, 32, NULL)",
+                params![measurement_id],
+            )
+            .unwrap();
+        }
+
+        // Opening the storage runs migration 05, which renames the columns in place
+        storage
+            .read_transaction(|tx| {
+                let migration_version: i64 =
+                    tx.query_one("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                        r.get(0)
+                    })?;
+                assert_eq!(migration_version, 5);
+                // The legacy bootstrap half-width is dropped: it was not a run interval
+                let stats = storage.get_measurement_stats(tx, measurement_id)?.unwrap();
+                assert_eq!(
+                    stats,
+                    MeasurementStats {
+                        run_count: 3,
+                        mean_ns: 1000.0,
+                        ci95_half_ns: None,
+                        multimodal: None,
+                    }
+                );
+                let stored_half: Option<f64> = tx.query_one(
+                    "SELECT ci95_half_ns FROM measurements WHERE measurement_id = ?1",
+                    params![measurement_id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(stored_half, None);
+                let dropped: i64 = tx.query_one(
+                    "SELECT COUNT(*) FROM pragma_table_info('measurements')
+                     WHERE name IN ('median_run_outlier_count', 'median_run_sample_count')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(dropped, 0);
+                Ok(())
+            })
+            .unwrap();
+
+        // A new row stores the run summary; a single run has no interval and is stored as NULL,
+        // while a genuine zero-width interval is stored as 0
+        storage
+            .write_transaction(|tx| {
+                let one_run = MeasurementId::new_v7();
+                storage.insert_measurement(
+                    tx,
+                    &MeasurementRecord {
+                        measurement_id: one_run,
+                        workload_id: WorkloadId(1),
+                        timestamp: Timestamp::from_second(200).unwrap(),
+                        stats: MeasurementStats {
+                            run_count: 1,
+                            mean_ns: 1010.0,
+                            ci95_half_ns: None,
+                            multimodal: Some(false),
+                        },
+                        checksum: None,
+                    },
+                )?;
+                let stats = storage.get_measurement_stats(tx, one_run)?.unwrap();
+                assert_eq!(stats.ci95_half_ns, None);
+                assert_eq!(stats.multimodal, Some(false));
+
+                let identical = MeasurementId::new_v7();
+                storage.insert_measurement(
+                    tx,
+                    &MeasurementRecord {
+                        measurement_id: identical,
+                        workload_id: WorkloadId(1),
+                        timestamp: Timestamp::from_second(300).unwrap(),
+                        stats: MeasurementStats {
+                            run_count: 9,
+                            mean_ns: 1000.0,
+                            ci95_half_ns: Some(0.0),
+                            multimodal: Some(false),
+                        },
+                        checksum: None,
+                    },
+                )?;
+                let stats = storage.get_measurement_stats(tx, identical)?.unwrap();
+                assert_eq!(stats.ci95_half_ns, Some(0.0));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn v1_migration_folds_rows_on_open() {
         let (dir, storage) = temp_storage("pi5");
         let db_path = dir.path().join(RESULTS_DIR).join("pi5").join(DB_FILE);
@@ -1775,7 +1873,7 @@ mod tests {
                     tx.query_one("SELECT MAX(version) FROM schema_migrations", [], |r| {
                         r.get(0)
                     })?;
-                assert_eq!(migration_version, 4);
+                assert_eq!(migration_version, 5);
                 let free_pages: i64 = tx.query_one("PRAGMA freelist_count", [], |r| r.get(0))?;
                 assert_eq!(free_pages, 0);
                 // The case's result points at the migrated isolated workload with copied counters.
@@ -1791,7 +1889,7 @@ mod tests {
             })
             .unwrap();
 
-        // Reopening at migration 04 is idempotent and does not duplicate the backfill.
+        // Reopening at the latest migration is idempotent and does not duplicate the backfill.
         drop(storage);
         let storage = storage_at(dir.path(), "pi5");
         storage

@@ -44,8 +44,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
@@ -78,8 +94,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
@@ -96,8 +128,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 90,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
@@ -133,7 +181,15 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&f_build=fast`] })
@@ -151,7 +207,15 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(
@@ -176,8 +240,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 90,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&f_build=fast`] })
@@ -193,7 +273,15 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(
@@ -215,8 +303,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 80, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 80,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     const user = userEvent.setup()
@@ -244,7 +348,15 @@ describe("Dashboard", () => {
     hostIndex.config_keys.commit.link = "https://example.com/commit/{value}"
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}`] })
@@ -259,8 +371,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 90,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     const user = userEvent.setup()
@@ -310,8 +438,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 90,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&benchFilter=b%24`] })
@@ -326,8 +470,24 @@ describe("Dashboard", () => {
     const hostIndex = makeDashboardHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeLatestResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "b", build: "fast" }, measurement_token: 0, mean_ns: 50, ci95_half_ns: 1 },
-      { bench: "bench-b", config: { commit: "b", build: "safe" }, measurement_token: 0, mean_ns: 90, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "b", build: "fast" },
+        measurement_token: 0,
+        mean_ns: 50,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-b",
+        config: { commit: "b", build: "safe" },
+        measurement_token: 0,
+        mean_ns: 90,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Dashboard />, { initialEntries: [`/?host=${HOST}&benchFilter=%28`] })

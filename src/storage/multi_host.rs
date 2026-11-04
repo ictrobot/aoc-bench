@@ -214,11 +214,9 @@ mod tests {
         let run_ts = Timestamp::from_second(ts + 1).unwrap();
         let stats = StatsResult {
             mean_ns_per_iter: 10.0,
-            ci95_half_width_ns: 1.0,
+            se_ns: None,
             mode: EstimationMode::PerIter,
             intercept_ns: None,
-            outlier_count: 0,
-            temporal_correlation: 0.0,
             samples: vec![Sample {
                 iters: 10,
                 total_ns: 100,

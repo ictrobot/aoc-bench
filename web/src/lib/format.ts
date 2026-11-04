@@ -11,8 +11,15 @@ export function formatDurationNs(ns: number): string {
   }
 }
 
-/** Format a CI half-width in nanoseconds as ±<duration> */
-export function formatCi(ns: number): string {
+/**
+ * Format a CI half-width in nanoseconds as ±<duration>.
+ *
+ * The exporter writes null exactly when a measurement has no run interval: a single run, or a
+ * measurement from before run summaries existed. Those render as "no interval". A zero
+ * half-width is a genuine zero-width interval and renders as ±0 ns.
+ */
+export function formatCi(ns: number | null): string {
+  if (ns === null) return "no interval"
   return `\u00b1${formatDurationNs(ns)}`
 }
 

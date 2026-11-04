@@ -8,7 +8,9 @@ export interface TimelineResultGroup {
   startIndex: number
   endIndex: number
   mean_ns: number
-  ci95_half_ns: number
+  ci95_half_ns: number | null
+  run_count: number
+  multimodal: boolean
   configs: Record<string, string>[]
   measurement_token: number
   caseCount: number
@@ -36,6 +38,8 @@ export function groupTimelineResults(
       result.measurement_token === previous.measurement_token &&
       result.mean_ns === previous.mean_ns &&
       result.ci95_half_ns === previous.ci95_half_ns &&
+      result.run_count === previous.run_count &&
+      result.multimodal === previous.multimodal &&
       fixedSignature === previous.fixedSignature &&
       previous.endIndex >= 0 &&
       valueIndex === previous.endIndex + 1
@@ -58,6 +62,8 @@ export function groupTimelineResults(
       endIndex: valueIndex,
       mean_ns: result.mean_ns,
       ci95_half_ns: result.ci95_half_ns,
+      run_count: result.run_count,
+      multimodal: result.multimodal,
       configs: [result.config],
       measurement_token: result.measurement_token,
       caseCount: 1,

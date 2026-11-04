@@ -1,5 +1,6 @@
 use crate::cli::CliError;
 use crate::cli::args::HostConfigArgs;
+use crate::cli::format::format_series_summary;
 use aoc_bench::config::{Benchmark, Config, ConfigProduct};
 use aoc_bench::runner;
 use aoc_bench::stats::StatsOptions;
@@ -16,6 +17,14 @@ pub struct DebugArgs {
     /// Expected checksum for output validation
     #[arg(long)]
     pub checksum: Option<String>,
+
+    /// Print the measurement summary as text instead of the run series JSON
+    #[arg(long)]
+    pub summary: bool,
+
+    /// With --summary, also list each run in the order it ran
+    #[arg(long, requires = "summary")]
+    pub runs: bool,
 
     #[command(flatten)]
     pub host_config: HostConfigArgs,
@@ -44,7 +53,11 @@ pub fn execute(args: DebugArgs) -> Result<(), CliError> {
 
     let series = runner.run_series().map_err(CliError::BenchmarkRunError)?;
 
-    serde_json::to_writer_pretty(std::io::stdout(), &series).unwrap();
+    if args.summary {
+        print!("{}", format_series_summary(&series, args.runs));
+    } else {
+        serde_json::to_writer_pretty(std::io::stdout(), &series).unwrap();
+    }
 
     Ok(())
 }

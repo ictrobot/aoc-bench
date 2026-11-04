@@ -97,8 +97,24 @@ describe("Timeline filters", () => {
 
   it("passes filter values in canonical index order", async () => {
     mockDecodeResultsForBenchmark.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "z" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "a" }, measurement_token: 0, mean_ns: 101, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "a", mode: "z" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", mode: "a" },
+        measurement_token: 0,
+        mean_ns: 101,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Timeline />, {
@@ -110,8 +126,24 @@ describe("Timeline filters", () => {
 
   it("reads f_* URL filters and keeps them in the URL", async () => {
     mockDecodeResultsForBenchmark.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "z" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "a" }, measurement_token: 0, mean_ns: 101, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "a", mode: "z" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", mode: "a" },
+        measurement_token: 0,
+        mean_ns: 101,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(
@@ -130,5 +162,49 @@ describe("Timeline filters", () => {
     const locationText = screen.getByTestId("location").textContent ?? ""
     expect(locationText).toContain("/timeline")
     expect(locationText).toContain("f_mode=z")
+  })
+})
+
+describe("Timeline breakdown badges", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(makeTimelineFiltersHostIndex()))
+    mockLoadResults.mockResolvedValue([])
+  })
+
+  it("marks only multimodal measurements and formats a single run as having no interval", async () => {
+    mockDecodeResultsForBenchmark.mockReturnValue([
+      {
+        bench: "bench-a",
+        config: { commit: "a", mode: "z" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: null,
+        run_count: 1,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", mode: "z" },
+        measurement_token: 0,
+        mean_ns: 120,
+        ci95_half_ns: 4,
+        run_count: 5,
+        multimodal: true,
+      },
+    ])
+
+    renderWithRouterAndQueryClient(<Timeline />, {
+      initialEntries: [`/timeline?host=${HOST}&bench=${BENCH}&f_mode=z`],
+    })
+
+    const rows = await screen.findAllByRole("row")
+    // header row plus one row per case
+    expect(rows).toHaveLength(3)
+    expect(screen.getAllByText("multimodal")).toHaveLength(1)
+    expect(rows[2]).toHaveTextContent("multimodal")
+    expect(rows[1]).not.toHaveTextContent("multimodal")
+    expect(rows[1]).toHaveTextContent("no interval")
+    expect(rows[2]).toHaveTextContent("±4 ns")
   })
 })

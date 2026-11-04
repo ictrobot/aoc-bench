@@ -3,15 +3,15 @@
 //! Most migrations are pure SQL. Migration 03 also folds the v1 `results`/`run_series` rows
 //! into the normalized dedupe model because each row has to be hashed into the workload identity
 //! model and re-linked through the case/measurement tables. Its Rust step runs in the same SQLite
-//! transaction as its SQL and schema-version record. After all pending migrations commit, the
-//! migration runner vacuums the database once to reclaim any freed pages.
+//! transaction as its SQL and schema-version record, and writes `measurements` rows with its own
+//! SQL against the schema as of migration 03, so later migrations may reshape that table without
+//! affecting it. After all pending migrations commit, the migration runner vacuums the database
+//! once to reclaim any freed pages.
 
 use crate::config::BenchmarkId;
 use crate::storage::hybrid_disk::{HybridDiskError, HybridDiskStorage, parse_ts};
 use crate::storage::measurement_id::MeasurementId;
-use crate::storage::{
-    CaseId, MeasurementRecord, MeasurementStats, Storage, WorkloadId, WorkloadState,
-};
+use crate::storage::{CaseId, Storage, WorkloadId, WorkloadState};
 use crate::workload::WorkloadIdentity;
 use ahash::{HashSet, HashSetExt as _};
 use rusqlite::Transaction;
@@ -49,6 +49,7 @@ pub(super) static MIGRATIONS: &[Migration] = &[
         migrate_v1_into_dedupe,
     ),
     Migration::sql(include_str!("sql_migrations/04-drop-v1-schema.sql")),
+    Migration::sql(include_str!("sql_migrations/05-run-summary.sql")),
 ];
 
 type V1CaseMap = BTreeMap<(String, String), V1Case>;
@@ -131,7 +132,9 @@ fn migrate_v1_cases(
         let benchmark = parse_bench(&bench)?;
         let canonical_config = canonical_v1_config(&config_json)?;
         let case = storage.get_or_create_case(tx, &bench, &config_json)?;
-        let identity = WorkloadIdentity::isolated_from_json(benchmark.clone(), &config_json);
+        // v1 measurements were made under semantics version 1, so the current binary treats the
+        // migrated workloads as stale and re-measures their cases under its own version
+        let identity = WorkloadIdentity::isolated_from_json(benchmark.clone(), &config_json, 1);
         let workload = storage.intern_workload(tx, &identity)?;
         storage.set_case_workload(tx, case, workload)?;
         case_ids.insert(
@@ -159,6 +162,14 @@ fn migrate_v1_measurements(
                 median_run_ci95_half_ns, median_run_outlier_count, median_run_sample_count
          FROM run_series",
     )?;
+    // The measurements table as created by migration 03; later migrations reshape it
+    let mut insert = tx.prepare(
+        "INSERT OR IGNORE INTO measurements
+             (measurement_id, workload_id, timestamp, schema_version,
+              run_count, median_run_mean_ns, median_run_ci95_half_ns,
+              median_run_outlier_count, median_run_sample_count, checksum)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, NULL)",
+    )?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let bench: String = row.get(0)?;
@@ -171,23 +182,16 @@ fn migrate_v1_measurements(
 
         let measurement_id =
             MeasurementId::for_v1(&source.benchmark, &source.canonical_config, timestamp);
-        storage.insert_measurement(
-            tx,
-            &MeasurementRecord {
-                measurement_id,
-                workload_id: source.workload_id,
-                timestamp,
-                schema_version: 1,
-                stats: MeasurementStats {
-                    run_count: row.get(3)?,
-                    median_run_mean_ns: row.get(4)?,
-                    median_run_ci95_half_ns: row.get(5)?,
-                    median_run_outlier_count: row.get(6)?,
-                    median_run_sample_count: row.get(7)?,
-                },
-                checksum: None,
-            },
-        )?;
+        insert.execute(rusqlite::params![
+            measurement_id,
+            source.workload_id.0,
+            timestamp.as_second(),
+            row.get::<_, i64>(3)?,
+            row.get::<_, f64>(4)?,
+            row.get::<_, f64>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?,
+        ])?;
         storage.link_measurement_cases(tx, measurement_id, &[source.case_id])?;
         count += 1;
     }

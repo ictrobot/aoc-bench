@@ -137,11 +137,13 @@ migration number. Appendix A summarizes V1 and its migration.
   identical. All tools that generate or manipulate configs must maintain this invariant.
 
 * **Run**
-  One full benchmark execution producing a mean + CI using sample-based estimation.
+  One process launch of the benchmark command, timed over at least 2 s and 4 samples after warmup.
+  Its value is the time per iteration for that run. It carries no interval of its own.
 
 * **Run Series**
-  The repeated runs collected during one measurement (normally **3 runs**). Their median run is the
-  representative value used for stable-result and comparison logic.
+  The independent runs collected during one measurement (**9** by default). The mean over the
+  runs and the 95% t-interval over them are the measurement's values for stable-result and
+  comparison logic.
 
 * **Case**
   A logical `(benchmark, canonical hostless config)` pair. A case stores the workload whose stable
@@ -155,11 +157,12 @@ migration number. Appendix A summarizes V1 and its migration.
 * **Workload**
   The durable identity of measured work. A shared workload hashes the benchmark, executable content,
   optional stdin content, expanded arguments, checksum, statistics options, and runner semantics. An
-  isolated workload is case-specific and has no content hashes. Stable/drift state belongs here.
+  isolated workload hashes only the benchmark, config and runner semantics, with no content hashes.
+  Stable/drift state belongs here.
 
 * **Measurement**
-  One recorded workload run series, identified by UUIDv7, containing its runs and raw samples. It
-  owns immutable V2 JSON and may be visible in the histories of several cases.
+  One recorded workload run series, identified by UUIDv7, containing its run summary, runs and
+  raw samples. It owns immutable V2 JSON and may be visible in the histories of several cases.
 
 * **Stable Result**
   The workload measurement currently shown to every associated case. Measurements within noise leave
@@ -184,13 +187,13 @@ The system is composed of:
 2. **Collector / Runner Controller** (aoc-bench, real implementation in Rust)
 
     * Reads `SAMPLE` lines from the child process.
-    * Applies statistics:
+    * Applies statistics per run:
         * warmup,
         * mode detection (regression vs per-iter mean),
-        * bootstrap CI,
-        * stop when CI is small enough.
-    * Performs **multiple runs back-to-back** to form a run series.
-    * Produces one measurement containing the complete run series.
+        * fixed sampling floors (at least 2 s and 4 samples), then stop.
+    * Performs **9 runs back-to-back** to form a run series.
+    * Summarises the series as the mean over runs with a 95% t-interval, and produces one
+      measurement containing the summary and the complete run series.
 
 3. **Store / Stable Result Manager**
 
@@ -352,7 +355,7 @@ Common fields:
 - **`input`** *(optional)*: Input filename in `data/inputs/`. If provided the runner streams the file to stdin.
 - **`checksum`** *(optional)*: Expected checksum emitted by the benchmark.
 - **`stats`** *(optional)*: Overrides for stats defaults. Supported fields: `min_samples`, `min_time_ns`,
-  `target_rel_ci`, `min_warmup_samples`, `min_warmup_time_ns`, `runs_per_series`, and `run_timeout_ns`.
+  `min_warmup_samples`, `min_warmup_time_ns`, `runs_per_series`, and `run_timeout_ns`.
   When variants are present, each variant may have its own `stats` block; for each field the lookup order is variant →
   benchmark → system default.
 
@@ -494,9 +497,14 @@ Example:
 
 ```json
 "config": {
-"commit": "recent",
-"build": ["generic"],
-"threads": ["1", "32"]
+  "commit": "recent",
+  "build": [
+    "generic"
+  ],
+  "threads": [
+    "1",
+    "32"
+  ]
 }
 ```
 
@@ -521,7 +529,14 @@ substitution.
 **Example:**
 
 ```json
-"command": ["builds/{build}/{commit}", "bench", "2015", "04", "{threads}", "{multiversion}"]
+"command": [
+  "builds/{build}/{commit}",
+  "bench",
+  "2015",
+  "04",
+  "{threads}",
+  "{multiversion}"
+]
 ```
 
 For config `commit=abc1234,build=native,threads=1`, the command becomes:
@@ -666,15 +681,15 @@ It defaults to `true` on Linux where it is supported, and is implemented using a
 `personality(ADDR_NO_RANDOMIZE)`.
 
 **Rationale**: ASLR randomizes the location of code and data in memory, which can affect cache behavior and branch
-prediction. While the median-of-means approach in run series helps mitigate this, disabling ASLR provides more
-consistent measurements within individual runs.
+prediction. The run-to-run spread is measured and reported either way (section 7.4); disabling ASLR removes
+one source of it.
 
 ## 6.6 Power-Limit Warmup (Linux)
 
 The `power_limit_watts` host config option is optional and names the host's sustained package power limit (PL1 on
 Intel). When set, the runner reads package power from the RAPL energy counter (`/sys/class/powercap`, which covers
-Intel and modern AMD) and discards samples until it has settled at the limit before warmup starts, in 200ms batches.
-Waiting longer than 120s fails the run without retry.
+Intel and modern AMD) and discards samples until it has settled at the limit, in 200ms batches; the batch that shows
+it settled is the first warmup batch. Waiting longer than 120s fails the run without retry.
 
 ---
 
@@ -698,41 +713,42 @@ T = [T_1, T_2, ..., T_n]
 
 ## 7.2 Warmup and sampling
 
-Defaults (overrideable per-benchmark/variant via the optional `stats` block):
+Warmup and sampling lengths are configurable per benchmark or variant through the optional `stats` block (section 4.3).
+The defaults are 0.5 s of warmup and 2 s of measurement; increase them for workloads
+that need longer to settle or more sampling. The sample-count floors, number of runs and per-run timeout are also
+configurable. Durations are minimum accumulated sample times, so actual elapsed time can be longer.
+
+Defaults and internal limits:
 
 ```rust
-const MIN_WARMUP_SAMPLES: usize = 4;
-const MIN_WARMUP_TIME_NS: u64 = 1_000_000_000; // 1 second
-const MAX_WARMUP_TIME_NS: u64 = 15_000_000_000; // 15 s
-const STABILITY_WINDOW: usize = 8;
-const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
+const MIN_WARMUP_SAMPLES: usize = 2;
+const MIN_WARMUP_TIME_NS: u64 = 500_000_000; // 0.5 seconds
 
-const MIN_SAMPLES: usize = 32;
+const MIN_SAMPLES: usize = 4;
 const MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds of measured (post-warmup) samples
-const CHECK_EVERY_NS: u64 = 200_000_000; // Re-evaluate convergence every ~200ms of post-warmup sample time
-const MAX_SAMPLES: usize = 1024;
-const RUN_SERIES_COUNT: usize = 3;  // Default runs_per_series; must stay odd for median selection
+const MAX_SAMPLES: usize = 1 << 16; // Memory guard only; never reached before the time floor
+const RUN_SERIES_COUNT: usize = 9;  // Default runs_per_series (runs per measurement)
 const RUN_TIMEOUT_NS: u64 = 600_000_000_000; // Default per-run timeout; override via stats.run_timeout_ns
 ```
+
+Nothing in this process adapts to the values it measures. Every run continues to the same floors and every
+measurement has the same number of runs, so there is no sequential stopping to account for.
 
 Process:
 
 * **Warmup**: discard the first 200ms batch of samples (process startup), then any batches the host's power-limit
-  warmup (section 6.6) rejects. Then collect samples until both minima are met (≥4 samples and ≥1s total), and stop
-  when either (a) the last 8 warmup samples are all within ±5% of their mean, or (b) cumulative warmup time reaches
-  15s. Completion is checked at the end of each 200ms batch. All discarded samples are ignored for stats.
+  warmup (section 6.6) rejects. The batch that shows power settled is the first warmup batch. Warmup is complete at
+  the end of the first batch at which both minima are met (≥2 samples and ≥0.5s). All discarded samples are ignored for
+  stats. The first batch absorbs process startup and the boost ramp, the next half second lets caches and the batch-size
+  ramp settle, and sustained power is checked directly rather than waited out.
 
-* After warmup, for each new sample:
-    * Append `(N_i, T_i)` to accumulated data
-    * Once both `MIN_SAMPLES` and `MIN_TOTAL_TIME_NS` are satisfied, recompute convergence every
-      `CHECK_EVERY_NS` (200ms) of additional measured sample time, or sooner if we hit `MAX_SAMPLES`
-    * Stop when CI target is met or `MAX_SAMPLES` is hit
+* After warmup, append each `(N_i, T_i)` to the accumulated data until both `MIN_SAMPLES` and `MIN_TOTAL_TIME_NS`
+  are met, then stop. The floors aim to keep each run's timing error small relative to variation between process
+  launches.
 
-* **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (default 3, configurable via
-  `stats.runs_per_series`)
-  to collect multiple independent runs. The value must be odd so a median run can be selected.
-
-  For each run a new instance of the benchmark command is run, and the process is repeated (including warmup).
+* **Run series**: Repeat the entire process `RUN_SERIES_COUNT` times (default 9, configurable via
+  `stats.runs_per_series`) to collect independent runs. For each run a new instance of the benchmark command
+  is run, and the process is repeated (including warmup).
 
 ## 7.3 Mode decision: regression vs per-iter mean
 
@@ -755,8 +771,8 @@ else:
 
 When iteration counts vary significantly, use **weighted least squares** on `T = α + β·N` with weights `w_i = 1/N_i`:
 
-**Rationale**: Per-iteration timing noise is approximately constant, so total noise for a batch of N iterations is
-proportional to N. Using weights `w = 1/N` accounts for this heteroscedasticity.
+**Rationale**: Assuming independent iteration noise with roughly constant variance, a batch's variance is
+proportional to `N`. Using weights `w = 1/N` accounts for this heteroscedasticity.
 
 1. Compute weighted least squares fit:
    ```text
@@ -775,9 +791,10 @@ proportional to N. Using weights `w = 1/N` accounts for this heteroscedasticity.
 
 When iteration counts are similar, use **weighted mean** with weights proportional to `N_i`:
 
-**Rationale**: Since timer noise per batch is approximately constant (independent of N), batches with more iterations
-provide more information about the per-iteration time. The global weighted mean `Σ(T_i) / Σ(N_i)` is optimal for this
-noise model.
+**Rationale**: Under the same noise model as the regression, a batch's variance is proportional to `N_i`, and
+`T_i / N_i` has variance proportional to `1/N_i`. The inverse-variance weighted mean of the per-iteration times
+therefore uses weights `w_i = N_i`, giving `Σ(T_i) / Σ(N_i)`. (Under a constant per-batch noise model the weights
+would instead be `N_i²`.)
 
 1. Compute the weighted mean:
    ```text
@@ -786,172 +803,115 @@ noise model.
 
    This is equivalent to a weighted average of per-iteration times `t_i = T_i/N_i` with weights `w_i = N_i`.
 
-This is simple, robust, and gives more weight to samples with larger iteration counts that have proportionally less
-timer noise.
+This is simple, robust, and gives more weight to samples with larger iteration counts, whose per-iteration times are
+proportionally less noisy.
 
-## 7.4 Point estimation and bootstrap confidence intervals
+## 7.4 Run summary: mean and 95% interval over runs
 
-We compute the point estimate and confidence interval **separately** to avoid bias from bootstrap variance.
+Each run is a separate process launch. Physical page placement, huge-page availability, predictor state and
+scheduling can shift its performance. Its measured value includes both these process effects and its own timing
+error, giving a two-level model:
 
-Constants:
-
-```rust
-const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;   // during sampling for quick CI check
-const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;  // final estimate after stopping
+```text
+run value_i = μ + p_i + e_i        p_i: run effect, e_i: residual timing error of run i
 ```
 
-### Point estimate (no bootstrap)
+The measurement reports an interval for `μ` from the run values alone:
 
-**Regression mode**: Use WLS slope `β` from the full dataset
-**Per-iter mode**: Use weighted mean `μ = Σ(T_i) / Σ(N_i)` from the full dataset
-
-### Bootstrap confidence intervals
-
-Algorithm (depends on mode):
-
-#### For regression mode:
-
-1. During sampling (every `CHECK_EVERY_NS` of accumulated sample time):
-    * Perform `QUICK_BOOTSTRAP_SAMPLES` resamples of sample indices with replacement
-    * For each resample: recompute WLS slope `β` using the resampled data
-    * Sort the bootstrap estimates and take 2.5th & 97.5th percentiles → `[β_lo, β_hi]`
-    * Compute `relative_half_width = (β_hi - β_lo) / (2 * β_point_estimate)`
-
-2. After stopping:
-    * Recompute CI with `FINAL_BOOTSTRAP_SAMPLES` for higher precision
-
-#### For per-iter mean mode:
-
-1. During sampling (every `CHECK_EVERY_NS` of accumulated sample time):
-    * Perform `QUICK_BOOTSTRAP_SAMPLES` resamples of sample indices with replacement
-    * For each resample: compute weighted mean `Σ(T_i) / Σ(N_i)` using the resampled data
-    * Sort the bootstrap estimates and take 2.5th & 97.5th percentiles → `[μ_lo, μ_hi]`
-    * Compute `relative_half_width = (μ_hi - μ_lo) / (2 * μ_point_estimate)`
-
-2. After stopping:
-    * Recompute CI with `FINAL_BOOTSTRAP_SAMPLES` for higher precision
-
-### Stop condition (both modes):
-
-   ```text
-   stop early if relative_half_width <= TARGET_REL_CI (default: 0.01 = 1%)
- otherwise keep sampling until n_samples >= MAX_SAMPLES (default: 1024)
-  or run_time >= TIMEOUT (default: 600s, configurable via stats.run_timeout_ns)
-   ```
-
-## 7.5 Outlier detection
-
-**MAD-based outlier detection** (Median Absolute Deviation) is used on the residuals.
-
-Constants:
-
-```rust
-const OUTLIER_MAD_NORMALIZATION: f64 = 1.482602218505602;  // Consistency constant for normal distribution
-const OUTLIER_MAD_THRESHOLD: f64 = 3.5;                     // Modified Z-score threshold
+```text
+mean       = Σ value_i / n
+sd         = sqrt( Σ (value_i - mean)² / (n - 1) )
+half-width = t(n - 1, 0.975) · sd / sqrt(n)        95% two-sided
 ```
 
-Algorithm:
+`e_i` is already part of the spread between runs, so nothing from inside a run is combined with it. With one
+run there is no interval.
 
-1. Compute residuals based on the mode:
-    * **Regression mode**: `residual_i = T_i - (α + β·N_i)` (deviation from fitted line)
-    * **Per-iter mode**: `residual_i = T_i / N_i` (per-iteration time)
+Why 9 runs: the half-width falls quickly up to about six runs and slowly after, and the sample standard
+deviation needs a handful of degrees of freedom before interval widths stop being a lottery between sister builds.
 
-2. Compute MAD-based modified Z-scores:
-   ```text
-   median = median(residuals)
-   MAD = median(|residual_i - median|)
-   mad_scaled = MAD × 1.4826  (normalization for normal distribution)
-   modified_z_i = |residual_i - median| / mad_scaled
-   ```
+| Runs | t    | Half-width as multiple of run sd | sd estimate, 5th to 95th percentile |
+|------|------|----------------------------------|-------------------------------------|
+| 3    | 4.30 | 2.48                             | 0.23 to 1.73                        |
+| 6    | 2.57 | 1.05                             | 0.48 to 1.49                        |
+| 9    | 2.31 | 0.77                             | 0.58 to 1.39                        |
+| 12   | 2.20 | 0.64                             | 0.64 to 1.34                        |
 
-3. Count outliers: samples where `modified_z_i > OUTLIER_MAD_THRESHOLD`
+### Multimodal flag
 
-4. Compute outlier fraction: `outlier_count / total_samples`
+Some binaries land in one of a few performance levels per run, due to effects such as predictor state, huge-page
+availability or runtime variant selection. With nine runs, the t-interval's nominal 95% coverage relies on
+independent, approximately normal run values. Multiple levels can widen it, but coverage may fall below 95%,
+especially if a level is missed. The summary flags observed clustering without changing the mean or interval:
 
-Outlier counts are recorded and displayed for diagnostics.
+1. Sort the run values. Every gap between neighbours wider than 1% of the mean is a break, and the runs between
+   breaks form clusters.
+2. A cluster of one run is an outlier: it is no level, counts toward nothing, and is skipped over. A level is a
+   cluster of two or more runs.
+3. While the gap between two consecutive levels, measured across any outliers between them, is no wider than four
+   times the pooled within-level standard deviation (degrees of freedom: members minus levels), merge the narrowest
+   such pair and everything between them.
+4. `multimodal` is true when two or more levels remain, so a level has to be seen at least twice and the separation
+   test holds for exactly the levels reported. Never true below four runs.
 
-## 7.6 Temporal correlation detection (drift analysis)
+The 1% floor and factor of four are tuning choices. A missed level is invisible to both the interval and the flag,
+though it may appear in later reruns.
 
-To detect systematic performance drift over the course of sampling (warmup effects, thermal throttling, resource
-exhaustion, caching), we compute the **temporal correlation** between run order and residuals.
+## 7.5 Per-run diagnostic
 
-Constants:
+Each run also records the standard error of its value, for the estimator that produced it, as a diagnostic only.
 
-```rust
-const TREND_CORRELATION_THRESHOLD: f64 = 0.5;            // Abort if |correlation| > 0.5
-const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;     // Wait for this many samples before aborting
+In regression mode it is the weighted least squares standard error of the slope, using the fit's residuals and its
+`1/N` weights, with the residual variance on `n - 2` degrees of freedom:
+
+```text
+σ² = Σ w_i·r_i² / (n - 2)
+se = sqrt( σ² / Σ w_i·(N_i - N̄)² )
 ```
 
-Algorithm:
+In per-iter mode it is the error of the weighted mean as a ratio estimator, from the residuals `T_i - μ·N_i`:
 
-1. Compute residuals (same as outlier detection)
+```text
+se = sqrt( n/(n - 1) · Σ (T_i - μ·N_i)² ) / Σ N_i
+```
 
-2. Compute Spearman rank correlation between sample index and residuals:
-   ```text
-   indices = [0, 1, 2, ..., n-1]  (sample order)
-   residuals = [r_0, r_1, r_2, ..., r_{n-1}]
-   temporal_correlation = spearman_correlation(indices, residuals)
-   ```
+With equal iteration counts this is the familiar `sd(T_i / N_i) / sqrt(n)`. It is absent below three samples in
+regression mode and two in per-iter mode.
 
-3. Check abort condition during stopping checks:
-    * If `|temporal_correlation| > TREND_CORRELATION_THRESHOLD`:
-        * If `samples < TREND_CORRELATION_MIN_ITERATIONS`:
-          Wait for more samples (trend may stabilize)
-        * Otherwise: abort the benchmark run (systematic drift detected)
+It is how the floors in section 7.2 are checked against a new benchmark (the run error should be small against
+the run-to-run spread) and it is never part of the reported interval.
 
-4. Store the correlation value in results for diagnostic purposes (even if below abort threshold)
+## 7.6 Output fields (per run)
 
-**Interpretation:**
+Per run within a series, the stats engine produces:
 
-* **Positive correlation (> 0.5)**: Residuals increasing over time → performance degrading (thermal throttling, memory
-  leaks, cache pollution)
-* **Negative correlation (< -0.5)**: Residuals decreasing over time → performance improving (warmup, JIT optimization,
-  cache warming)
-* **Near zero (-0.2 to 0.2)**: No systematic trend → stable measurements (ideal)
-
-**Rationale:**
-
-Spearman rank correlation is used as it's robust to outliers and detects monotonic (not just linear) trends.
-
-A strong temporal correlation indicates the benchmark environment is non-stationary, making results unreliable.
-
-The temporal correlation check runs during the stopping check (every `CHECK_EVERY_NS` after `MIN_SAMPLES`/
-`MIN_TOTAL_TIME_NS`), alongside CI checks, allowing early termination when drift is detected.
-
-## 7.7 Output fields (per individual run)
-
-Per run within a series, stats engine produces:
-
-* `timestamp`: when this individual run was performed
+* `timestamp`: when this run started
 * `mode`: `"regression"` or `"per_iter"`
 * `mean_ns_per_iter`: estimated time per iteration (β for regression, μ for per-iter mean)
-* `ci95_half_width_ns`: half-width of 95% CI (display as mean ± half_width)
 * `intercept_ns`: fixed overhead per batch (only for regression mode, null otherwise)
-* `outlier_count`: number of samples flagged as outliers
-* `temporal_correlation`: Spearman correlation between sample order and residuals (range [-1, 1])
+* `se_ns`: standard error of the run value from its own samples (section 7.5), null below two samples
 * `samples`: array of `{"iters": N_i, "total_ns": T_i}` for each sample
+* `warmup` and `power`: warmup accounting and package power, when recorded
 
-## 7.8 Output fields (per run series)
+## 7.7 Output fields (per run series)
 
 Per run series (collection of runs), the system produces:
 
 * `bench`: benchmark name
 * `config`: configuration JSON
 * `timestamp`: when the run series was performed (start time)
-* `runs`: array of individual run results (sorted by mean)
+* `runs`: array of run results (sorted by mean)
+* `summary`: `{run_count, mean_ns, ci95_half_ns, multimodal}` from section 7.4, with `ci95_half_ns` null for
+  a single run
 * `checksum`: output validation
 
-The median run's estimates become the **representative values** for:
+The summary's mean and interval are the **representative values** for:
 
 * stable result determination
 * commit-to-commit comparison
 * UI display
 
-Raw run and samples are stored to allow later re-analysis if required.
-
-**Note**: The outlier and temporal correlation statistics are computed after collection completes and stored for
-diagnostic purposes. During collection, we abort only on strong temporal correlation (`|temporal_correlation| >
-TREND_CORRELATION_THRESHOLD`). Outlier counts are recorded but no longer trigger an abort.
+Raw runs and samples are stored so the summary, or any other statistic, can be recomputed later.
 
 ---
 
@@ -967,26 +927,52 @@ The following is abridged; each `runs` entry uses the complete structure from se
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "measurement_id": "0195f4c1-3a4b-7abc-8123-456789abcdef",
   "bench": "2015-04",
   "workload_sha256": "...",
   "group_spec": {
-    "argv": ["bench", "2015", "04", "1"],
+    "argv": [
+      "bench",
+      "2015",
+      "04",
+      "1"
+    ],
     "checksum": "8f024a8e...",
-    "stats": { "...": "..." },
-    "semantics_version": 1
+    "stats": {
+      "...": "..."
+    },
+    "semantics_version": 2
   },
   "executable_sha256": "...",
   "stdin_sha256": "...",
-  "executed_case": { "commit": "abc1234", "threads": "1" },
+  "executed_case": {
+    "commit": "abc1234",
+    "threads": "1"
+  },
   "covered_cases": [
-    { "commit": "abc1234", "threads": "1" },
-    { "commit": "def5678", "threads": "1" }
+    {
+      "commit": "abc1234",
+      "threads": "1"
+    },
+    {
+      "commit": "def5678",
+      "threads": "1"
+    }
   ],
   "timestamp": 1731437601,
   "checksum": "8f024a8e...",
-  "runs": [{ "...": "..." }]
+  "summary": {
+    "run_count": 9,
+    "mean_ns": 106300.0,
+    "ci95_half_ns": 425.0,
+    "multimodal": false
+  },
+  "runs": [
+    {
+      "...": "..."
+    }
+  ]
 }
 ```
 
@@ -1001,11 +987,14 @@ from random UUID bytes. V1 run-series JSON remains in place for migrated data bu
 new measurements. Normal result and history queries use SQLite summaries rather than decoding raw
 JSON.
 
-The median run remains the representative display and drift value, for example:
+The summary is the display and drift value, for example:
 
 ```text
-106.3 µs/iter ±0.4% (median of 3 run means)
+106.3 µs/iter ±0.40% (9 runs)
 ```
+
+Schema 2 files have the same layout without the `summary` block; their database rows summarise the median run
+instead (section 9.2).
 
 ---
 
@@ -1048,12 +1037,18 @@ measurement update uses one immediate transaction.
 
 Each host's `metadata.db` has four normalized tables:
 
-| Table               | Role                                                                                                    |
-|---------------------|---------------------------------------------------------------------------------------------------------|
-| `cases`             | One row per `(benchmark, canonical hostless config)` and its current `workload_id`                      |
-| `workloads`         | Durable shared/isolated identity plus stable/last measurement pointers and drift counters               |
-| `measurements`      | One row per workload run series, with timestamp, V1/V2 schema version, checksum, and median-run summary |
-| `measurement_cases` | Append-only case-visible measurement history                                                            |
+| Table               | Role                                                                                              |
+|---------------------|---------------------------------------------------------------------------------------------------|
+| `cases`             | One row per `(benchmark, canonical hostless config)` and its current `workload_id`                |
+| `workloads`         | Durable shared/isolated identity plus stable/last measurement pointers and drift counters         |
+| `measurements`      | One row per workload run series: timestamp, schema version, checksum, and run summary (see below) |
+| `measurement_cases` | Append-only case-visible measurement history                                                      |
+
+The summary columns `run_count`, `mean_ns`, `ci95_half_ns` and `multimodal` hold the run summary of section 7.4,
+with `ci95_half_ns` NULL where there is no interval. Rows from schema 1 or 2 keep their median run's mean in
+`mean_ns` but have no interval and no flag: their within-run bootstrap half-width is not a run interval, so
+migration 05 dropped it (the raw JSON keeps it). A row without an interval, legacy or single-run, never counts as
+changed.
 
 Important invariants:
 
@@ -1076,8 +1071,8 @@ reconstructible path for future recovery or reanalysis tooling.
 Stable/drift state is updated once per workload measurement:
 
 1. The first measurement becomes both stable and last.
-2. Every later measurement becomes last and is compared with the stable measurement using median-run
-   confidence intervals and relative mean difference.
+2. Every later measurement becomes last and is compared with the stable measurement using their run
+   intervals and relative mean difference.
 3. Overlapping intervals or a difference below 3% count as a match: increment `matched_count` and
    reset `suspicious_count`.
 4. A non-overlapping difference of at least 3% increments `suspicious_count`. The third consecutive
@@ -1175,7 +1170,8 @@ current artifact or coalesce byte-identical files on different inodes before app
 * A shared group is **new** if a case has no recorded workload, members disagree on their workload,
   the association is isolated, or the current group spec differs from the recorded workload.
 * Otherwise it is a **rerun**, ordered by the workload's last measurement time.
-* An isolated case is new without a recorded workload and otherwise a rerun.
+* An isolated case is new without a recorded workload and otherwise a rerun. Its identity includes the
+  runner semantics version, so after a bump the rerun records a fresh workload and the case moves to it.
 
 Groups are shuffled before the read transaction. By default the first `--new-limit` new
 classifications form a random sample; `--new-order timeline-asc|timeline-desc` instead prioritizes
@@ -1253,8 +1249,8 @@ aoc-bench export --host silicon --config commit=abc1234,profile=release,threads=
 The `export` command outputs TSV suitable for plotting:
 
 ```text
-host    bench   cfg_commit  cfg_profile cfg_threads  stable_timestamp  stable_measurement_id                 median_run_mean_ns  median_run_ci95_half_ns
-silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-3a4b-7abc-8123-456789abcdef  30930000            30000
+host    bench   cfg_commit  cfg_profile cfg_threads  stable_timestamp  stable_measurement_id                 run_count  mean_ns   ci95_half_ns  multimodal
+silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-3a4b-7abc-8123-456789abcdef  9             30930000  30000         0
 ...
 ```
 
@@ -1262,9 +1258,9 @@ silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-
 
 The config JSON is always extracted into a column per key. Keys other than `host` are prefixed with `cfg_`.
 
-**Note:** All exported values are median run values from run series. For full run-level details (all runs in the
-series),
-access the JSON files directly in the `runs/` directory.
+**Note:** Exported values are the run summaries of stable measurements; `ci95_half_ns` and `multimodal` are empty
+for a single-run or legacy row respectively. For run-level details access the JSON files directly in the
+`runs/` directory.
 
 Use with gnuplot, matplotlib, R, or any other plotting tool.
 
@@ -1380,10 +1376,6 @@ currently configured case has a stable result on every discovered host.
 
 These are *not* required now, but the design leaves room for them:
 
-* Add **inner and outer CIs** (per-run noise vs across-runs variability). Measurement JSON contains all
-  individual runs, making this analysis possible.
-* **Variance analysis across runs**: Use the stored individual runs in each series to compute cross-run variance
-  metrics.
 * Use **daily roll-ups** for heavy usage (materialized views in database).
 * Add richer workload/artifact diagnostics to the web UI if equality-only measurement tokens prove
   insufficient.
@@ -1396,13 +1388,12 @@ This design gives you:
 
 * A **generic, language-agnostic protocol** (`SAMPLE iters total_ns checksum=...`) for in-process benchmarking.
 * A **stats engine** that:
-    * auto-chooses regression vs per-iter mean,
-    * uses bootstrap CIs,
-    * stops when the measurement is stable.
+    * auto-chooses regression vs per-iter mean per run,
+    * takes every run to fixed floors with no data-dependent stopping.
 * A **run series approach** that:
-    * Performs N runs back-to-back for each benchmark execution (default 3)
-    * Uses median-of-means to eliminate run-to-run variance (ASLR, cache state, etc.)
-    * Stores all runs for later analysis and variance detection
+    * Performs 9 independent runs back-to-back for each benchmark execution
+    * Reports the mean over runs with a 95% t-interval over them, the noise that actually matters
+    * Flags runs that fall into more than one level, and stores all runs for later analysis
 * A **dual storage architecture**:
     * Immutable versioned JSON with raw runs, samples, identity, and execution provenance
     * Normalized SQLite tables for cases, workloads, measurements, history, and stable state

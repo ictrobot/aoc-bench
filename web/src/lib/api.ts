@@ -11,7 +11,7 @@ import type {
 } from "./types.ts"
 
 const BASE = import.meta.env.BASE_URL + "data"
-const WEB_SCHEMA_VERSION = 4
+const WEB_SCHEMA_VERSION = 5
 
 export class SnapshotNotFoundError extends Error {
   constructor(path: string) {
@@ -144,22 +144,32 @@ function sameLength(what: string, ...columns: unknown[]): number {
 
 /** Expand a results payload into rows, undoing the delta encoding of the index columns. */
 export function resultRows({ results }: IndexedResults): ResultRow[] {
-  const { bench_idx_delta, config_idx_delta, measurement_token, mean_ns, ci95_half_ns } = results
-  const length = sameLength("results", bench_idx_delta, config_idx_delta, measurement_token, mean_ns, ci95_half_ns)
+  const { bench_idx_delta, config_idx_delta, measurement_token, mean_ns, ci95_half_ns, run_count, multimodal } = results
+  const length = sameLength(
+    "results",
+    bench_idx_delta,
+    config_idx_delta,
+    measurement_token,
+    mean_ns,
+    ci95_half_ns,
+    run_count,
+    multimodal,
+  )
   const rows: ResultRow[] = new Array<ResultRow>(length)
   let benchIdx = 0
   let configIdx = 0
   for (let i = 0; i < length; i++) {
     benchIdx += bench_idx_delta[i]
     configIdx += config_idx_delta[i]
-    rows[i] = [benchIdx, configIdx, measurement_token[i], mean_ns[i], ci95_half_ns[i]]
+    rows[i] = [benchIdx, configIdx, measurement_token[i], mean_ns[i], ci95_half_ns[i], run_count[i], multimodal[i]]
   }
   return rows
 }
 
 /** Expand a history part payload into rows, undoing the delta encoding of config and timestamp. */
 export function historyRows({ series }: IndexedHistory): HistoryRow[] {
-  const { config_idx_delta, measurement_token, timestamp_s_delta, mean_ns, ci95_half_ns, run_count } = series
+  const { config_idx_delta, measurement_token, timestamp_s_delta, mean_ns, ci95_half_ns, run_count, multimodal } =
+    series
   const length = sameLength(
     "history",
     config_idx_delta,
@@ -168,6 +178,7 @@ export function historyRows({ series }: IndexedHistory): HistoryRow[] {
     mean_ns,
     ci95_half_ns,
     run_count,
+    multimodal,
   )
   const rows: HistoryRow[] = new Array<HistoryRow>(length)
   let configIdx = 0
@@ -175,7 +186,7 @@ export function historyRows({ series }: IndexedHistory): HistoryRow[] {
   for (let i = 0; i < length; i++) {
     configIdx += config_idx_delta[i]
     timestamp += timestamp_s_delta[i]
-    rows[i] = [configIdx, measurement_token[i], timestamp, mean_ns[i], ci95_half_ns[i], run_count[i]]
+    rows[i] = [configIdx, measurement_token[i], timestamp, mean_ns[i], ci95_half_ns[i], run_count[i], multimodal[i]]
   }
   return rows
 }
@@ -269,6 +280,8 @@ export function decodeResults(index: HostIndex, rows: ResultRow[]): CompactResul
       measurement_token: row[2],
       mean_ns: row[3],
       ci95_half_ns: row[4],
+      run_count: row[5],
+      multimodal: row[6] !== 0,
     }
   })
 }
@@ -294,6 +307,8 @@ export function decodeResultsForBenchmark(index: HostIndex, rows: ResultRow[], b
       measurement_token: row[2],
       mean_ns: row[3],
       ci95_half_ns: row[4],
+      run_count: row[5],
+      multimodal: row[6] !== 0,
     }))
 }
 
@@ -314,6 +329,8 @@ export function decodeLatestResults(index: HostIndex): CompactResult[] | null {
       measurement_token: row[2],
       mean_ns: row[3],
       ci95_half_ns: row[4],
+      run_count: row[5],
+      multimodal: row[6] !== 0,
     }
   })
 }
@@ -343,8 +360,9 @@ export function decodeHistory(
       config: cachedDecodeConfig(row[0], cache, keys, values),
       measurement_token: row[1],
       timestamp: row[2],
-      median_run_mean_ns: row[3],
-      median_run_ci95_half_ns: row[4],
+      mean_ns: row[3],
+      ci95_half_ns: row[4],
       run_count: row[5],
+      multimodal: row[6] !== 0,
     }))
 }

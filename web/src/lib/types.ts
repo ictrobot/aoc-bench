@@ -1,23 +1,35 @@
 /**
  * A row of results.json or of `latest_results`:
- * `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns]`.
+ * `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns, run_count, multimodal]`.
+ *
+ * `mean_ns` is the mean over `run_count` independent runs and `ci95_half_ns` the 95%
+ * t-interval half-width over those runs. It is null when there is no interval: a single run,
+ * or a measurement from before run summaries existed (whose legacy value was dropped). Zero
+ * is a genuine zero-width interval.
+ * `multimodal` is 0 or 1, flagging that the run values fell into more than one cluster.
  */
 export type ResultRow = [
   bench_idx: number,
   config_idx: number,
   measurement_token: number,
   mean_ns: number,
-  ci95_half_ns: number,
+  ci95_half_ns: number | null,
+  run_count: number,
+  multimodal: number,
 ]
 
-/** A row of a history part: `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`. */
+/**
+ * A row of a history part:
+ * `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count, multimodal]`.
+ */
 export type HistoryRow = [
   config_idx: number,
   measurement_token: number,
   timestamp_s: number,
   mean_ns: number,
-  ci95_half_ns: number,
+  ci95_half_ns: number | null,
   run_count: number,
+  multimodal: number,
 ]
 
 export interface GlobalIndex {
@@ -57,7 +69,9 @@ export interface IndexedResults {
     config_idx_delta: number[]
     measurement_token: number[]
     mean_ns: number[]
-    ci95_half_ns: number[]
+    ci95_half_ns: (number | null)[]
+    run_count: number[]
+    multimodal: number[]
   }
 }
 
@@ -68,8 +82,9 @@ export interface IndexedHistory {
     measurement_token: number[]
     timestamp_s_delta: number[]
     mean_ns: number[]
-    ci95_half_ns: number[]
+    ci95_half_ns: (number | null)[]
     run_count: number[]
+    multimodal: number[]
   }
 }
 
@@ -78,8 +93,16 @@ export interface CompactResult {
   config: Record<string, string>
   /** Positive for a shared measurement; zero for an isolated result. */
   measurement_token: number
+  /** Mean over `run_count` independent runs. */
   mean_ns: number
-  ci95_half_ns: number
+  /**
+   * 95% t-interval half-width over the runs. Null when there is no interval (a single run or a
+   * legacy measurement). Zero is a genuine zero-width interval.
+   */
+  ci95_half_ns: number | null
+  run_count: number
+  /** The run values fell into more than one cluster. Annotation only, changes no number. */
+  multimodal: boolean
 }
 
 export interface HistorySeries {
@@ -87,7 +110,14 @@ export interface HistorySeries {
   /** Positive for a shared measurement; zero for an isolated result. */
   measurement_token: number
   timestamp: number
-  median_run_mean_ns: number
-  median_run_ci95_half_ns: number
+  /** Mean over `run_count` independent runs. */
+  mean_ns: number
+  /**
+   * 95% t-interval half-width over the runs. Null when there is no interval (a single run or a
+   * legacy measurement). Zero is a genuine zero-width interval.
+   */
+  ci95_half_ns: number | null
   run_count: number
+  /** The run values fell into more than one cluster. Annotation only, changes no number. */
+  multimodal: boolean
 }

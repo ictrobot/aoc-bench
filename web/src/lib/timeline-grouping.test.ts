@@ -8,6 +8,8 @@ const result = (commit: string, token: number): CompactResult => ({
   measurement_token: token,
   mean_ns: 100,
   ci95_half_ns: 2,
+  run_count: 3,
+  multimodal: false,
 })
 
 describe("groupTimelineResults", () => {
@@ -34,6 +36,37 @@ describe("groupTimelineResults", () => {
     differentBuild.config.build = "debug"
     expect(groupTimelineResults([result("a", 1), result("c", 1)], "commit", ["a", "b", "c"])).toHaveLength(2)
     expect(groupTimelineResults([result("a", 1), differentBuild], "commit", ["a", "b"])).toHaveLength(2)
+  })
+
+  it("does not merge cases whose multimodal flag or run count differ", () => {
+    const multimodal = result("b", 1)
+    multimodal.multimodal = true
+    const fewerRuns = result("b", 1)
+    fewerRuns.run_count = 1
+    expect(groupTimelineResults([result("a", 1), multimodal], "commit", ["a", "b"])).toHaveLength(2)
+    expect(groupTimelineResults([result("a", 1), fewerRuns], "commit", ["a", "b"])).toHaveLength(2)
+
+    const groups = groupTimelineResults(
+      [multimodal, { ...multimodal, config: { ...multimodal.config, commit: "c" } }],
+      "commit",
+      ["a", "b", "c"],
+    )
+    expect(groups).toHaveLength(1)
+    expect(groups[0].multimodal).toBe(true)
+  })
+
+  it("does not merge a missing interval with a zero-width one", () => {
+    const noInterval = result("a", 1)
+    noInterval.ci95_half_ns = null
+    const zeroWidth = result("b", 1)
+    zeroWidth.ci95_half_ns = 0
+    expect(groupTimelineResults([noInterval, zeroWidth], "commit", ["a", "b"])).toHaveLength(2)
+
+    const alsoNoInterval = result("b", 1)
+    alsoNoInterval.ci95_half_ns = null
+    const groups = groupTimelineResults([noInterval, alsoNoInterval], "commit", ["a", "b"])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].ci95_half_ns).toBeNull()
   })
 
   it("merges annotated cases and retains every label", () => {

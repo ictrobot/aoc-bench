@@ -13,7 +13,7 @@ use std::path::Path;
 use tempfile::{Builder, NamedTempFile, TempDir};
 use tracing::info;
 
-const WEB_INDEX_SCHEMA_VERSION: u32 = 4;
+const WEB_INDEX_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct WebSnapshotExport {
@@ -431,11 +431,9 @@ mod tests {
                 timestamp: Timestamp::from_second(ts + 1).unwrap(),
                 stats: StatsResult {
                     mean_ns_per_iter: mean,
-                    ci95_half_width_ns: 1.0,
+                    se_ns: None,
                     mode: EstimationMode::PerIter,
                     intercept_ns: None,
-                    outlier_count: 0,
-                    temporal_correlation: 0.0,
                     samples: vec![Sample {
                         iters: 10,
                         total_ns: 100,

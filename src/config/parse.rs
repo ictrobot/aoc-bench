@@ -122,7 +122,6 @@ struct BenchmarkVariantDef<'a> {
 struct StatsOverrideDef {
     min_samples: Option<NonZeroUsize>,
     min_time_ns: Option<NonZeroU64>,
-    target_rel_ci: Option<f64>,
     min_warmup_samples: Option<NonZeroUsize>,
     min_warmup_time_ns: Option<NonZeroU64>,
     runs_per_series: Option<NonZeroUsize>,
@@ -194,7 +193,7 @@ fn parse_benchmarks<'a>(
             return Err(ConfigError::DuplicateBenchmark(benchmark_id.to_string()));
         }
 
-        let bench_stats = apply_stats_overrides(StatsOptions::default(), bench_def.stats)?;
+        let bench_stats = apply_stats_overrides(StatsOptions::default(), bench_def.stats);
 
         let base_input = bench_def
             .input
@@ -241,7 +240,7 @@ fn parse_benchmarks<'a>(
                             Some(name) => Some(resolve_input_path(data_dir, name)?),
                             None => base_input.clone(),
                         };
-                        let stats = apply_stats_overrides(bench_stats, variant.stats)?;
+                        let stats = apply_stats_overrides(bench_stats, variant.stats);
 
                         BenchmarkVariant::new(
                             benchmark_id.clone(),
@@ -304,13 +303,10 @@ fn build_config_product<'a>(
     Ok(ConfigProduct::new(subsets))
 }
 
-fn apply_stats_overrides(
-    base: StatsOptions,
-    overrides: Option<StatsOverrideDef>,
-) -> Result<StatsOptions, ConfigError> {
+fn apply_stats_overrides(base: StatsOptions, overrides: Option<StatsOverrideDef>) -> StatsOptions {
     let mut options = base;
     let Some(overrides) = overrides else {
-        return Ok(options);
+        return options;
     };
 
     if let Some(min_samples) = overrides.min_samples {
@@ -318,9 +314,6 @@ fn apply_stats_overrides(
     }
     if let Some(min_time_ns) = overrides.min_time_ns {
         options.min_total_time_ns = min_time_ns;
-    }
-    if let Some(target_rel_ci) = overrides.target_rel_ci {
-        options.target_rel_ci = target_rel_ci;
     }
     if let Some(min_warmup_samples) = overrides.min_warmup_samples {
         options.min_warmup_samples = min_warmup_samples;
@@ -335,9 +328,5 @@ fn apply_stats_overrides(
         options.run_timeout_ns = run_timeout_ns;
     }
 
-    if let Err((field, reason)) = options.validate() {
-        return Err(ConfigError::InvalidStatsOverride { field, reason });
-    }
-
-    Ok(options)
+    options
 }

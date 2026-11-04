@@ -3,15 +3,15 @@
 //! Samples are batched in sample time, and package power is read once per batch so the gate
 //! works from bands, never watts. The first batch is always discarded so process startup never
 //! affects a decision, and its reading becomes the start reading for the next. The batch whose
-//! reading is settled is the start of warmup, including the 1 s and 15 s clocks, and its samples
-//! are the first warmup samples. Completion is only checked at batch ends.
+//! reading is settled is the start of warmup, including the minimum sample and time clocks, and its
+//! samples are the first warmup samples. Completion is only checked at batch ends and is purely a
+//! matter of minimums: nothing inspects the sample values.
 
 #![allow(clippy::cast_precision_loss)]
 
 use crate::rapl::RaplError;
 use crate::stats::{Sample, StatsOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 use tracing::{debug, trace};
@@ -56,13 +56,6 @@ pub enum WarmupError {
     SamplesBehindClock { sample_ns: u64, wall_ns: u64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WarmupReason {
-    Stable,
-    MaxTime,
-}
-
 /// Recorded with each run.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WarmupSummary {
@@ -74,7 +67,6 @@ pub struct WarmupSummary {
     pub waited_samples: usize,
     #[serde(default)]
     pub waited_ns: u64,
-    pub reason: WarmupReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,12 +80,8 @@ enum Phase {
 #[derive(Debug, Clone)]
 pub struct Warmup {
     phase: Phase,
-    reason: Option<WarmupReason>,
     batch_samples: usize,
     batch_ns: u64,
-    /// The last [`Warmup::STABILITY_WINDOW`] samples of a waiting batch, enough to replay into the
-    /// window if it opens warmup. Bounded so a flood of tiny samples cannot grow memory.
-    recent: VecDeque<Sample>,
     discarded_samples: usize,
     discarded_ns: u64,
     waited_samples: usize,
@@ -102,24 +90,18 @@ pub struct Warmup {
     stable_ns: u64,
     min_samples: NonZeroUsize,
     min_time_ns: NonZeroU64,
-    last_per_iter: [f64; Warmup::STABILITY_WINDOW],
 }
 
 impl Warmup {
     pub const BATCH_NS: u64 = 200_000_000; // 200 ms
     pub const WAIT_LIMIT_NS: u64 = 120_000_000_000; // 120 s
-    pub const MAX_TIME_NS: u64 = 15_000_000_000; // 15 s
-    pub const STABILITY_WINDOW: usize = 8;
-    pub const STABILITY_TOLERANCE: f64 = 0.05; // ±5%
 
     #[must_use]
     pub fn new(options: &StatsOptions) -> Self {
         Self {
             phase: Phase::Initial,
-            reason: None,
             batch_samples: 0,
             batch_ns: 0,
-            recent: VecDeque::with_capacity(Self::STABILITY_WINDOW),
             discarded_samples: 0,
             discarded_ns: 0,
             waited_samples: 0,
@@ -128,7 +110,6 @@ impl Warmup {
             stable_ns: 0,
             min_samples: options.min_warmup_samples,
             min_time_ns: options.min_warmup_time_ns,
-            last_per_iter: [0.0; _],
         }
     }
 
@@ -139,12 +120,11 @@ impl Warmup {
 
     #[must_use]
     pub fn summary(&self) -> Option<WarmupSummary> {
-        Some(WarmupSummary {
+        self.done().then(|| WarmupSummary {
             samples: self.discarded_samples + self.stable_samples,
             total_ns: self.discarded_ns.saturating_add(self.stable_ns),
             waited_samples: self.waited_samples,
             waited_ns: self.waited_ns,
-            reason: self.reason?,
         })
     }
 
@@ -160,17 +140,6 @@ impl Warmup {
         }
         self.batch_samples += 1;
         self.batch_ns = self.batch_ns.saturating_add(sample.total_ns);
-        match self.phase {
-            Phase::Initial => {}
-            Phase::Waiting => {
-                if self.recent.len() == Self::STABILITY_WINDOW {
-                    self.recent.pop_front();
-                }
-                self.recent.push_back(sample);
-            }
-            Phase::Warmup => self.push_warmup(sample),
-            Phase::Done => unreachable!(),
-        }
         if self.batch_ns < Self::BATCH_NS {
             return Ok(None);
         }
@@ -218,13 +187,8 @@ impl Warmup {
                         "package power settled, starting warmup"
                     );
                     self.phase = Phase::Warmup;
-                    // Count the whole batch, replay only its tail into the window
-                    let tail_ns: u64 = self.recent.iter().map(|s| s.total_ns).sum();
-                    self.stable_samples += samples - self.recent.len();
-                    self.stable_ns = self.stable_ns.saturating_add(ns - tail_ns);
-                    for sample in std::mem::take(&mut self.recent) {
-                        self.push_warmup(sample);
-                    }
+                    // The batch that proved the package settled is the first warmup batch
+                    self.count_warmup(samples, ns);
                     self.check_complete();
                     Ok(Batch::Warmup)
                 }
@@ -233,6 +197,7 @@ impl Warmup {
                 if band == PowerBand::Above {
                     return Err(WarmupError::PowerAboveLimit);
                 }
+                self.count_warmup(samples, ns);
                 self.check_complete();
                 Ok(Batch::Warmup)
             }
@@ -241,62 +206,30 @@ impl Warmup {
     }
 
     fn discard(&mut self, samples: usize, ns: u64) {
-        self.recent.clear();
         self.discarded_samples += samples;
         self.discarded_ns = self.discarded_ns.saturating_add(ns);
     }
 
-    fn push_warmup(&mut self, sample: Sample) {
-        let per_iter = sample.total_ns as f64 / sample.iters as f64;
-        self.last_per_iter[self.stable_samples % Self::STABILITY_WINDOW] = per_iter;
-        self.stable_samples += 1;
-        self.stable_ns = self.stable_ns.saturating_add(sample.total_ns);
+    fn count_warmup(&mut self, samples: usize, ns: u64) {
+        self.stable_samples += samples;
+        self.stable_ns = self.stable_ns.saturating_add(ns);
     }
 
     fn check_complete(&mut self) {
         if self.stable_samples < self.min_samples.get() || self.stable_ns < self.min_time_ns.get() {
             return;
         }
-
-        if self.stable_ns >= Self::MAX_TIME_NS {
-            self.finish(WarmupReason::MaxTime);
-            return;
-        }
-
-        if self.stable_samples < Self::STABILITY_WINDOW {
-            return;
-        }
-
-        let min = self
-            .last_per_iter
-            .iter()
-            .fold(f64::INFINITY, |a, &b| a.min(b));
-        let max = self
-            .last_per_iter
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let mean: f64 = self.last_per_iter.iter().sum::<f64>() / Self::STABILITY_WINDOW as f64;
-
-        if mean == 0.0 {
-            return;
-        }
-
-        let rel_range = (max - min) / mean;
-        if rel_range <= Self::STABILITY_TOLERANCE {
-            self.finish(WarmupReason::Stable);
-        }
+        self.finish();
     }
 
-    fn finish(&mut self, reason: WarmupReason) {
+    fn finish(&mut self) {
         debug!(
-            ?reason,
             samples = self.stable_samples,
             seconds = self.stable_ns as f64 / 1_000_000_000.0,
             discarded_samples = self.discarded_samples + self.stable_samples,
             "warmup complete"
         );
         self.phase = Phase::Done;
-        self.reason = Some(reason);
     }
 }
 
@@ -366,62 +299,41 @@ mod tests {
     }
 
     #[test]
-    fn stops_on_stability_after_minimums() {
+    fn completes_at_first_batch_end_past_minimums() {
         let mut gate = gate();
         let mut power = Script::default();
 
-        // Initial batch (2 x 150ms), then 8 stable samples => 1.2s and a full window.
-        // Completion is checked at batch ends, so warmup ends on the 10th sample.
-        for i in 0..10 {
+        // Initial batch (2 x 150ms) is discarded. Batches close every 2 samples (300ms): the
+        // first warmup batch (0.3s) is under the 0.5s minimum, the second (0.6s) completes it.
+        for i in 0..6 {
             let _ = gate.push(sample(150_000_000), &mut power).unwrap();
-            assert!(!gate.done() || i == 9, "finished early at sample {i}");
+            assert!(!gate.done() || i == 5, "finished early at sample {i}");
         }
         assert!(gate.done());
         let summary = gate.summary().unwrap();
-        assert_eq!(summary.reason, WarmupReason::Stable);
-        assert_eq!(summary.samples, 10);
-        assert_eq!(summary.total_ns, 1_500_000_000);
+        assert_eq!(summary.samples, 6);
+        assert_eq!(summary.total_ns, 900_000_000);
         assert_eq!(summary.waited_samples, 0);
     }
 
     #[test]
-    fn respects_min_time_before_stability() {
+    fn respects_min_samples_after_min_time() {
         let mut gate = gate();
         let mut power = Script::default();
 
-        // Initial batch: 2 x 125ms. Then 7 samples => 875ms, below the 1s minimum, and the
-        // batch after that (2 samples, 1.125s) completes warmup.
-        for _ in 0..9 {
-            let _ = gate.push(sample(125_000_000), &mut power).unwrap();
-            assert!(!gate.done());
-        }
-        let _ = gate.push(sample(125_000_000), &mut power).unwrap();
-        assert!(gate.done());
-    }
-
-    #[test]
-    fn caps_at_max_time() {
-        let mut gate = gate();
-        let mut power = Script::default();
-
-        // Initial batch is one 1s sample. Then alternate fast/slow to avoid stability; the
-        // warmup total reaches 15s at the 15th warmup sample.
+        // Initial batch: one 1s sample. One warmup sample meets the time minimum but not the
+        // 2-sample minimum, the second completes warmup.
         let _ = gate.push(sample(1_000_000_000), &mut power).unwrap();
-        for i in 0..15 {
-            let total_ns = if i % 2 == 0 {
-                1_000_000_000
-            } else {
-                1_100_000_000
-            };
-            assert!(!gate.done());
-            let _ = gate.push(sample(total_ns), &mut power).unwrap();
-        }
+        let _ = gate.push(sample(1_000_000_000), &mut power).unwrap();
+        assert!(!gate.done());
+        let _ = gate.push(sample(1_000_000_000), &mut power).unwrap();
         assert!(gate.done());
-        assert_eq!(gate.summary().unwrap().reason, WarmupReason::MaxTime);
+        let summary = gate.summary().unwrap();
+        assert_eq!(summary.samples, 3);
     }
 
     #[test]
-    fn min_time_can_exceed_max_cap() {
+    fn long_min_time_is_honoured() {
         let options = StatsOptions {
             min_warmup_samples: NonZeroUsize::new(1).unwrap(),
             min_warmup_time_ns: NonZeroU64::new(60_000_000_000).unwrap(), // 60s
@@ -437,7 +349,7 @@ mod tests {
             let _ = gate.push(sample(5_000_000_000), &mut power).unwrap();
         }
         assert!(gate.done());
-        assert_eq!(gate.summary().unwrap().reason, WarmupReason::MaxTime);
+        assert_eq!(gate.summary().unwrap().total_ns, 65_000_000_000);
     }
 
     #[test]
@@ -448,10 +360,8 @@ mod tests {
             PowerBand::Above,    // waiting
             PowerBand::Elevated, // still waiting: elevated is not settled
             PowerBand::Above,
-            PowerBand::Settled, // opens warmup
-            PowerBand::Settled,
+            PowerBand::Settled,  // opens warmup
             PowerBand::Elevated, // tolerated during warmup
-            PowerBand::Settled,
         ]);
 
         let batches = push_n(&mut gate, &mut power, 1, 250_000_000);
@@ -465,20 +375,21 @@ mod tests {
         assert_eq!(gate.waited_ns, 900_000_000);
         assert_eq!(gate.discarded_samples, 7);
 
-        // The settled batch opens warmup with its own samples
+        // The settled batch opens warmup with its own samples counted whole (0.3s, under the
+        // 0.5s minimum)
         let batches = push_n(&mut gate, &mut power, 2, 150_000_000);
         assert_eq!(batches, [Batch::Warmup]);
         assert_eq!(gate.phase, Phase::Warmup);
         assert_eq!(gate.stable_samples, 2);
-        assert_eq!(gate.waited_samples, 6);
+        assert_eq!(gate.stable_ns, 300_000_000);
+        assert!(!gate.done());
 
-        // 6 more stable samples fill the window (8 total) and exceed 1s
-        let batches = push_n(&mut gate, &mut power, 6, 150_000_000);
-        assert_eq!(batches, [Batch::Warmup; 3]);
+        // The next batch takes warmup to 0.6s and completes it
+        let batches = push_n(&mut gate, &mut power, 2, 150_000_000);
+        assert_eq!(batches, [Batch::Warmup]);
         assert!(gate.done());
         let summary = gate.summary().unwrap();
-        assert_eq!(summary.reason, WarmupReason::Stable);
-        assert_eq!(summary.samples, 15);
+        assert_eq!(summary.samples, 11);
         assert_eq!(summary.waited_samples, 6);
         assert!(power.0.is_empty(), "every scripted reading was consumed");
     }
@@ -527,17 +438,16 @@ mod tests {
     }
 
     #[test]
-    fn waiting_buffer_is_bounded_and_opening_batch_is_fully_counted() {
+    fn opening_batch_is_fully_counted() {
         let mut gate = gate();
         let mut power = Script::of(&[PowerBand::Above, PowerBand::Settled]);
         let _ = gate.push(sample(250_000_000), &mut power).unwrap();
         assert_eq!(gate.phase, Phase::Waiting);
 
-        // A waiting batch of 100,000 tiny samples keeps only the window's worth
+        // A waiting batch of 100,000 tiny samples is held only as counts
         for _ in 0..99_999 {
             assert_eq!(gate.push(sample(2_000), &mut power).unwrap(), None);
         }
-        assert_eq!(gate.recent.len(), Warmup::STABILITY_WINDOW);
         assert_eq!(gate.batch_samples, 99_999);
 
         // Closing it settled opens warmup with every sample counted
@@ -545,7 +455,6 @@ mod tests {
         assert_eq!(batch, Some(Batch::Warmup));
         assert_eq!(gate.stable_samples, 100_000);
         assert_eq!(gate.stable_ns, 200_000_000);
-        assert_eq!(gate.recent.len(), 0);
         assert_eq!(gate.summary().map(|s| s.samples), None);
     }
 

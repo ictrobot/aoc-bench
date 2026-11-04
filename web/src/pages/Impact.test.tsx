@@ -79,8 +79,24 @@ describe("Impact", () => {
     const hostIndex = makeImpactHostIndex()
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a" }, measurement_token: 0, mean_ns: 0, ci95_half_ns: 0 },
-      { bench: "bench-a", config: { commit: "b" }, measurement_token: 0, mean_ns: 10, ci95_half_ns: 0 },
+      {
+        bench: "bench-a",
+        config: { commit: "a" },
+        measurement_token: 0,
+        mean_ns: 0,
+        ci95_half_ns: null,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b" },
+        measurement_token: 0,
+        mean_ns: 10,
+        ci95_half_ns: null,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })
@@ -97,6 +113,75 @@ describe("Impact", () => {
     expect(screen.queryByText("Regressions")).not.toBeInTheDocument()
     expect(screen.queryByText("Improvements")).not.toBeInTheDocument()
     expect(screen.queryByText(/Infinity|NaN/)).not.toBeInTheDocument()
+  })
+
+  it("badges a changed row when either side is multimodal", async () => {
+    const user = userEvent.setup()
+    const hostIndex = makeImpactHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeResults.mockReturnValue([
+      {
+        bench: "bench-a",
+        config: { commit: "a" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 9,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b" },
+        measurement_token: 0,
+        mean_ns: 130,
+        ci95_half_ns: 8,
+        run_count: 9,
+        multimodal: true,
+      },
+    ])
+
+    renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })
+
+    await user.selectOptions(await screen.findByLabelText("From:"), "a")
+    await user.selectOptions(screen.getByLabelText("To:"), "b")
+
+    expect(await screen.findByText("1 regressions")).toBeInTheDocument()
+    expect(screen.getByText("+30.00%")).toBeInTheDocument()
+    expect(screen.getAllByText("multimodal")).toHaveLength(1)
+  })
+
+  it("shows no badge when neither side is multimodal", async () => {
+    const user = userEvent.setup()
+    const hostIndex = makeImpactHostIndex()
+    mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
+    mockDecodeResults.mockReturnValue([
+      {
+        bench: "bench-a",
+        config: { commit: "a" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 9,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b" },
+        measurement_token: 0,
+        mean_ns: 130,
+        ci95_half_ns: 1,
+        run_count: 9,
+        multimodal: false,
+      },
+    ])
+
+    renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })
+
+    await user.selectOptions(await screen.findByLabelText("From:"), "a")
+    await user.selectOptions(screen.getByLabelText("To:"), "b")
+
+    expect(await screen.findByText("+30.00%")).toBeInTheDocument()
+    expect(screen.queryByText("multimodal")).not.toBeInTheDocument()
   })
 
   it("limits 'To' options to values after the selected 'From' value", async () => {
@@ -133,8 +218,24 @@ describe("Impact", () => {
     })
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "fast" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "fast" }, measurement_token: 0, mean_ns: 130, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "a", mode: "fast" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", mode: "fast" },
+        measurement_token: 0,
+        mean_ns: 130,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(
@@ -171,8 +272,24 @@ describe("Impact", () => {
     })
     mockLoadIndex.mockResolvedValue(makeGlobalIndex(hostIndex))
     mockDecodeResults.mockReturnValue([
-      { bench: "bench-a", config: { commit: "a", mode: "fast" }, measurement_token: 0, mean_ns: 100, ci95_half_ns: 1 },
-      { bench: "bench-a", config: { commit: "b", mode: "fast" }, measurement_token: 0, mean_ns: 140, ci95_half_ns: 1 },
+      {
+        bench: "bench-a",
+        config: { commit: "a", mode: "fast" },
+        measurement_token: 0,
+        mean_ns: 100,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
+      {
+        bench: "bench-a",
+        config: { commit: "b", mode: "fast" },
+        measurement_token: 0,
+        mean_ns: 140,
+        ci95_half_ns: 1,
+        run_count: 3,
+        multimodal: false,
+      },
     ])
 
     renderWithRouterAndQueryClient(<Impact />, { initialEntries: [`/impact?host=${HOST}`] })

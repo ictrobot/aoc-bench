@@ -1,22 +1,26 @@
-//! Schema-2 measurement JSON: the immutable per-execution sample file.
+//! Schema-3 measurement JSON: the immutable per-execution sample file.
 //!
 //! One measurement backs every case covered by a recorded workload run series. The file records
 //! the workload identity, the measured executable/stdin artifact digests, the executed case
 //! (JSON-only provenance — never surfaced or pointed at from the database), the covered-case
-//! snapshot, and the raw runs and samples. Cases that inherit the workload later are stored as
-//! database links rather than by mutating this immutable file.
+//! snapshot, the run summary, and the raw runs and samples. Cases that inherit the workload
+//! later are stored as database links rather than by mutating this immutable file.
+//!
+//! Schema 2 files differ only in lacking the `summary` block (their database summary was the
+//! median run's own statistics).
 
 use crate::config::{BenchmarkId, Config};
 use crate::run::Run;
+use crate::stats::RunSummary;
 use crate::storage::MeasurementId;
 use crate::workload::{GroupSpec, Sha256};
 use jiff::Timestamp;
 use serde::Serialize;
 
 /// The current measurement JSON schema version.
-pub const MEASUREMENT_SCHEMA: u32 = 2;
+pub const MEASUREMENT_SCHEMA: u32 = 3;
 
-/// A schema-2 measurement, ready to serialize to its immutable JSON file.
+/// A schema-3 measurement, ready to serialize to its immutable JSON file.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Measurement {
     /// Schema version (always [`MEASUREMENT_SCHEMA`]).
@@ -42,6 +46,8 @@ pub struct Measurement {
     pub timestamp: Timestamp,
     /// Expected checksum, if any.
     pub checksum: Option<String>,
+    /// The headline numbers, computed from `runs` alone.
+    pub summary: RunSummary,
     /// Raw runs (sorted by mean), each carrying its samples.
     pub runs: Vec<Run>,
 }
@@ -59,15 +65,13 @@ mod tests {
             timestamp: Timestamp::from_second(10).unwrap(),
             stats: StatsResult {
                 mean_ns_per_iter: mean,
-                ci95_half_width_ns: 1.0,
                 mode: EstimationMode::PerIter,
                 intercept_ns: None,
-                outlier_count: 0,
+                se_ns: None,
                 samples: vec![Sample {
                     iters: 1,
                     total_ns: 1000,
                 }],
-                temporal_correlation: 0.0,
             },
             warmup: None,
             power: None,
@@ -102,11 +106,13 @@ mod tests {
             covered_cases: vec![config],
             timestamp: Timestamp::from_second(100).unwrap(),
             checksum: Some("deadbeef".into()),
+            summary: crate::stats::run_summary(&[10.0, 20.0, 30.0]),
             runs: vec![run(10.0), run(20.0), run(30.0)],
         };
 
         let text = serde_json::to_string(&measurement).unwrap();
-        assert!(text.contains("\"schema\":2"));
+        assert!(text.contains("\"schema\":3"));
+        assert!(text.contains("\"summary\":{\"run_count\":3,\"mean_ns\":20.0,"));
         assert!(text.contains("\"workload_sha256\":"));
         assert!(text.contains("\"executable_sha256\":"));
         assert!(text.contains("\"covered_cases\":"));

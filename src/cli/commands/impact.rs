@@ -132,8 +132,8 @@ fn print_impact(
                 "   {:<bench_width$} [{:<config_width$}] {:>DURATION_WIDTH$} -> {:>DURATION_WIDTH$} {:>DELTA_WIDTH$}",
                 entry.bench,
                 entry.config.to_string(),
-                format_duration_ns(entry.previous_stats.median_run_mean_ns),
-                format_duration_ns(entry.current_stats.median_run_mean_ns),
+                format_duration_ns(entry.previous_stats.mean_ns),
+                format_duration_ns(entry.current_stats.mean_ns),
                 format_delta(entry.change),
             )?;
         }

@@ -111,7 +111,9 @@ pub fn compute_drift(
 /// Determine whether `new_stats` represents a significant change relative to `stable`.
 ///
 /// A change is significant when the confidence intervals do not overlap and the relative
-/// difference in means is at least 3%. Returns the direction of the change if significant.
+/// difference in means is at least 3%. Returns the direction of the change if significant. A
+/// measurement without an interval (a single run, or one from before run summaries) can never
+/// show a change: a stable value without one is only replaced by a forced update or a re-key.
 #[must_use]
 pub fn significant_change(stable: MeasurementStats, new_stats: MeasurementStats) -> Option<Change> {
     significant_change_with_threshold(stable, new_stats, STABLE_RESULT_CHANGE_REL_THRESHOLD)
@@ -128,24 +130,27 @@ pub fn significant_change_with_threshold(
     new_stats: MeasurementStats,
     rel_threshold: f64,
 ) -> Option<Change> {
-    let (stable_low, stable_high) = stable.bounds();
-    let (new_low, new_high) = new_stats.bounds();
+    let (Some((stable_low, stable_high)), Some((new_low, new_high))) =
+        (stable.bounds(), new_stats.bounds())
+    else {
+        return None;
+    };
     let overlap = !(stable_high < new_low || new_high < stable_low);
 
-    let rel_diff = if stable.median_run_mean_ns == 0.0 {
+    let rel_diff = if stable.mean_ns == 0.0 {
         f64::INFINITY
     } else {
-        (new_stats.median_run_mean_ns - stable.median_run_mean_ns).abs() / stable.median_run_mean_ns
+        (new_stats.mean_ns - stable.mean_ns).abs() / stable.mean_ns
     };
 
     if overlap || rel_diff < rel_threshold {
         None
-    } else if new_stats.median_run_mean_ns > stable.median_run_mean_ns {
+    } else if new_stats.mean_ns > stable.mean_ns {
         Some(Change {
             direction: ChangeDirection::Regression,
             rel_change: rel_diff,
         })
-    } else if new_stats.median_run_mean_ns < stable.median_run_mean_ns {
+    } else if new_stats.mean_ns < stable.mean_ns {
         Some(Change {
             direction: ChangeDirection::Improvement,
             rel_change: rel_diff,
@@ -202,11 +207,10 @@ mod tests {
 
     fn stats(mean: f64, ci: f64) -> MeasurementStats {
         MeasurementStats {
-            run_count: 3,
-            median_run_mean_ns: mean,
-            median_run_ci95_half_ns: ci,
-            median_run_outlier_count: 0,
-            median_run_sample_count: 32,
+            run_count: 9,
+            mean_ns: mean,
+            ci95_half_ns: Some(ci),
+            multimodal: Some(false),
         }
     }
 
@@ -288,6 +292,16 @@ mod tests {
         );
         assert_eq!(update.counters, counters(0, 0, 4));
         assert!(update.stable_moved);
+    }
+
+    #[test]
+    fn missing_interval_is_never_a_change() {
+        let mut legacy = stats(1000.0, 0.0);
+        legacy.ci95_half_ns = None;
+        // Far outside the threshold in both directions, yet no claim is made either way
+        assert_eq!(significant_change(legacy, stats(1200.0, 1.0)), None);
+        assert_eq!(significant_change(stats(1000.0, 1.0), legacy), None);
+        assert_eq!(significant_change(legacy, legacy), None);
     }
 
     #[test]

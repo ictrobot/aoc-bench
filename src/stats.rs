@@ -1,52 +1,42 @@
-// Statistics engine: mode detection, WLS, bootstrap CI, outlier detection
+// Statistics engine: per-run estimation (mode detection, WLS, the run value) and the
+// across-run summary (mean and 95% t-interval over runs, multimodal flag).
+//
+// A run continues until its sampling floors are met and then stops. Nothing here adapts to the data:
+// the interval reported for a measurement is computed over runs, and the samples inside a
+// run only determine how precisely that run was timed.
 
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-use rand::prelude::*;
-use rand::rngs::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, trace, warn};
+use tracing::trace;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[must_use]
 pub struct StatsOptions {
-    /// Minimum post-warmup samples required before convergence checks
+    /// Minimum post-warmup samples per run
     pub min_samples: NonZeroUsize,
-    /// Minimum total post-warmup sample time (nanoseconds)
+    /// Minimum total post-warmup sample time per run (nanoseconds)
     pub min_total_time_ns: NonZeroU64,
-    /// Target relative CI half-width (e.g. 0.01 = 1%)
-    pub target_rel_ci: f64,
-    /// Warmup minimum samples before stability checks
+    /// Warmup minimum samples, counted from the first settled batch
     pub min_warmup_samples: NonZeroUsize,
-    /// Warmup minimum total time (nanoseconds)
+    /// Warmup minimum total time (nanoseconds), counted from the first settled batch
     pub min_warmup_time_ns: NonZeroU64,
-    /// Number of runs per series (must be odd)
+    /// Number of runs per measurement
     pub runs_per_series: NonZeroUsize,
     /// Wall-clock timeout for a single run (nanoseconds)
     pub run_timeout_ns: NonZeroU64,
 }
 
 impl StatsOptions {
-    pub const DEFAULT_MIN_SAMPLES: usize = 32;
+    pub const DEFAULT_MIN_SAMPLES: usize = 4;
     pub const DEFAULT_MIN_TOTAL_TIME_NS: u64 = 2_000_000_000; // 2 seconds
-    pub const DEFAULT_TARGET_REL_CI: f64 = 0.01; // 1%
-    pub const DEFAULT_MIN_WARMUP_SAMPLES: usize = 4;
-    pub const DEFAULT_MIN_WARMUP_TIME_NS: u64 = 1_000_000_000; // 1 second
-    pub const DEFAULT_RUNS_PER_SERIES: usize = 3;
+    pub const DEFAULT_MIN_WARMUP_SAMPLES: usize = 2;
+    pub const DEFAULT_MIN_WARMUP_TIME_NS: u64 = 500_000_000; // 0.5 seconds
+    pub const DEFAULT_RUNS_PER_SERIES: usize = 9;
     pub const DEFAULT_RUN_TIMEOUT_NS: u64 = 600_000_000_000; // 600 s
-
-    pub fn validate(&self) -> Result<(), (&'static str, &'static str)> {
-        if self.target_rel_ci <= 0.0 || self.target_rel_ci >= 1.0 {
-            return Err(("target_rel_ci", "must be between 0 and 1"));
-        }
-        if self.runs_per_series.get().is_multiple_of(2) {
-            return Err(("runs_per_series", "must be odd"));
-        }
-        Ok(())
-    }
 }
 
 impl Default for StatsOptions {
@@ -54,7 +44,6 @@ impl Default for StatsOptions {
         Self {
             min_samples: NonZeroUsize::new(Self::DEFAULT_MIN_SAMPLES).unwrap(),
             min_total_time_ns: NonZeroU64::new(Self::DEFAULT_MIN_TOTAL_TIME_NS).unwrap(),
-            target_rel_ci: Self::DEFAULT_TARGET_REL_CI,
             min_warmup_samples: NonZeroUsize::new(Self::DEFAULT_MIN_WARMUP_SAMPLES).unwrap(),
             min_warmup_time_ns: NonZeroU64::new(Self::DEFAULT_MIN_WARMUP_TIME_NS).unwrap(),
             runs_per_series: NonZeroUsize::new(Self::DEFAULT_RUNS_PER_SERIES).unwrap(),
@@ -71,12 +60,10 @@ pub enum EstimationMode {
     PerIter,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[must_use]
 pub enum StatsState {
     MoreSamplesRequired,
-    MoreSamplesOptional,
-    Abort(StatsError),
     Done,
 }
 
@@ -91,16 +78,6 @@ pub struct StatsAccumulator {
     options: StatsOptions,
     samples: Vec<Sample>,
     total_time_ns: u64,
-    last_state_check_ns: u64,
-    last_state: StatsState,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[must_use]
-pub struct BootstrapResult {
-    pub ci_lower: f64,
-    pub ci_upper: f64,
-    pub half_width: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,41 +87,29 @@ pub struct RegressionResult {
     pub intercept: f64, // α: fixed overhead per batch
 }
 
+/// The value of one run plus its diagnostics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct StatsResult {
     /// Mean time per iteration in nanoseconds
     pub mean_ns_per_iter: f64,
-    /// Half-width of 95% confidence interval in nanoseconds
-    pub ci95_half_width_ns: f64,
     /// Estimation mode used
     pub mode: EstimationMode,
     /// Fixed overhead per batch (only for regression mode, null otherwise)
     pub intercept_ns: Option<f64>,
-    /// Number of samples flagged as outliers
-    pub outlier_count: usize,
-    /// Spearman rank correlation between run index and residuals
-    pub temporal_correlation: f64,
+    /// Standard error of `mean_ns_per_iter` under the estimator that produced it (the WLS slope
+    /// in regression mode, the weighted mean otherwise), a diagnostic only. Absent when there are
+    /// too few samples to estimate it.
+    #[serde(default)]
+    pub se_ns: Option<f64>,
     /// All samples collected for this run
     pub samples: Vec<Sample>,
 }
 
 impl StatsAccumulator {
-    // Sampling behavior
-    const CHECK_EVERY_NS: u64 = 200_000_000; // 200 ms
-    const MAX_SAMPLES: usize = 1024;
-
-    // Bootstrap
-    const QUICK_BOOTSTRAP_SAMPLES: usize = 1000;
-    const FINAL_BOOTSTRAP_SAMPLES: usize = 10000;
-
-    // Outlier detection
-    const OUTLIER_MAD_NORMALIZATION: f64 = 1.482_602_218_505_602;
-    const OUTLIER_MAD_THRESHOLD: f64 = 3.5;
-
-    // Trend detection
-    const TREND_CORRELATION_THRESHOLD: f64 = 0.5;
-    const TREND_CORRELATION_MIN_ITERATIONS: usize = 256;
+    /// Memory guard only. Far above anything the time floor can collect before it is met, so it
+    /// never shortens a run in practice.
+    pub const MAX_SAMPLES: usize = 1 << 16;
 
     #[must_use]
     pub fn new() -> Self {
@@ -157,35 +122,17 @@ impl StatsAccumulator {
             options,
             samples: Vec::new(),
             total_time_ns: 0,
-            last_state_check_ns: 0,
-            last_state: StatsState::MoreSamplesRequired,
         }
     }
 
     /// Add a sample. Warmup samples are discarded before this by [`crate::warmup::Warmup`].
     ///
-    /// Returns the cached accumulator's state (see [`StatsAccumulator::state`]) which should be
-    /// used to determine if the sampling process should continue. For performance reasons the state
-    /// is not recomputed for every sample.
+    /// Returns whether the run's sampling floors have been met.
     pub fn add_sample(&mut self, iters: u64, total_ns: u64) -> StatsState {
         trace!(iters, total_ns, "new sample");
         self.samples.push(Sample { iters, total_ns });
         self.total_time_ns = self.total_time_ns.saturating_add(total_ns);
-
-        // Update the state:
-        //  - every CHECK_EVERY_NS of total sample time
-        //  - if the total time has saturated (to ensure the state is still refreshed)
-        //  - if the sample count has reached the maximum
-        let since_last_check_ns = self.total_time_ns.saturating_sub(self.last_state_check_ns);
-        if since_last_check_ns >= Self::CHECK_EVERY_NS
-            || self.total_time_ns == u64::MAX
-            || self.samples.len() >= Self::MAX_SAMPLES
-        {
-            self.last_state_check_ns = self.total_time_ns;
-            self.last_state = self.state();
-        }
-
-        self.last_state
+        self.state()
     }
 
     /// Returns the number of samples collected
@@ -200,76 +147,20 @@ impl StatsAccumulator {
         &self.samples
     }
 
-    /// Evaluates the current sampling state and determines if more samples are needed
-    ///
-    /// Returns:
-    /// - `MoreSamplesNeeded` if below minimum samples or convergence criteria not met
-    /// - `Done` if the confidence interval has converged, or the maximum number of samples has been
-    ///   reached
-    /// - `Abort` if a strong temporal trend is detected
+    /// `Done` once both the sample and time floors are met (or the memory guard is hit).
     pub fn state(&self) -> StatsState {
-        if self.samples.len() < self.options.min_samples.get() {
-            return StatsState::MoreSamplesRequired;
+        if self.samples.len() >= Self::MAX_SAMPLES {
+            return StatsState::Done;
         }
-
-        if self.total_time_ns < self.options.min_total_time_ns.get()
-            && self.samples.len() < Self::MAX_SAMPLES
+        if self.samples.len() < self.options.min_samples.get()
+            || self.total_time_ns < self.options.min_total_time_ns.get()
         {
             return StatsState::MoreSamplesRequired;
         }
-
-        let mode = self.detect_mode();
-        let (mean, regression) = match mode {
-            EstimationMode::Regression => {
-                let regression = self.compute_wls();
-                (regression.slope, Some(regression))
-            }
-            EstimationMode::PerIter => (self.compute_weighted_mean(), None),
-        };
-
-        let residuals = self.compute_residuals(regression);
-
-        // Check for trend in residuals
-        let trend_correlation = Self::compute_residual_trend_correlation(&residuals);
-        if trend_correlation.abs() > Self::TREND_CORRELATION_THRESHOLD {
-            return if self.samples.len() < Self::TREND_CORRELATION_MIN_ITERATIONS {
-                debug!(
-                    samples = self.samples.len(),
-                    trend_correlation,
-                    "trend correlation but small sample size, waiting for more samples"
-                );
-                StatsState::MoreSamplesRequired
-            } else {
-                StatsState::Abort(StatsError::TrendDetected { trend_correlation })
-            };
-        }
-
-        // Check for CI convergence
-        let ci = self.bootstrap_ci(mode, false);
-        let relative_ci_half_width = ci.half_width / mean;
-        if relative_ci_half_width <= self.options.target_rel_ci {
-            StatsState::Done
-        } else if self.samples.len() >= Self::MAX_SAMPLES {
-            warn!(
-                samples = self.samples.len(),
-                relative_ci_half_width,
-                target_ci = self.options.target_rel_ci,
-                "max samples reached before hitting target ci"
-            );
-            StatsState::Done
-        } else {
-            debug!(
-                samples = self.samples.len(),
-                relative_ci_half_width, "ci too wide, waiting for more samples"
-            );
-            StatsState::MoreSamplesOptional
-        }
+        StatsState::Done
     }
 
-    /// Finalizes sampling and computes the final statistics result
-    ///
-    /// This only returns meaningful results after [`Self::state()`] returns
-    /// [`StatsState::Done`] or [`StatsState::MoreSamplesOptional`].
+    /// Finalizes sampling and computes the run value.
     pub fn finish(self) -> StatsResult {
         let mode = self.detect_mode();
         let (mean_ns_per_iter, regression) = match mode {
@@ -279,22 +170,14 @@ impl StatsAccumulator {
             }
             EstimationMode::PerIter => (self.compute_weighted_mean(), None),
         };
-
-        // Compute residuals once for both outlier detection and trend analysis
-        let residuals = self.compute_residuals(regression);
-        let time_trend_correlation = Self::compute_residual_trend_correlation(&residuals);
-        let outlier_count = Self::count_outliers(residuals);
-
-        let ci = self.bootstrap_ci(mode, true);
+        let se_ns = self.compute_se(mean_ns_per_iter, regression);
 
         StatsResult {
             mode,
             mean_ns_per_iter,
-            ci95_half_width_ns: ci.half_width,
             intercept_ns: regression.map(|r| r.intercept),
-            outlier_count,
+            se_ns,
             samples: self.samples,
-            temporal_correlation: time_trend_correlation,
         }
     }
 
@@ -435,234 +318,67 @@ impl StatsAccumulator {
         }
     }
 
-    /// Computes bootstrap confidence interval for the mean estimate
+    /// Standard error of the run value for the estimator that produced it.
     ///
-    /// Uses resampling with replacement to estimate the 95% confidence interval.
-    /// - Quick bootstrap (1,000 iterations) during convergence checks
-    /// - Final bootstrap (10,000 iterations) for final result
+    /// Regression mode: the weighted-least-squares standard error of the slope, with residual
+    /// variance on `n - 2` degrees of freedom and the same `1/N` weights as the fit.
     ///
-    /// Returns the lower and upper CI bounds and half-width of the interval.
-    pub fn bootstrap_ci(&self, mode: EstimationMode, is_final: bool) -> BootstrapResult {
-        let n_bootstrap = if is_final {
-            Self::FINAL_BOOTSTRAP_SAMPLES
+    /// Per-iter mode: the ratio estimator's error, `sqrt(n / (n - 1) · Σ(T_i - μ·N_i)²) / ΣN`,
+    /// which is `sd(T_i / N_i) / sqrt(n)` when every sample has the same iteration count.
+    ///
+    /// `None` when there are too few usable samples (two for per-iter, three for regression).
+    fn compute_se(&self, estimate: f64, regression: Option<RegressionResult>) -> Option<f64> {
+        let samples: Vec<&Sample> = self.samples.iter().filter(|s| s.iters > 0).collect();
+        if let Some(regression) = regression {
+            Self::slope_se(&samples, regression)
         } else {
-            Self::QUICK_BOOTSTRAP_SAMPLES
-        };
-
-        if self.samples.is_empty() {
-            return BootstrapResult {
-                ci_lower: 0.0,
-                ci_upper: 0.0,
-                half_width: f64::INFINITY,
-            };
-        }
-
-        // Use consistent resampling in tests to ensure deterministic results
-        #[cfg(test)]
-        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        #[cfg(not(test))]
-        let mut rng: Xoshiro256PlusPlus = rand::make_rng();
-
-        let mut bootstrap_estimates = Vec::with_capacity(n_bootstrap);
-
-        // Perform bootstrap resampling
-        for _ in 0..n_bootstrap {
-            // Resample with replacement
-            let resampled: Vec<Sample> = (0..self.samples.len())
-                .map(|_| *self.samples.choose(&mut rng).unwrap())
-                .collect();
-
-            // Compute estimate for this resample
-            let estimate = match mode {
-                EstimationMode::Regression => Self::compute_wls_from_samples(&resampled).slope,
-                EstimationMode::PerIter => Self::compute_weighted_mean_from_samples(&resampled),
-            };
-
-            bootstrap_estimates.push(estimate);
-        }
-
-        // Sort and compute percentiles
-        bootstrap_estimates.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        // 2.5th and 97.5th percentiles for 95% CI
-        let ci_lower =
-            bootstrap_estimates[Self::percentile_index(bootstrap_estimates.len(), 0.025)];
-        let ci_upper =
-            bootstrap_estimates[Self::percentile_index(bootstrap_estimates.len(), 0.975)];
-        let half_width = (ci_upper - ci_lower) / 2.0;
-
-        BootstrapResult {
-            ci_lower,
-            ci_upper,
-            half_width,
+            Self::weighted_mean_se(&samples, estimate)
         }
     }
 
-    /// Computes residuals based on the estimation mode
-    ///
-    /// - For regression: residual = actual time - predicted time from linear model
-    /// - For per-iter: residual = time per iteration
-    ///
-    /// Returns a vector of residuals in original sample order.
-    #[must_use]
-    pub fn compute_residuals(&self, regression: Option<RegressionResult>) -> Vec<f64> {
-        if self.samples.is_empty() {
-            return Vec::new();
+    fn slope_se(samples: &[&Sample], regression: RegressionResult) -> Option<f64> {
+        let n = samples.len();
+        if n < 3 {
+            return None;
         }
-
-        match regression {
-            Some(regression) => self
-                .samples
-                .iter()
-                .map(|s| {
-                    let n = s.iters as f64;
-                    let t = s.total_ns as f64;
-                    let predicted = regression.intercept + regression.slope * n;
-                    t - predicted
-                })
-                .collect(),
-            None => {
-                // Per-iteration residuals
-                self.samples
-                    .iter()
-                    .map(|s| {
-                        let n = s.iters as f64;
-                        let t = s.total_ns as f64;
-                        t / n
-                    })
-                    .collect()
-            }
+        let mut w_sum = 0.0;
+        let mut w_n_sum = 0.0;
+        for s in samples {
+            let w = 1.0 / s.iters as f64;
+            w_sum += w;
+            w_n_sum += w * s.iters as f64;
         }
+        let n_mean = w_n_sum / w_sum;
+        let mut weighted_rss = 0.0;
+        let mut sxx = 0.0;
+        for s in samples {
+            let iters = s.iters as f64;
+            let w = 1.0 / iters;
+            let residual = s.total_ns as f64 - regression.intercept - regression.slope * iters;
+            weighted_rss += w * residual * residual;
+            sxx += w * (iters - n_mean) * (iters - n_mean);
+        }
+        if sxx == 0.0 {
+            return None;
+        }
+        let sigma_sq = weighted_rss / (n as f64 - 2.0);
+        Some((sigma_sq / sxx).sqrt())
     }
 
-    /// Detects outliers using the MAD (Median Absolute Deviation) method on residuals
-    ///
-    /// Uses modified Z-scores based on MAD for robust outlier detection:
-    /// - MAD is scaled by 1.4826 (consistency constant for normal distribution)
-    /// - Outliers are samples where modified Z-score > 3.5
-    ///
-    /// Returns the count of detected outliers.
-    fn count_outliers(mut residuals: Vec<f64>) -> usize {
-        if residuals.is_empty() {
-            return 0;
+    fn weighted_mean_se(samples: &[&Sample], estimate: f64) -> Option<f64> {
+        let n = samples.len();
+        if n < 2 {
+            return None;
         }
-
-        // Sort residuals to compute median
-        residuals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = residuals[Self::percentile_index(residuals.len(), 0.5)];
-
-        // Compute MAD (Median Absolute Deviation)
-        let mut abs_devs: Vec<f64> = residuals.iter().map(|&r| (r - median).abs()).collect();
-        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mad = abs_devs[Self::percentile_index(abs_devs.len(), 0.5)];
-
-        // Modified Z-scores, using consistency constant for normal distribution
-        let mad_scaled = mad * Self::OUTLIER_MAD_NORMALIZATION;
-
-        // Count outliers
-        residuals
+        let total_iters: f64 = samples.iter().map(|s| s.iters as f64).sum();
+        let rss: f64 = samples
             .iter()
-            .filter(|&&r| ((r - median) / mad_scaled).abs() > Self::OUTLIER_MAD_THRESHOLD)
-            .count()
-    }
-
-    /// Computes Spearman rank correlation between run index and residuals
-    ///
-    /// This detects systematic trends in model errors over the sampling period:
-    /// - Positive correlation: residuals increasing (model underestimates over time)
-    /// - Negative correlation: residuals decreasing (model overestimates over time)
-    /// - Near zero: no trend (ideal - errors are random)
-    ///
-    /// Returns correlation coefficient in range [-1, 1], or 0.0 if insufficient data.
-    fn compute_residual_trend_correlation(residuals: &[f64]) -> f64 {
-        if residuals.len() < 2 {
-            return 0.0;
-        }
-
-        Self::spearman_correlation(
-            (0..residuals.len()).map(|i| i as f64),
-            residuals.iter().copied(),
-        )
-    }
-
-    /// Computes Spearman rank correlation coefficient between two sequences
-    ///
-    /// Uses rank-based correlation which is robust to outliers and non-linear monotonic relationships.
-    fn spearman_correlation(
-        x: impl IntoIterator<Item = f64>,
-        y: impl IntoIterator<Item = f64>,
-    ) -> f64 {
-        // Assign ranks to x
-        let rank_x = Self::assign_ranks(x);
-        let rank_y = Self::assign_ranks(y);
-
-        // Compute Pearson correlation on ranks
-        Self::pearson_correlation(&rank_x, &rank_y)
-    }
-
-    /// Assigns ranks to values (average rank for ties)
-    fn assign_ranks(values: impl IntoIterator<Item = f64>) -> Vec<f64> {
-        // Create (value, original_index) pairs and sort by value
-        let mut indexed: Vec<(f64, usize)> = values
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| (v, i))
-            .collect();
-        indexed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        // Assign ranks (1-based, with average for ties)
-        let n = indexed.len();
-        let mut ranks = vec![0.0; n];
-        let mut i = 0;
-        while i < n {
-            let mut j = i;
-            // Find end of tied group
-            while j < n && (indexed[j].0 - indexed[i].0).abs() < 1e-10 {
-                j += 1;
-            }
-            // Average rank for this group (1-based ranks)
-            let avg_rank = (i + j + 1) as f64 / 2.0;
-            for k in i..j {
-                ranks[indexed[k].1] = avg_rank;
-            }
-            i = j;
-        }
-
-        ranks
-    }
-
-    /// Computes Pearson correlation coefficient
-    fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
-        if x.len() != y.len() || x.is_empty() {
-            return 0.0;
-        }
-
-        let n = x.len() as f64;
-        let mean_x: f64 = x.iter().sum::<f64>() / n;
-        let mean_y: f64 = y.iter().sum::<f64>() / n;
-
-        let mut cov = 0.0;
-        let mut var_x = 0.0;
-        let mut var_y = 0.0;
-
-        for i in 0..x.len() {
-            let dx = x[i] - mean_x;
-            let dy = y[i] - mean_y;
-            cov += dx * dy;
-            var_x += dx * dx;
-            var_y += dy * dy;
-        }
-
-        if var_x == 0.0 || var_y == 0.0 {
-            return 0.0;
-        }
-
-        cov / (var_x.sqrt() * var_y.sqrt())
-    }
-
-    fn percentile_index(len: usize, p: f64) -> usize {
-        // Pick the smallest element such that at least p% of the data is ≤ that element
-        ((len as f64 * p).ceil() - 1.0).clamp(0.0, len as f64 - 1.0) as usize
+            .map(|s| {
+                let residual = s.total_ns as f64 - estimate * s.iters as f64;
+                residual * residual
+            })
+            .sum();
+        Some((rss * n as f64 / (n as f64 - 1.0)).sqrt() / total_iters)
     }
 }
 
@@ -672,20 +388,153 @@ impl Default for StatsAccumulator {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, thiserror::Error)]
-pub enum StatsError {
-    #[error("{}", if *.trend_correlation > 0.0 {
-        format!("increasing trend in per-iteration run time detected ({trend_correlation:.2})")
+/// The headline numbers for one measurement, derived only from its run values.
+///
+/// Each run of a series is a separate process launch, and the run-to-run spread is the noise
+/// that matters, so the interval is a plain Student t-interval over the run values. Sampling
+/// inside a run only sets how precisely that run was timed, and its error is already part of
+/// the spread between runs, so nothing from inside a run is combined with it. No step here
+/// adapts to the data: the run count is fixed by configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RunSummary {
+    /// Number of runs the summary is over
+    pub run_count: usize,
+    /// Mean of the run values, nanoseconds per iteration
+    pub mean_ns: f64,
+    /// Half-width of the 95% t-interval over runs. `None` with a single run.
+    pub ci95_half_ns: Option<f64>,
+    /// Whether the run values fall into more than one cluster (see [`multimodal`]). An
+    /// annotation only: it changes no number.
+    pub multimodal: bool,
+}
+
+/// Summarise the run values of one measurement. The values need not be sorted.
+#[must_use]
+pub fn run_summary(means: &[f64]) -> RunSummary {
+    let n = means.len();
+    let mean_ns = if n == 0 {
+        0.0
     } else {
-        format!("decreasing trend in per-iteration run time detected ({trend_correlation:.2})")
-    })]
-    TrendDetected { trend_correlation: f64 },
+        means.iter().sum::<f64>() / n as f64
+    };
+    let ci95_half_ns = (n >= 2).then(|| {
+        let var = means
+            .iter()
+            .map(|m| (m - mean_ns) * (m - mean_ns))
+            .sum::<f64>()
+            / (n as f64 - 1.0);
+        t_quantile_975(n - 1) * var.sqrt() / (n as f64).sqrt()
+    });
+    RunSummary {
+        run_count: n,
+        mean_ns,
+        ci95_half_ns,
+        multimodal: multimodal(means),
+    }
+}
+
+/// 97.5th percentile of Student's t for `df` degrees of freedom, i.e. the two-sided 95%
+/// multiplier. Tabulated to four decimals, rounded up, for 1 to 30 df. Beyond that the value at
+/// the start of each range stands in: 31 df up to 60, 61 df up to 100, and 101 df above. So the
+/// multiplier never understates the exact one and overstates it by at most 2%.
+#[must_use]
+pub fn t_quantile_975(df: usize) -> f64 {
+    const TABLE: [f64; 30] = [
+        12.7063, 4.3027, 3.1825, 2.7765, 2.5706, 2.4470, 2.3647, 2.3061, 2.2622, 2.2282, 2.2010,
+        2.1789, 2.1604, 2.1448, 2.1315, 2.1200, 2.1099, 2.1010, 2.0931, 2.0860, 2.0797, 2.0739,
+        2.0687, 2.0639, 2.0596, 2.0556, 2.0519, 2.0485, 2.0453, 2.0423,
+    ];
+    match df {
+        0 => f64::INFINITY,
+        1..=30 => TABLE[df - 1],
+        31..=60 => 2.0396,
+        61..=100 => 1.9997,
+        _ => 1.9838,
+    }
+}
+
+/// Whether run values fall into more than one level.
+///
+/// Sort the values. Every gap between neighbours wider than 1% of the mean is a break, and the
+/// runs between breaks form clusters. A cluster of one run is an outlier: it is no level, counts
+/// toward nothing, and is skipped over. A level is a cluster of two or more runs. While the gap
+/// between two consecutive levels (measured across any outliers between them) is no wider than
+/// four times the pooled within-level standard deviation, merge the narrowest such pair and
+/// everything between them. Flagged when two or more levels remain, so a level has to be seen at
+/// least twice and the separation test holds for exactly the levels reported. Never flagged below
+/// four values.
+#[must_use]
+pub fn multimodal(values: &[f64]) -> bool {
+    let n = values.len();
+    if n < 4 {
+        return false;
+    }
+    let mut xs = values.to_vec();
+    xs.sort_by(f64::total_cmp);
+    let mean = xs.iter().sum::<f64>() / n as f64;
+    if mean.is_nan() || mean <= 0.0 {
+        return false;
+    }
+
+    // Breaks, by the index of the gap after xs[i]
+    let mut cuts: Vec<usize> = xs
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[1] - w[0] > 0.01 * mean)
+        .map(|(i, _)| i)
+        .collect();
+
+    loop {
+        let clusters = split(&xs, &cuts);
+        let levels: Vec<&Vec<f64>> = clusters.iter().filter(|c| c.len() >= 2).collect();
+        if levels.len() < 2 {
+            return false;
+        }
+
+        let members: usize = levels.iter().map(|l| l.len()).sum();
+        let ss: f64 = levels
+            .iter()
+            .map(|l| {
+                let m = l.iter().sum::<f64>() / l.len() as f64;
+                l.iter().map(|x| (x - m) * (x - m)).sum::<f64>()
+            })
+            .sum();
+        let within = (ss / (members - levels.len()) as f64).sqrt();
+
+        // The narrowest gap between consecutive levels that fails the separation test
+        let weakest = levels
+            .windows(2)
+            .map(|pair| {
+                (
+                    pair[1][0] - pair[0][pair[0].len() - 1],
+                    pair[0][pair[0].len() - 1],
+                )
+            })
+            .filter(|&(gap, _)| gap <= 4.0 * within)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let Some((gap, from)) = weakest else {
+            return true;
+        };
+        // Merge the pair and anything between them by dropping every break inside their span
+        let to = from + gap;
+        cuts.retain(|&c| !(xs[c] >= from && xs[c] < to));
+    }
+}
+
+fn split(xs: &[f64], cuts: &[usize]) -> Vec<Vec<f64>> {
+    let mut clusters = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for &cut in cuts {
+        clusters.push(xs[start..=cut].to_vec());
+        start = cut + 1;
+    }
+    clusters.push(xs[start..].to_vec());
+    clusters
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::assert_matches;
     use std::num::{NonZeroU64, NonZeroUsize};
 
     #[test]
@@ -825,37 +674,49 @@ mod tests {
     }
 
     #[test]
-    fn test_state_transitions() {
+    fn state_done_once_floors_met() {
         let mut acc = StatsAccumulator::new();
 
-        // Add samples to satisfy the time and samples gates
-        for i in 1..32 {
-            assert_matches!(
+        // 4 samples of 100 ms meet the sample floor but not the 2 s time floor
+        for i in 1..=4 {
+            assert_eq!(
                 acc.add_sample(100, 100_000_000),
                 StatsState::MoreSamplesRequired
             );
             assert_eq!(acc.sample_count(), i);
         }
-        assert_matches!(acc.add_sample(100, 100_000_000), StatsState::Done);
+        // 2 s of sample time is reached on the 20th sample
+        for _ in 5..20 {
+            assert_eq!(
+                acc.add_sample(100, 100_000_000),
+                StatsState::MoreSamplesRequired
+            );
+        }
+        assert_eq!(acc.add_sample(100, 100_000_000), StatsState::Done);
     }
 
     #[test]
-    fn test_min_samples_transitions() {
+    fn state_waits_for_sample_floor_after_time_floor() {
         let mut acc = StatsAccumulator::new();
 
-        for _ in 0..StatsOptions::DEFAULT_MIN_SAMPLES - 1 {
-            let state = acc.add_sample(100, 150_000_000);
-            assert_matches!(state, StatsState::MoreSamplesRequired);
-        }
-
-        // At exactly MIN_SAMPLES, state checks stopping
-        let state = acc.add_sample(100, 150_000_000);
-        // With consistent samples, should return Done
-        assert_matches!(state, StatsState::Done);
+        // One 3 s sample meets the time floor but not the 4-sample floor
+        assert_eq!(
+            acc.add_sample(1, 3_000_000_000),
+            StatsState::MoreSamplesRequired
+        );
+        assert_eq!(
+            acc.add_sample(1, 3_000_000_000),
+            StatsState::MoreSamplesRequired
+        );
+        assert_eq!(
+            acc.add_sample(1, 3_000_000_000),
+            StatsState::MoreSamplesRequired
+        );
+        assert_eq!(acc.add_sample(1, 3_000_000_000), StatsState::Done);
     }
 
     #[test]
-    fn test_custom_min_samples_and_time_are_honored() {
+    fn state_honours_custom_floors() {
         let opts = StatsOptions {
             min_samples: NonZeroUsize::new(2).unwrap(),
             min_total_time_ns: NonZeroU64::new(1).unwrap(),
@@ -863,215 +724,65 @@ mod tests {
         };
 
         let mut acc = StatsAccumulator::with_options(opts);
-        assert_matches!(
+        assert_eq!(
             acc.add_sample(100, 10_000_000),
             StatsState::MoreSamplesRequired
         );
-        let _ = acc.add_sample(100, 10_000_000);
-        let state = acc.state();
-        assert_matches!(state, StatsState::Done | StatsState::MoreSamplesOptional);
+        assert_eq!(acc.add_sample(100, 10_000_000), StatsState::Done);
     }
 
     #[test]
-    fn test_max_samples_finishes() {
+    fn se_ns_from_samples() {
         let mut acc = StatsAccumulator::new();
+        // Per-iteration times 48, 50, 52: sd = 2, se = 2 / sqrt(3)
+        let _ = acc.add_sample(100, 4800);
+        let _ = acc.add_sample(100, 5000);
+        let _ = acc.add_sample(100, 5200);
 
-        for i in 0..StatsAccumulator::MAX_SAMPLES - 1 {
-            let total_ns = match i % 3 {
-                0 => 10_000_000,
-                1 => 20_000_000,
-                _ => 30_000_000,
-            }; // moderate variance, keeps CI wide without triggering outliers
-            assert_matches!(
-                acc.add_sample(100, total_ns),
-                StatsState::MoreSamplesRequired | StatsState::MoreSamplesOptional
-            );
-        }
-
-        // Hitting MAX_SAMPLES should finish without aborting even if CI is still wide
-        assert_matches!(acc.add_sample(100, 30_000_000), StatsState::Done);
+        let result = acc.finish();
+        let se = result.se_ns.unwrap();
+        assert!((se - 2.0 / 3f64.sqrt()).abs() < 1e-9, "{se}");
+        assert!((result.mean_ns_per_iter - 50.0).abs() < 1e-9);
     }
 
     #[test]
-    fn test_time_gate_blocks_early_completion() {
+    fn se_ns_is_zero_for_a_perfect_regression_fit() {
+        // T = 10000 + 50N: the intercept is fixed overhead, not uncertainty in the slope
         let mut acc = StatsAccumulator::new();
-
-        // 200 samples * 10ms = 2s
-        for _ in 1..200 {
-            assert_matches!(
-                acc.add_sample(100, 10_000_000),
-                StatsState::MoreSamplesRequired
-            );
+        for n in [100, 200, 300, 400] {
+            let _ = acc.add_sample(n, 10_000 + 50 * n);
         }
-
-        assert_matches!(acc.add_sample(100, 10_000_000), StatsState::Done);
+        let result = acc.finish();
+        assert_eq!(result.mode, EstimationMode::Regression);
+        assert!((result.mean_ns_per_iter - 50.0).abs() < 1e-9);
+        assert!(result.se_ns.unwrap().abs() < 1e-9, "{:?}", result.se_ns);
     }
 
     #[test]
-    fn test_time_gate_unblocked_by_sample_count() {
+    fn se_ns_follows_the_weighted_mean_with_unequal_iteration_counts() {
+        // Per-iter mode (two distinct counts). μ = (1000 + 2100) / (10 + 20) = 103.33; the
+        // residuals T - μN are -33.3 and +33.3, so se = sqrt(2 · 2 · 33.3²) / 30
         let mut acc = StatsAccumulator::new();
-
-        // Very fast samples: total time stays well under 2s, but count will reach MAX_SAMPLES
-        for _ in 1..StatsAccumulator::MAX_SAMPLES {
-            assert_matches!(
-                acc.add_sample(100, 1_000), // 1µs per sample
-                StatsState::MoreSamplesRequired
-            );
-        }
-
-        assert_matches!(acc.add_sample(100, 1_000), StatsState::Done);
+        let _ = acc.add_sample(10, 1000);
+        let _ = acc.add_sample(20, 2100);
+        let result = acc.finish();
+        assert_eq!(result.mode, EstimationMode::PerIter);
+        let mu: f64 = 3100.0 / 30.0;
+        let residual = 1000.0 - mu * 10.0;
+        let expected = (2.0 * 2.0 * residual * residual).sqrt() / 30.0;
+        assert!((result.se_ns.unwrap() - expected).abs() < 1e-9);
     }
 
-    // Phase 2 tests: Bootstrap CI
     #[test]
-    fn test_bootstrap_ci_per_iter_mode() {
+    fn se_ns_none_below_two_samples() {
         let mut acc = StatsAccumulator::new();
+        let _ = acc.add_sample(100, 5000);
+        assert_eq!(acc.finish().se_ns, None);
 
-        // Add consistent samples (low variance)
-        for _ in 0..100 {
-            let _ = acc.add_sample(100, 5000); // Exactly 50 ns/iter
-        }
-
-        let result = acc.bootstrap_ci(EstimationMode::PerIter, false);
-
-        // With no variance, CI should be very narrow
-        assert!(result.ci_lower > 0.0);
-        assert!(result.ci_upper > 0.0);
-        assert!(result.ci_lower <= 50.0);
-        assert!(result.ci_upper >= 50.0);
-        let mean = acc.compute_weighted_mean();
-        let relative_half_width = result.half_width / mean;
-        assert!(relative_half_width < 0.1); // Should be < 10%
-    }
-
-    #[test]
-    fn test_bootstrap_ci_regression_mode() {
         let mut acc = StatsAccumulator::new();
-
-        let _ = acc.add_sample(100, 5010); // 50 ns/iter + 10 ns overhead
-        let _ = acc.add_sample(200, 10010);
-        let _ = acc.add_sample(300, 15010);
-        let _ = acc.add_sample(400, 20010);
-
-        let result = acc.bootstrap_ci(EstimationMode::Regression, false);
-
-        // CI should contain true value of 50
-        assert!(result.ci_lower <= 50.0);
-        assert!(result.ci_upper >= 50.0);
-        let regression = acc.compute_wls();
-        let relative_half_width = result.half_width / regression.slope;
-        assert!(relative_half_width < 0.1); // Should be < 10%
-    }
-
-    // Phase 2 tests: Outlier detection
-    #[test]
-    fn test_outlier_detection_no_outliers() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add consistent samples (no outliers)
-        for _ in 0..100 {
-            let _ = acc.add_sample(100, 5000); // 50 ns/iter
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let outlier_count = StatsAccumulator::count_outliers(residuals);
-
-        assert_eq!(outlier_count, 0);
-    }
-
-    #[test]
-    fn test_outlier_detection_with_outliers() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add mostly good samples
-        for _ in 0..90 {
-            let _ = acc.add_sample(100, 5000); // 50 ns/iter
-        }
-
-        // Add some outliers (10% outliers)
-        for _ in 0..10 {
-            let _ = acc.add_sample(100, 50000); // 500 ns/iter (10x slower!)
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let outlier_count = StatsAccumulator::count_outliers(residuals);
-
-        assert!(outlier_count > 0);
-        let outlier_fraction = outlier_count as f64 / 100.0;
-        assert!(outlier_fraction > 0.05); // More than 5%
-    }
-
-    #[test]
-    fn test_outlier_detection_regression_mode() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add samples following linear relationship: T = 10 + 50*N
-        for _ in 0..40 {
-            let _ = acc.add_sample(100, 5010);
-            let _ = acc.add_sample(200, 10010);
-            let _ = acc.add_sample(300, 15010);
-        }
-
-        // Add outliers
-        for _ in 0..10 {
-            let _ = acc.add_sample(100, 50000); // Way off the line
-        }
-
-        let regression = acc.compute_wls();
-        let residuals = acc.compute_residuals(Some(regression));
-        let outlier_count = StatsAccumulator::count_outliers(residuals);
-
-        assert!(outlier_count > 0);
-        let outlier_fraction = outlier_count as f64 / acc.sample_count() as f64;
-        assert!(outlier_fraction > 0.05);
-    }
-
-    #[test]
-    fn test_outlier_threshold_boundary() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add 100 good samples
-        for _ in 0..100 {
-            let _ = acc.add_sample(100, 5000);
-        }
-
-        // Add exactly 5 outliers (5% threshold)
-        for _ in 0..5 {
-            let _ = acc.add_sample(100, 50000);
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let outlier_count = StatsAccumulator::count_outliers(residuals);
-        assert_eq!(outlier_count, 5);
-
-        let outlier_fraction = outlier_count as f64 / acc.sample_count() as f64;
-        assert!((outlier_fraction - (5.0 / 105.0)) < 0.0001);
-    }
-
-    #[test]
-    fn test_bootstrap_with_empty_samples() {
-        let acc = StatsAccumulator::new();
-
-        let result = acc.bootstrap_ci(EstimationMode::PerIter, false);
-
-        assert!((result.ci_lower - 0.0).abs() < 0.001);
-        assert!((result.ci_upper - 0.0).abs() < 0.001);
-        assert!(result.half_width.is_infinite());
-    }
-
-    #[test]
-    fn test_outliers_with_insufficient_samples() {
-        let mut acc = StatsAccumulator::new();
-
-        for _ in 0..2 {
-            let _ = acc.add_sample(100, 5000);
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let outlier_count = StatsAccumulator::count_outliers(residuals);
-
-        assert_eq!(outlier_count, 0);
-        assert_eq!(acc.sample_count(), 2);
+        let _ = acc.add_sample(0, 0);
+        let _ = acc.add_sample(100, 5000);
+        assert_eq!(acc.finish().se_ns, None);
     }
 
     #[test]
@@ -1092,127 +803,117 @@ mod tests {
     }
 
     #[test]
-    fn test_residual_trend_no_correlation() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add samples with consistent time per iteration - no trend in residuals
-        for _ in 0..100 {
-            let _ = acc.add_sample(100, 5000); // 50 ns/iter
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
-        assert!(
-            correlation.abs() < 0.1,
-            "Expected near-zero correlation for constant times, got {correlation}"
-        );
+    fn single_run_has_no_interval() {
+        let s = run_summary(&[100.0]);
+        assert_eq!(s.run_count, 1);
+        assert!((s.mean_ns - 100.0).abs() < 1e-9);
+        assert_eq!(s.ci95_half_ns, None);
+        assert!(!s.multimodal);
     }
 
     #[test]
-    fn test_residual_trend_positive_correlation() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add samples with increasing time per iteration (warmup/throttling)
-        // This creates a positive trend in residuals
-        for i in 0..100 {
-            let time = 5000 + i * 10; // 50ns/iter + 10ns per sample
-            let _ = acc.add_sample(100, time);
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
-        assert!(
-            correlation > 0.9,
-            "Expected strong positive correlation for increasing times, got {correlation}"
-        );
+    fn nine_runs_use_t_with_eight_df() {
+        // Values with mean 100 and sample sd 1 (ddof 1): seven at 100, one at 98, one at 102
+        let s = run_summary(&[100.0, 102.0, 100.0, 98.0, 100.0, 100.0, 100.0, 100.0, 100.0]);
+        assert_eq!(s.run_count, 9);
+        assert!((s.mean_ns - 100.0).abs() < 1e-9);
+        let expected = 2.3061 * 1.0 / 3.0;
+        assert!((s.ci95_half_ns.unwrap() - expected).abs() < 1e-9);
+        assert!(!s.multimodal, "unsorted input, tight spread");
     }
 
     #[test]
-    fn test_residual_trend_negative_correlation() {
-        let mut acc = StatsAccumulator::new();
-
-        // Add samples with decreasing time per iteration (caching/optimization)
-        // This creates a negative trend in residuals
-        for i in 0..100 {
-            let time = 10000 - i * 10; // 100ns/iter - 10ns per sample
-            let _ = acc.add_sample(100, time);
-        }
-
-        let residuals = acc.compute_residuals(None);
-        let correlation = StatsAccumulator::compute_residual_trend_correlation(&residuals);
-        assert!(
-            correlation < -0.9,
-            "Expected strong negative correlation for decreasing times, got {correlation}"
-        );
+    fn t_table_values() {
+        assert!((t_quantile_975(1) - 12.7063).abs() < 1e-9);
+        assert!((t_quantile_975(2) - 4.3027).abs() < 1e-9);
+        assert!((t_quantile_975(8) - 2.3061).abs() < 1e-9);
+        assert!((t_quantile_975(30) - 2.0423).abs() < 1e-9);
+        // Fallbacks never understate: each is the value at the start of its range
+        assert!((t_quantile_975(31) - 2.0396).abs() < 1e-9);
+        assert!((t_quantile_975(60) - 2.0396).abs() < 1e-9);
+        assert!((t_quantile_975(61) - 1.9997).abs() < 1e-9);
+        assert!((t_quantile_975(100) - 1.9997).abs() < 1e-9);
+        assert!((t_quantile_975(101) - 1.9838).abs() < 1e-9);
+        assert!((t_quantile_975(100_000) - 1.9838).abs() < 1e-9);
+        assert!(t_quantile_975(0).is_infinite());
     }
 
     #[test]
-    fn test_spearman_correlation_perfect_positive() {
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
-        let corr = StatsAccumulator::spearman_correlation(x, y);
-        assert!((corr - 1.0).abs() < 0.001);
+    fn unimodal_is_not_flagged() {
+        assert!(!multimodal(&[
+            100.1, 100.4, 99.8, 100.6, 100.2, 99.9, 100.3, 100.5, 100.0
+        ]));
     }
 
     #[test]
-    fn test_spearman_correlation_perfect_negative() {
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![10.0, 8.0, 6.0, 4.0, 2.0];
-        let corr = StatsAccumulator::spearman_correlation(x, y);
-        assert!((corr + 1.0).abs() < 0.001);
+    fn two_modes_are_flagged() {
+        // 5 fast at ~82.1, 4 slow at ~95.5
+        assert!(multimodal(&[
+            82.2, 95.3, 82.1, 95.6, 82.2, 82.1, 95.4, 82.0, 95.5
+        ]));
+        // 60/40 split with a 4% gap
+        assert!(multimodal(&[
+            100.0, 100.2, 99.9, 104.1, 100.1, 103.9, 104.0, 100.0, 104.2
+        ]));
     }
 
     #[test]
-    fn test_spearman_correlation_with_ties() {
-        let x = vec![1.0, 2.0, 2.0, 4.0, 5.0];
-        let y = vec![1.0, 3.0, 3.0, 7.0, 9.0];
-        let corr = StatsAccumulator::spearman_correlation(x, y);
-        assert!(corr > 0.9); // Should still be strongly positive
+    fn three_levels_are_flagged() {
+        assert!(multimodal(&[
+            100.0, 104.0, 108.1, 100.1, 103.9, 107.9, 100.2, 104.1, 108.0
+        ]));
     }
 
     #[test]
-    fn test_spearman_correlation_insufficient_data() {
-        let x = vec![1.0];
-        let y = vec![2.0];
-        let corr = StatsAccumulator::spearman_correlation(x, y);
-        assert!((corr - 0.0).abs() < 0.001);
+    fn lone_outlier_is_not_a_mode() {
+        assert!(!multimodal(&[
+            100.0, 100.1, 99.9, 100.2, 100.0, 99.8, 100.1, 100.0, 112.0
+        ]));
     }
 
     #[test]
-    fn test_trend_detection_aborts_after_min_samples() {
-        let mut acc = StatsAccumulator::new();
-
-        // Generate a strong upward trend in per-iteration time
-        for i in 1..StatsAccumulator::TREND_CORRELATION_MIN_ITERATIONS {
-            assert_matches!(
-                acc.add_sample(100, i as u64 * StatsAccumulator::CHECK_EVERY_NS),
-                StatsState::MoreSamplesRequired
-            );
-        }
-
-        // Next sample should push it over the threshold and trigger Abort
-        assert_matches!(
-            acc.add_sample(100, 1_000_000_000),
-            StatsState::Abort(StatsError::TrendDetected { .. })
-        );
+    fn lone_runs_are_outliers_not_levels() {
+        // Every gap is a break but no level was seen twice, so there is nothing to flag, and a
+        // small nudge to the spacing must not change that
+        assert!(!multimodal(&[
+            100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0, 116.0
+        ]));
+        assert!(!multimodal(&[
+            100.0, 102.1, 103.9, 106.2, 107.8, 110.3, 111.7, 114.4, 115.6
+        ]));
+        assert!(!multimodal(&[100.0, 102.0, 105.0, 107.0]));
     }
 
     #[test]
-    fn test_stats_options_validate_rejects_bad_values() {
-        // target_rel_ci outside (0,1)
-        let opts = StatsOptions {
-            target_rel_ci: 1.5,
-            ..StatsOptions::default()
-        };
-        let err = opts.validate().unwrap_err();
-        assert_eq!(err.0, "target_rel_ci");
+    fn outlier_beside_two_levels_does_not_hide_them() {
+        assert!(multimodal(&[
+            82.0, 82.1, 82.0, 82.2, 82.1, 95.4, 95.5, 95.6, 112.0
+        ]));
+    }
 
-        // runs_per_series must be odd
-        let opts = StatsOptions {
-            runs_per_series: NonZeroUsize::new(4).unwrap(),
-            ..StatsOptions::default()
-        };
-        let err = opts.validate().unwrap_err();
-        assert_eq!(err.0, "runs_per_series");
+    #[test]
+    fn levels_too_close_for_their_spread_merge() {
+        // Two levels of three with within-level sd 4 (pooled over 4 df). A 14 gap is under four
+        // times that and merges them; a 22 gap keeps them apart
+        assert!(!multimodal(&[
+            1000.0, 1004.0, 1008.0, 1022.0, 1026.0, 1030.0
+        ]));
+        assert!(multimodal(&[
+            1000.0, 1004.0, 1008.0, 1030.0, 1034.0, 1038.0
+        ]));
+    }
+
+    #[test]
+    fn gaps_under_one_percent_never_split() {
+        // Two clusters 0.5% apart with zero within spread
+        assert!(!multimodal(&[
+            100.0, 100.0, 100.0, 100.0, 100.5, 100.5, 100.5, 100.5, 100.5
+        ]));
+    }
+
+    #[test]
+    fn fewer_than_four_values_never_flagged() {
+        assert!(!multimodal(&[100.0, 120.0, 100.0]));
+        assert!(!multimodal(&[]));
     }
 }

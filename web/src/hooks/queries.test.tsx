@@ -45,7 +45,7 @@ function makeHostIndex(resultsPath: string): HostIndex {
 
 function makeIndex(snapshotId: string, hostIndex: HostIndex): GlobalIndex {
   return {
-    schema_version: 4,
+    schema_version: 5,
     snapshot_id: snapshotId,
     hosts: { [HOST]: hostIndex },
   }
@@ -84,7 +84,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: ResultRow[] = [[0, 0, 0, 100, 5]]
+    const rawData: ResultRow[] = [[0, 0, 0, 100, 5, 3, 0]]
     const decoded = [
       {
         bench: BENCH,
@@ -92,6 +92,8 @@ describe("useBenchmarkResults", () => {
         measurement_token: 0,
         mean_ns: 100,
         ci95_half_ns: 5,
+        run_count: 3,
+        multimodal: false,
       },
     ]
 
@@ -117,8 +119,8 @@ describe("useBenchmarkResults", () => {
     const hostIndexB = makeHostIndex("results-b.json")
     const indexA = makeIndex("snapshot-a", hostIndexA)
     const indexB = makeIndex("snapshot-b", hostIndexB)
-    const rawDataA: ResultRow[] = [[0, 0, 0, 111, 3]]
-    const rawDataB: ResultRow[] = [[0, 0, 0, 222, 7]]
+    const rawDataA: ResultRow[] = [[0, 0, 0, 111, 3, 3, 0]]
+    const rawDataB: ResultRow[] = [[0, 0, 0, 222, 7, 3, 0]]
 
     mockLoadIndex.mockResolvedValueOnce(indexA).mockResolvedValueOnce(indexB)
     mockLoadResults.mockResolvedValueOnce(rawDataA).mockResolvedValueOnce(rawDataB)
@@ -129,6 +131,8 @@ describe("useBenchmarkResults", () => {
         measurement_token: 0,
         mean_ns: data[0][3],
         ci95_half_ns: data[0][4],
+        run_count: 3,
+        multimodal: false,
       },
     ])
 
@@ -154,7 +158,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: ResultRow[] = [[0, 0, 0, 333, 2]]
+    const rawData: ResultRow[] = [[0, 0, 0, 333, 2, 3, 0]]
     const decoded = [
       {
         bench: BENCH,
@@ -162,6 +166,8 @@ describe("useBenchmarkResults", () => {
         measurement_token: 0,
         mean_ns: 333,
         ci95_half_ns: 2,
+        run_count: 3,
+        multimodal: false,
       },
     ]
 
@@ -207,7 +213,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: ResultRow[] = [[0, 0, 0, 100, 5]]
+    const rawData: ResultRow[] = [[0, 0, 0, 100, 5, 3, 0]]
 
     mockLoadIndex.mockResolvedValue(index)
     mockLoadResults.mockResolvedValue(rawData)
@@ -218,6 +224,8 @@ describe("useBenchmarkResults", () => {
         measurement_token: 0,
         mean_ns: bench === BENCH ? 100 : 200,
         ci95_half_ns: 5,
+        run_count: 3,
+        multimodal: false,
       },
     ])
 
@@ -243,7 +251,7 @@ describe("useBenchmarkHistory", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawHistory: HistoryRow[] = [[0, 0, 1_000, 100, 5, 10]]
+    const rawHistory: HistoryRow[] = [[0, 0, 1_000, 100, 5, 10, 0]]
 
     const configA = { compiler: "stable", input: "small" }
     const configB = { compiler: "stable", input: "large" }
@@ -256,9 +264,10 @@ describe("useBenchmarkHistory", () => {
         config: { ...config },
         measurement_token: 0,
         timestamp: config.input === "small" ? 1_000 : 2_000,
-        median_run_mean_ns: config.input === "small" ? 100 : 200,
-        median_run_ci95_half_ns: 5,
+        mean_ns: config.input === "small" ? 100 : 200,
+        ci95_half_ns: 5,
         run_count: 10,
+        multimodal: false,
       },
     ])
 
@@ -295,15 +304,16 @@ describe("useBenchmarkHistory", () => {
 
     mockLoadIndex.mockResolvedValue(index)
     mockHistoryPart.mockImplementation((_index, _bench, config) => (config.input === "small" ? 0 : 1))
-    mockLoadHistory.mockImplementation(async (_index, _bench, part) => [[part, 0, 1_000 * (part + 1), 100, 5, 10]])
+    mockLoadHistory.mockImplementation(async (_index, _bench, part) => [[part, 0, 1_000 * (part + 1), 100, 5, 10, 0]])
     mockDecodeHistory.mockImplementation((_index, data, _bench, config) => [
       {
         config: { ...config },
         measurement_token: 0,
         timestamp: data[0][2],
-        median_run_mean_ns: 100,
-        median_run_ci95_half_ns: 5,
+        mean_ns: 100,
+        ci95_half_ns: 5,
         run_count: 10,
+        multimodal: false,
       },
     ])
 

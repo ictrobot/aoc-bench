@@ -1,7 +1,5 @@
 -- Rebuild run_series to rename median columns, add counts, and drop created_at
 
-PRAGMA foreign_keys = OFF;
-
 CREATE TABLE IF NOT EXISTS new_run_series
 (
     bench                    TEXT    NOT NULL,
@@ -42,6 +40,3 @@ DROP TABLE run_series;
 
 ALTER TABLE new_run_series
     RENAME TO run_series;
-
-PRAGMA foreign_keys = ON;
-PRAGMA foreign_key_check;
