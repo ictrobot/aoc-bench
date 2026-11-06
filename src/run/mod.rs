@@ -7,8 +7,8 @@ mod model;
 pub mod process;
 pub mod schedule;
 #[cfg(all(test, unix))]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use model::{PowerSummary, Run, RunSeries};
 pub use process::RunProcessError;
-pub use schedule::{NewGroupOrder, RunScheduleConfig};
+pub use schedule::{NewGroupOrder, PoolStats, RunScheduleConfig, Selection};

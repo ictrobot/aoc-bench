@@ -2,6 +2,7 @@ use crate::cli::CliError;
 use aoc_bench::config::{Benchmark, BenchmarkId, Config, ConfigError, ConfigFile};
 use aoc_bench::engine::{RunEngine, RunEngineConfig, StatsEngine};
 use aoc_bench::host_config::{CpuAffinity, HostConfig, parse_power_limit};
+use aoc_bench::metrics;
 use clap::Args;
 use std::path::PathBuf;
 
@@ -28,6 +29,8 @@ impl TryFrom<CommonRunArgs> for RunEngine {
     fn try_from(value: CommonRunArgs) -> Result<Self, Self::Error> {
         let host = get_host()?;
         let config_file = ConfigFile::new(&value.data_dir, Some(host.as_str()))?;
+        // Only the run commands push metrics. The engine pushes the batch's closing state.
+        metrics::init_from_env(&host);
 
         let host_key = config_file.host_key().clone();
         let host_kv = host_key

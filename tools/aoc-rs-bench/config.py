@@ -125,14 +125,17 @@ class MatrixBuilder:
                     "presets": {
                         "all": self.builds,
                     },
+                    "metric_label": True,
                 },
                 "threads": {
                     "values": self.threads,
                     "presets": thread_presets,
+                    "metric_label": True,
                 },
                 "multiversion": {
                     "values": multiversion_values,
                     "presets": multiversion_presets,
+                    "metric_label": True,
                 }
             },
             "benchmarks": nested_defaultdict(),

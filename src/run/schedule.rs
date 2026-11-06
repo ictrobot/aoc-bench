@@ -7,7 +7,7 @@
 
 use crate::config::{Config, Key, KeyValue};
 use crate::group::{GroupClass, RunGroup, config_matches_filter};
-use crate::storage::{HybridDiskError, HybridDiskStorage, StorageRead};
+use crate::storage::{HybridDiskError, HybridDiskStorage, Storage, StorageRead, WorkloadId};
 use jiff::Timestamp;
 use rand::prelude::*;
 use std::collections::BinaryHeap;
@@ -46,6 +46,30 @@ pub struct SelectedGroup {
     pub reuse: bool,
 }
 
+/// The eligible pool as the scan saw it: the in-scope work under the current config.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PoolStats {
+    pub new_groups: usize,
+    pub rerun_groups: usize,
+    /// Cases covered by the new groups
+    pub new_cases: usize,
+    /// Cases covered by the rerun groups
+    pub rerun_cases: usize,
+    /// The oldest last measurement over the rerun groups' workloads
+    pub oldest_measurement: Option<Timestamp>,
+    /// Rerun workloads whose latest measurement disagreed with their stable result
+    pub suspicious_workloads: usize,
+}
+
+/// The groups selected for a sampled `run` command and the pool they came from.
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub groups: Vec<SelectedGroup>,
+    /// `None` when the scan stopped early (no reruns requested and the new limit was met), so
+    /// the pool was never fully counted.
+    pub pool: Option<PoolStats>,
+}
+
 /// Classify and select groups for a sampled `run` command.
 ///
 /// A group is eligible only if at least one covered case matches `config_filter`.
@@ -56,6 +80,18 @@ pub fn select_for_run<R: Rng>(
     schedule: RunScheduleConfig,
     rng: &mut R,
 ) -> Result<Vec<SelectedGroup>, HybridDiskError> {
+    select_for_run_with_pool(storage, groups, config_filter, schedule, rng)
+        .map(|selection| selection.groups)
+}
+
+/// [`select_for_run`], also reporting the eligible pool when the scan covered all of it.
+pub fn select_for_run_with_pool<R: Rng>(
+    storage: &HybridDiskStorage,
+    groups: &mut [RunGroup],
+    config_filter: &Config,
+    schedule: RunScheduleConfig,
+    rng: &mut R,
+) -> Result<Selection, HybridDiskError> {
     let RunScheduleConfig {
         new_limit,
         rerun_limit,
@@ -63,7 +99,10 @@ pub fn select_for_run<R: Rng>(
         new_order,
     } = schedule;
     if new_limit == 0 && rerun_limit == 0 && rerun_only_limit == 0 {
-        return Ok(Vec::new());
+        return Ok(Selection {
+            groups: Vec::new(),
+            pool: None,
+        });
     }
 
     order_groups(
@@ -79,6 +118,9 @@ pub fn select_for_run<R: Rng>(
     // Max-heap: the newest retained rerun is at the top and is evicted when an older one appears.
     let mut oldest_reruns: BinaryHeap<(Timestamp, usize)> =
         BinaryHeap::with_capacity(retained_rerun_limit.min(groups.len()));
+    let mut pool = PoolStats::default();
+    let mut rerun_workloads = Vec::new();
+    let mut scanned_all = true;
 
     storage.read_transaction(|tx| {
         for (index, group) in groups.iter().enumerate() {
@@ -86,18 +128,47 @@ pub fn select_for_run<R: Rng>(
                 continue;
             }
             match group.classify(storage, tx)? {
-                GroupClass::New if selected_new.len() < new_limit => selected_new.push(index),
-                GroupClass::New => {}
-                GroupClass::Rerun(ts) => {
-                    retain_oldest(&mut oldest_reruns, retained_rerun_limit, ts, index);
+                GroupClass::New => {
+                    pool.new_groups += 1;
+                    pool.new_cases += group.case_count();
+                    if selected_new.len() < new_limit {
+                        selected_new.push(index);
+                    }
+                }
+                GroupClass::Rerun {
+                    workload,
+                    last_measurement,
+                } => {
+                    pool.rerun_groups += 1;
+                    pool.rerun_cases += group.case_count();
+                    pool.oldest_measurement = Some(
+                        pool.oldest_measurement
+                            .map_or(last_measurement, |oldest| oldest.min(last_measurement)),
+                    );
+                    rerun_workloads.push(workload);
+                    retain_oldest(
+                        &mut oldest_reruns,
+                        retained_rerun_limit,
+                        last_measurement,
+                        index,
+                    );
                 }
             }
 
             // Oldest-first rerun selection requires a complete scan. With no reruns requested, the
             // transaction can end as soon as the ordered new selection is full.
-            if retained_rerun_limit == 0 && selected_new.len() == new_limit {
+            if retained_rerun_limit == 0
+                && selected_new.len() == new_limit
+                && groups[index + 1..]
+                    .iter()
+                    .any(|g| g.eligible(config_filter))
+            {
+                scanned_all = false;
                 break;
             }
+        }
+        if scanned_all {
+            pool.suspicious_workloads = count_suspicious(storage, tx, &mut rerun_workloads)?;
         }
         Ok(())
     })?;
@@ -121,7 +192,32 @@ pub fn select_for_run<R: Rng>(
         index,
         reuse: false,
     }));
-    Ok(selected)
+    Ok(Selection {
+        groups: selected,
+        pool: scanned_all.then_some(pool),
+    })
+}
+
+/// Rerun workloads whose latest measurement disagreed with their stable result.
+///
+/// Several groups can share a workload, so each is counted once.
+fn count_suspicious(
+    storage: &HybridDiskStorage,
+    tx: &rusqlite::Transaction<'_>,
+    workloads: &mut Vec<WorkloadId>,
+) -> Result<usize, HybridDiskError> {
+    workloads.sort_unstable();
+    workloads.dedup();
+    let mut suspicious = 0;
+    for workload in workloads {
+        if storage
+            .get_workload_state(tx, *workload)?
+            .is_some_and(|state| state.suspicious_count > 0)
+        {
+            suspicious += 1;
+        }
+    }
+    Ok(suspicious)
 }
 
 fn order_groups<R: Rng>(
@@ -369,6 +465,64 @@ mod tests {
         .unwrap();
         assert_eq!(selected.len(), 2);
         assert!(selected.iter().all(|selection| !selection.reuse));
+    }
+
+    #[test]
+    fn pool_stats_follow_the_scan() {
+        let f = fixture();
+        let _lock = f.storage.acquire_lock().unwrap();
+
+        process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &first_shared(&f),
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap();
+
+        let mut groups = shared_groups(&f);
+        let selection = select_for_run_with_pool(
+            &f.storage,
+            &mut groups,
+            &Config::new(),
+            random_schedule(16, 8),
+            &mut rand::rng(),
+        )
+        .unwrap();
+        let pool = selection
+            .pool
+            .expect("reruns requested, so the whole pool was scanned");
+        assert_eq!(selection.groups.len(), 2);
+        assert_eq!(pool.new_groups, 1);
+        assert_eq!(pool.rerun_groups, 1);
+        assert_eq!(pool.new_cases, 1);
+        assert_eq!(pool.rerun_cases, 1);
+        assert!(pool.oldest_measurement.is_some());
+        assert_eq!(pool.suspicious_workloads, 0);
+
+        // No reruns requested and the new limit met with eligible groups left: the scan stops
+        // early and the pool is unknown
+        let selection = select_for_run_with_pool(
+            &f.storage,
+            &mut groups,
+            &Config::new(),
+            RunScheduleConfig {
+                new_limit: 1,
+                rerun_limit: 0,
+                rerun_only_limit: 0,
+                new_order: NewGroupOrder::Random,
+            },
+            &mut rand::rng(),
+        )
+        .unwrap();
+        assert_eq!(selection.groups.len(), 1);
+        // Whether the new group came first is random, so only a complete scan reports a pool
+        if let Some(pool) = selection.pool {
+            assert_eq!((pool.new_groups, pool.rerun_groups), (1, 1));
+        }
     }
 
     #[test]

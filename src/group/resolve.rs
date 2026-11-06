@@ -228,6 +228,12 @@ impl CaseGroup {
         self.cases.iter().map(CaseRef::config)
     }
 
+    /// The config of the representative case, without reading anything from disk.
+    #[must_use]
+    pub fn representative_config(&self) -> Config {
+        self.representative.config()
+    }
+
     /// Reconstruct the representative case selected to cover this group.
     pub fn resolve_representative(&self) -> Result<ResolvedCase, GroupError> {
         let resolved = self.representative.resolve()?;

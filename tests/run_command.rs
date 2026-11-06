@@ -1,8 +1,11 @@
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 const BENCH_EXECUTABLE: &str = env!("CARGO_BIN_EXE_aoc-bench");
@@ -528,4 +531,213 @@ fn run_command_sigterm_finishes_current_group_then_stops() {
         1,
         "stderr={stderr}"
     );
+}
+
+/// Accept pushes on a local port, answering 204, and collect every request body in arrival order.
+fn metrics_sink() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/import?keep=query",
+        listener.local_addr().unwrap().port()
+    );
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&bodies);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if body.len() >= len {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8(request).unwrap();
+            assert!(text.starts_with("POST /import?keep=query HTTP/1.1\r\n"));
+            let body = text.split_once("\r\n\r\n").unwrap().1.to_string();
+            // Recorded before the response so the body is visible once the client has its answer
+            collected.lock().unwrap().push(body);
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        }
+    });
+    (url, bodies)
+}
+
+/// The value of the series matching `prefix` in the last body that carries it.
+fn last_metric(bodies: &[String], prefix: &str) -> Option<f64> {
+    bodies.iter().rev().find_map(|body| {
+        body.lines()
+            .find(|line| line.starts_with(prefix))
+            .map(|line| {
+                line[prefix.len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+    })
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn run_command_pushes_metrics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let config = serde_json::json!({
+        "config_keys": {
+            "build": { "values": ["opt"], "metric_label": true },
+            "commit": { "values": ["abc"] }
+        },
+        "benchmarks": [{
+            "benchmark": "bench",
+            "command": ["/usr/bin/yes", "SAMPLE\t123\t34000000\tdata={build}{commit}"],
+            "config": { "build": ["opt"], "commit": ["abc"] },
+            "stats": {
+                "min_samples": 2,
+                "min_time_ns": 1,
+                "runs_per_series": 3,
+                "min_warmup_samples": 1,
+                "min_warmup_time_ns": 1
+            }
+        }]
+    });
+    fs::write(
+        data_dir.join("config.json"),
+        serde_json::to_vec_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let (url, bodies) = metrics_sink();
+    let output = Command::new(BENCH_EXECUTABLE)
+        .arg("run")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("BENCH_HOST", "testhost")
+        .env("AOC_BENCH_METRICS_PUSH_URL", &url)
+        .output()
+        .expect("spawn run command");
+    assert_success(&output);
+
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2, "opening and closing pushes: {bodies:?}");
+    let opening = &bodies[0];
+    let closing = &bodies[1];
+
+    // The opening push carries the batch state and the dataset view before anything ran
+    for line in [
+        "aoc_bench_active{host=\"testhost\"} 1 ",
+        "aoc_bench_batch_groups_selected{host=\"testhost\",class=\"new\"} 1 ",
+        "aoc_bench_batch_groups_remaining{host=\"testhost\",class=\"new\"} 1 ",
+        "aoc_bench_dataset_groups{host=\"testhost\",class=\"new\"} 1 ",
+        "aoc_bench_dataset_groups{host=\"testhost\",class=\"rerun\"} 0 ",
+        "aoc_bench_dataset_cases{host=\"testhost\",class=\"new\"} 1 ",
+        "aoc_bench_dataset_workloads_suspicious{host=\"testhost\"} 0 ",
+        "aoc_bench_dataset_measurements{host=\"testhost\"} 0 ",
+        "aoc_bench_dataset_db_bytes{host=\"testhost\"} ",
+    ] {
+        assert!(opening.contains(line), "{line} in {opening}");
+    }
+    // No rerun, so no sweep age. Increments only appear once a group checkpoints them.
+    assert!(!opening.contains("oldest_measurement"), "{opening}");
+    assert!(!opening.contains("aoc_bench_time_seconds"), "{opening}");
+
+    // The closing push carries the group's increments, labelled by the opted-in key only, all
+    // stamped with the group's end, plus the batch totals and the final state
+    let case = "{host=\"testhost\",bench=\"bench\",config_build=\"opt\"";
+    let group_lines: Vec<&str> = closing.lines().filter(|l| l.contains(case)).collect();
+    assert!(group_lines.len() >= 5, "{closing}");
+    let stamps: std::collections::BTreeSet<&str> = group_lines
+        .iter()
+        .map(|l| l.rsplit(' ').next().unwrap())
+        .collect();
+    assert_eq!(
+        stamps.len(),
+        1,
+        "one checkpoint for the group: {group_lines:?}"
+    );
+    assert_eq!(
+        last_metric(&bodies, &format!("aoc_bench_runs{case}}} ")),
+        Some(3.0)
+    );
+    assert!(last_metric(&bodies, &format!("aoc_bench_samples{case}}} ")).unwrap() >= 6.0);
+    for phase in ["warmup", "measurement"] {
+        let value = last_metric(
+            &bodies,
+            &format!("aoc_bench_time_seconds{case},phase=\"{phase}\"}} "),
+        );
+        assert!(value.is_some_and(|v| v > 0.0), "phase {phase}: {closing}");
+    }
+    // The sampler reports made-up sample times longer than its wall time, so the group's
+    // remainder is clamped to zero and dropped as an empty increment
+    assert!(!closing.contains(&format!("aoc_bench_time_seconds{case},phase=\"other\"}}")));
+    assert_eq!(
+        last_metric(
+            &bodies,
+            &format!("aoc_bench_series_outcomes{case},outcome=\"initial\"}} ")
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        last_metric(
+            &bodies,
+            &format!("aoc_bench_groups{case},class=\"new\",outcome=\"executed\"}} ")
+        ),
+        Some(1.0)
+    );
+    // The batch's time outside groups has no bench, and the totals mirror the increments
+    assert!(
+        last_metric(
+            &bodies,
+            "aoc_bench_time_seconds{host=\"testhost\",phase=\"other\"} "
+        )
+        .is_some()
+    );
+    assert_eq!(
+        last_metric(&bodies, "aoc_bench_batch_runs{host=\"testhost\"} "),
+        Some(3.0)
+    );
+    assert_eq!(
+        last_metric(
+            &bodies,
+            "aoc_bench_batch_groups{host=\"testhost\",class=\"new\",outcome=\"executed\"} "
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        last_metric(
+            &bodies,
+            "aoc_bench_batch_groups_remaining{host=\"testhost\",class=\"new\"} "
+        ),
+        Some(0.0)
+    );
+    assert!(
+        closing.contains("aoc_bench_active{host=\"testhost\"} 0 "),
+        "{closing}"
+    );
+    assert!(!closing.contains("config_commit"), "{closing}");
+    assert!(
+        !closing.contains("aoc_bench_group_start_timestamp_seconds"),
+        "{closing}"
+    );
+    assert!(!closing.contains("_total"), "{closing}");
 }

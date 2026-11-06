@@ -1,15 +1,20 @@
 use crate::config::{Benchmark, Config, ConfigFile, KeyValue};
+use crate::engine::batch_metrics::BatchMetrics;
 use crate::group::{
     IsolatedGroup, ResolveFailure, RunGroup, config_matches_filter, resolve_and_group,
 };
 use crate::host_config::{HostConfig, HostConfigError};
+use crate::metrics::{self, Labels};
 use crate::run::RunProcessError;
 use crate::run::process::{GroupOutcome, ProcessContext, process_group};
-use crate::run::schedule::{RunScheduleConfig, select_for_run, select_for_run_all};
+use crate::run::schedule::{
+    PoolStats, RunScheduleConfig, SelectedGroup, select_for_run_all, select_for_run_with_pool,
+};
 use crate::storage::{FileLock, HybridDiskError, HybridDiskStorage, Storage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tracing::{error, info, info_span};
 
 #[derive(Debug, Clone)]
@@ -79,12 +84,14 @@ impl RunEngine {
         mode: RunMode,
         stop: &Arc<AtomicBool>,
     ) -> Result<RunReport, RunEngineError> {
+        let started = Instant::now();
         let (mut groups, failures) = self.build_groups(benchmarks);
 
         let fail_fast = matches!(mode, RunMode::All);
         let mut report = RunReport::default();
 
         // Resolution failures (shared groups only) that match the filter are reported per case.
+        let mut unresolved = Vec::new();
         for failure in failures {
             if !config_matches_filter(&failure.config, config_filter) {
                 continue;
@@ -103,20 +110,31 @@ impl RunEngine {
                 "failed to resolve case, skipping"
             );
             report.failed += 1;
+            unresolved.push(Labels::case(&failure.benchmark, &failure.config));
         }
 
-        let selected = match mode {
-            RunMode::Sample(schedule) => select_for_run(
-                &self.storage,
-                &mut groups,
-                config_filter,
-                schedule,
-                &mut rand::rng(),
-            )
-            .map_err(RunEngineError::SchedulingError)?,
-            RunMode::All => select_for_run_all(&groups, config_filter),
+        let (selected, pool) = match mode {
+            RunMode::Sample(schedule) => {
+                let selection = select_for_run_with_pool(
+                    &self.storage,
+                    &mut groups,
+                    config_filter,
+                    schedule,
+                    &mut rand::rng(),
+                )
+                .map_err(RunEngineError::SchedulingError)?;
+                (selection.groups, selection.pool)
+            }
+            RunMode::All => (select_for_run_all(&groups, config_filter), None),
         };
         report.groups_selected = selected.len();
+
+        let mut batch = self.batch_metrics(mode, &selected, pool.as_ref(), started);
+        if let Some(batch) = batch.as_mut() {
+            for labels in &unresolved {
+                batch.group_failed_early(labels, unclassified_class(mode));
+            }
+        }
 
         let process_context = ProcessContext {
             config_file: &self.config_file,
@@ -146,11 +164,18 @@ impl RunEngine {
                 cases = group.case_count()
             )
             .entered();
+            if let Some(batch) = batch.as_mut() {
+                batch.group_started(group, group_class(mode, selection));
+            }
 
-            match process_group(group, &process_context, selection.reuse) {
-                Ok(GroupOutcome::Reused { .. } | GroupOutcome::WouldReuse) => report.reused += 1,
+            let outcome = match process_group(group, &process_context, selection.reuse) {
+                Ok(GroupOutcome::Reused { .. } | GroupOutcome::WouldReuse) => {
+                    report.reused += 1;
+                    "reused"
+                }
                 Ok(GroupOutcome::Executed { .. } | GroupOutcome::WouldExecute { .. }) => {
                     report.executed += 1;
+                    "executed"
                 }
                 Err(error) if fail_fast => {
                     return Err(RunEngineError::ProcessError(error));
@@ -158,11 +183,51 @@ impl RunEngine {
                 Err(error) => {
                     error!(error = %error, "failed to process group, skipping");
                     report.failed += 1;
+                    "failed"
                 }
+            };
+
+            if let Some(batch) = batch.as_mut() {
+                batch.group_finished(outcome);
             }
         }
 
         Ok(report)
+    }
+
+    /// Push the opening batch state, if metrics are enabled. A dry run records nothing.
+    fn batch_metrics(
+        &self,
+        mode: RunMode,
+        selected: &[SelectedGroup],
+        pool: Option<&PoolStats>,
+        started: Instant,
+    ) -> Option<BatchMetrics<'static>> {
+        if self.dry_run {
+            return None;
+        }
+        let metrics = metrics::global()?;
+        let classes: &[&'static str] = match mode {
+            RunMode::All => &["all"],
+            RunMode::Sample(_) => &["new", "rerun"],
+        };
+        let counts: Vec<(&'static str, usize)> = classes
+            .iter()
+            .map(|&class| {
+                let count = selected
+                    .iter()
+                    .filter(|&&selection| group_class(mode, selection) == class)
+                    .count();
+                (class, count)
+            })
+            .collect();
+        Some(BatchMetrics::start(
+            metrics,
+            &self.storage,
+            started,
+            pool,
+            &counts,
+        ))
     }
 
     /// Build the schedulable groups for all in-scope benchmarks.
@@ -205,6 +270,23 @@ impl RunEngine {
         debug_assert!(shared_by_benchmark.is_empty());
 
         (groups, failures)
+    }
+}
+
+/// The `class` metric label of a selected group.
+fn group_class(mode: RunMode, selection: SelectedGroup) -> &'static str {
+    match mode {
+        RunMode::All => "all",
+        RunMode::Sample(_) if selection.reuse => "new",
+        RunMode::Sample(_) => "rerun",
+    }
+}
+
+/// The `class` metric label of a group that failed before it could be classified.
+fn unclassified_class(mode: RunMode) -> &'static str {
+    match mode {
+        RunMode::All => "all",
+        RunMode::Sample(_) => "new",
     }
 }
 

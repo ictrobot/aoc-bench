@@ -41,7 +41,10 @@ pub enum GroupClass {
     /// Needs new processing (missing result, isolated/spec-changed/disagreeing shared association).
     New,
     /// A rerun candidate, ordered by its workload's last-measurement time.
-    Rerun(Timestamp),
+    Rerun {
+        workload: WorkloadId,
+        last_measurement: Timestamp,
+    },
 }
 
 impl RunGroup {
@@ -51,6 +54,15 @@ impl RunGroup {
         match self {
             RunGroup::Shared(group) => &group.key.benchmark,
             RunGroup::Isolated(group) => &group.benchmark,
+        }
+    }
+
+    /// The config the group executes: the representative of a shared group, or the single case.
+    #[must_use]
+    pub fn representative_config(&self) -> Config {
+        match self {
+            RunGroup::Shared(group) => group.representative_config(),
+            RunGroup::Isolated(group) => group.config.clone(),
         }
     }
 
@@ -131,9 +143,10 @@ fn classify_shared(
         // Isolated association or the recorded spec no longer matches the current group.
         return Ok(GroupClass::New);
     }
-    Ok(GroupClass::Rerun(last_measurement_ts(
-        storage, tx, workload,
-    )?))
+    Ok(GroupClass::Rerun {
+        workload,
+        last_measurement: last_measurement_ts(storage, tx, workload)?,
+    })
 }
 
 /// Classify an isolated single case: new if it has no recorded result, otherwise a rerun.
@@ -150,9 +163,10 @@ fn classify_isolated(
     let Some(workload) = storage.get_case_workload(tx, case)? else {
         return Ok(GroupClass::New);
     };
-    Ok(GroupClass::Rerun(last_measurement_ts(
-        storage, tx, workload,
-    )?))
+    Ok(GroupClass::Rerun {
+        workload,
+        last_measurement: last_measurement_ts(storage, tx, workload)?,
+    })
 }
 
 fn last_measurement_ts(

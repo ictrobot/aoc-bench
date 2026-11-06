@@ -20,6 +20,10 @@ Environment="AOC_BENCH_THREADS={{ bench_threads | default([]) | join(',') }}"
 Environment="AOC_BENCH_MULTIVERSION={{ bench_multiversion | default([]) | join(',') }}"
 Environment="AOC_BENCH_ENABLE_WEB_EXPORT={{ bench_enable_web_export | ternary('true', 'false') }}"
 Environment="AOC_BENCH_SHARED_DIR=/var/lib/aoc-bench"
+{% if metrics_push_url is defined %}
+Environment="AOC_BENCH_METRICS_PUSH_URL={{ metrics_push_url }}"
+Environment="AOC_BENCH_METRICS_PUSH_INTERVAL_SECS=5"
+{% endif %}
 ExecStart=/home/{{ bench_user }}/aoc-bench/tools/bench-host/bench-all.sh
 Restart=always
 RestartSec=20

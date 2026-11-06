@@ -45,7 +45,7 @@ The `aoc-bench` tool provides the following subcommands:
 * **`timeline`** - Show performance history across one config dimension
     * Displays ordered results with performance change highlights
     * Automatically detects comparison key (unspecified dimension)
-    * Shows regressions and improvements with delta percentages
+    * Shows regressions and improvements with increment percentages
 
 * **`fastest`** - List fastest config per benchmark
     * Respects benchmark/config/host filters
@@ -321,6 +321,8 @@ For each key (e.g., `commit`, `build`, `threads`):
 - **`presets`** *(optional)*: Named groups of values for convenient reuse
     - Preset names can be any string (e.g., `"all"`, `"from_abc1234"`, `"power_of_2"`)
     - Preset values must be subsets of `values`
+- **`metric_label`** *(optional, default `false`)*: Attach the key to pushed metrics as a `config_<key>` label (section
+  11.3). Off by default. Keep the label set small to avoid a large series count.
 
 **Canonical ordering**: The `values` array defines the canonical order for this key. When configs are serialized to
 strings or stored, values are sorted according to this order.
@@ -1194,6 +1196,68 @@ measurement to suppress execution. Hardlinked shared cases still form one group 
 workload execution; isolated cases execute separately. Process failures are retried up to five times,
 except timeouts, and `run-all` fails fast when a group cannot be resolved or processed.
 
+## 11.3 Metrics
+
+The run commands push metrics to a Prometheus-compatible import endpoint when `AOC_BENCH_METRICS_PUSH_URL` is set.
+Unset, nothing is recorded, and a dry run records nothing either. The push is an HTTP POST of the text exposition
+format with millisecond timestamps. Only aggregates and state are exported.
+
+Plain HTTP only: the push is meant for an agent on the same host that forwards, so TLS in the process would add
+nothing. An `https://` URL is logged as ignored and metrics stay off. No `# HELP` or `# TYPE` lines are sent; the
+descriptions live here and on the constants in `metrics.rs`.
+
+**Increments and gauges.** Counts are not counters. An increment accumulates in memory until the unit of work it
+belongs to ends, a group or the batch, and is then stamped with that moment and queued as one sample. A query adds
+them up with `sum_over_time(x[6h])`, never `rate()` or `increase()`, and the names carry no `_total`. Gauges hold
+state. Every increment also feeds an `aoc_bench_batch_*` gauge totalled over the process with the case labels
+dropped, the exact view of the current batch.
+
+**Cadence.** A background thread owns every push, so the benchmark thread never waits on HTTP. It pushes once a
+minute (`AOC_BENCH_METRICS_PUSH_INTERVAL_SECS` overrides, at least 1), when the batch starts and when it ends, from
+any exit path. A push carries every queued increment and the gauges, the latter only if one changed except on the
+heartbeat. Queued samples keep their timestamps until a push is acknowledged, so a retry is byte-identical and a
+backend that drops exact duplicates (for VictoriaMetrics, a deduplication interval of 1 ms) ingests each increment
+once. Samples of one series never share a millisecond. The queue is bounded and drops its oldest samples beyond
+100k, counted in `aoc_bench_metrics_dropped_lines`. A failed push logs once and counts in
+`aoc_bench_metrics_push_failures`.
+
+**Labels.** Every series carries `host`. The *case labels* are `bench` plus a `config_<key>` label for each key
+with `metric_label` (section 4.2), taken from the executed config: the representative of a shared group, or the
+single case. The increments carry them; the batch and dataset gauges carry only `host` and their own labels.
+
+**Time breakdown.** `aoc_bench_time_seconds{phase,bench,config_*}` splits the run's wall clock, from the start of
+scheduling to exit, into phases that add up:
+
+| Phase         | Covers                                                                                       |
+|---------------|----------------------------------------------------------------------------------------------|
+| `wait`        | Discarding samples until package power settled below the host limit (section 6.6)            |
+| `warmup`      | The other discarded samples, including the initial batch, until the warmup minimums were met |
+| `measurement` | The sampled time the measurement is computed from                                            |
+| `other`       | The rest of each group's wall time, including failed attempts                                |
+
+The batch's time outside groups, mostly scheduling, is also `other` but carries no `bench`.
+
+**Increments**, with the case labels: `aoc_bench_runs` (successful), `aoc_bench_samples` (measured phase of successful
+runs), `aoc_bench_run_failures{reason}` (timeout, warmup, crash, protocol, other),
+`aoc_bench_series_outcomes{outcome}` (the drift outcomes of section 9.3) and `aoc_bench_groups{class,outcome}`
+(class new, rerun or all; outcome executed, reused or failed). A group that fails before classification counts as
+new, or all under `run-all`.
+
+**Batch gauges**: `aoc_bench_active` (1 while live, 0 on the last push), `aoc_bench_batch_start_timestamp_seconds`,
+`aoc_bench_batch_groups_selected{class}`, `aoc_bench_batch_groups_remaining{class}`, the batch totals
+`aoc_bench_batch_time_seconds{phase}`, `aoc_bench_batch_runs`, `aoc_bench_batch_samples`,
+`aoc_bench_batch_run_failures{reason}`, `aoc_bench_batch_series_outcomes{outcome}` and
+`aoc_bench_batch_groups{class,outcome}`, and for the current group `aoc_bench_group_start_timestamp_seconds{bench}`
+and `aoc_bench_group_cases`. Pushed data has no staleness markers, so a cleared gauge lingers on the backend for a
+few minutes.
+
+**Dataset gauges**, pushed at batch start. The in-scope view comes from the scheduler's scan when it covered the
+whole pool, so it follows the current config and ignores cases whose values were dropped from it:
+`aoc_bench_dataset_groups{class}`, `aoc_bench_dataset_cases{class}`, `aoc_bench_dataset_workloads_suspicious`
+(rerun workloads whose latest measurement disagreed with their stable result) and
+`aoc_bench_dataset_oldest_measurement_timestamp_seconds` (the age of the sweep). The whole history comes from the
+database: `aoc_bench_dataset_measurements`, `aoc_bench_dataset_measurement_runs` and `aoc_bench_dataset_db_bytes`.
+
 ---
 
 # 12. Multi-host and Multi-config
@@ -1281,7 +1345,7 @@ Bench:      2015-04
 Config:     {"bench":"2015-04","host":"silicon","profile":"release","threads":"1"}
 Comparison: commit
 
-commit          mean            CI            delta       
+commit          mean            CI            increment       
 abc1234         30.00 ms        ±0.03 ms      --        INITIAL
 def5678         34.80 ms        ±0.04 ms      +16.00%   REGRESSION
 ghi9012         24.00 ms        ±0.03 ms      -31.03%   IMPROVEMENT
@@ -1302,7 +1366,7 @@ ghi9012         24.00 ms        ±0.03 ms      -31.03%   IMPROVEMENT
 - A change is highlighted only when the 95% confidence intervals do not overlap **and** the relative difference in
   means meets the `--threshold` percentage (default 10%). Points below the threshold are omitted but counted and the
   omission count is shown at the bottom.
-- Outputs the initial point followed by each significant regression/improvement with its delta sign (+/-) and
+- Outputs the initial point followed by each significant regression/improvement with its increment sign (+/-) and
   direction label.
 
 ### 13.3.2 Impact view
@@ -1365,7 +1429,7 @@ Each benchmark's history is split into size-bounded part files (`history/{bench}
 covering contiguous `config_idx` ranges, keeping every file well under static-host file size
 limits; `history_parts` in the host index lists the first `config_idx` of each part and the UI
 fetches only the part holding the config being drilled into. `results.json` and history parts
-store rows column-wise, with the sorted index columns and timestamps delta-encoded, which keeps
+store rows column-wise, with the sorted index columns and timestamps increment-encoded, which keeps
 the files compact under the transfer compression applied by static hosts.
 Export permits partial result sets by default; `--require-complete` refuses to publish unless every
 currently configured case has a stable result on every discovered host.

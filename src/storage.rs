@@ -30,7 +30,7 @@ mod multi_host;
 #[cfg(test)]
 mod test_support;
 
-pub use hybrid_disk::{FileLock, HybridDiskError, HybridDiskStorage};
+pub use hybrid_disk::{DatasetStats, FileLock, HybridDiskError, HybridDiskStorage};
 pub use measurement_id::{MeasurementId, MeasurementIdParseError};
 pub use multi_host::{MultiHostError, MultiHostStorage};
 #[cfg(test)]

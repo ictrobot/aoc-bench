@@ -3,6 +3,7 @@
 use crate::config::{BenchmarkId, BenchmarkVariant, Config};
 use crate::group::{GroupError, HashedArtifacts, ResolvedCase, resolve_case};
 use crate::host_config::{CpuAffinity, HostConfig};
+use crate::metrics::{self, FailureReason, Labels, Phase};
 use crate::protocol::{
     ParseError, ProtocolLine, parse_line, validate_checksum, validate_meta_version,
 };
@@ -135,6 +136,13 @@ impl Runner {
             "starting run series"
         );
 
+        let metrics = metrics::global().map(|metrics| {
+            (
+                metrics,
+                Labels::case(&self.benchmark_id, &self.benchmark_config),
+            )
+        });
+
         let mut runs = Vec::with_capacity(run_count);
         for run in 0..run_count {
             let _span = info_span!("run", run).entered();
@@ -142,7 +150,11 @@ impl Runner {
             for retry in 0..MAX_RETRIES {
                 let _span = info_span!("retry", retry).entered();
 
-                match self.run_single() {
+                let result = self.run_single();
+                if let Some((metrics, labels)) = &metrics {
+                    record_run_metrics(metrics, labels, &result);
+                }
+                match result {
                     Ok(run_result) => {
                         info!(
                             samples = run_result.stats.samples.len(),
@@ -415,6 +427,45 @@ impl Runner {
             },
             stdout,
         ))
+    }
+}
+
+/// Count the attempt and, when it succeeded, where its time went.
+fn record_run_metrics(metrics: &metrics::Metrics, labels: &Labels, result: &Result<Run, RunError>) {
+    match result {
+        Ok(run) => {
+            metrics.increment(metrics::RUNS, labels, 1.0);
+            metrics.increment(
+                metrics::SAMPLES,
+                labels,
+                metrics::count(run.stats.samples.len()),
+            );
+            if let Some(warmup) = run.warmup {
+                let waited = Duration::from_nanos(warmup.waited_ns);
+                let warmed = Duration::from_nanos(warmup.total_ns.saturating_sub(warmup.waited_ns));
+                metrics.add_time(Phase::Wait, labels, waited);
+                metrics.add_time(Phase::Warmup, labels, warmed);
+            }
+            let measured = run
+                .stats
+                .samples
+                .iter()
+                .fold(0u64, |sum, s| sum.saturating_add(s.total_ns));
+            metrics.add_time(Phase::Measurement, labels, Duration::from_nanos(measured));
+        }
+        Err(error) => {
+            let reason = match error {
+                RunError::Timeout { .. } => FailureReason::Timeout,
+                RunError::Warmup(_) => FailureReason::Warmup,
+                RunError::ProcessCrashed(_) | RunError::PrematureEof => FailureReason::Crash,
+                RunError::ParseError(_) | RunError::InvalidChecksum(_) => FailureReason::Protocol,
+                RunError::Resolve(_) | RunError::SpawnFailed(_) | RunError::PackagePower(_) => {
+                    FailureReason::Other
+                }
+            };
+            let labels = labels.clone().with("reason", reason.label());
+            metrics.increment(metrics::RUN_FAILURES, &labels, 1.0);
+        }
     }
 }
 

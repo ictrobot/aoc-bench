@@ -1,3 +1,4 @@
+mod batch_metrics;
 mod run;
 mod stats;
 mod web_export;

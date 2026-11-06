@@ -23,6 +23,7 @@ hostname = "0.4"
 once_cell = { version = "1.21.3" }
 sha2 = "0.11"
 uuid = { version = "1", features = ["v7"] }
+minreq = "3"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = { version = "0.4", default-features = false }

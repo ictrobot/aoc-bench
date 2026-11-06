@@ -201,6 +201,20 @@ pub enum RecordOutcome {
     },
 }
 
+impl RecordOutcome {
+    /// The outcome's name, as used for the `outcome` metric label.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            RecordOutcome::Initial => "initial",
+            RecordOutcome::Matched => "matched",
+            RecordOutcome::Suspicious { .. } => "suspicious",
+            RecordOutcome::Replaced { .. } => "replaced",
+            RecordOutcome::Forced { .. } => "forced",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

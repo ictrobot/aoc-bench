@@ -43,6 +43,17 @@ struct StoredWorkloadIdentity {
     group_spec_json: String,
 }
 
+/// Whole-history counts, see [`HybridDiskStorage::dataset_stats`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DatasetStats {
+    /// Every measurement ever recorded
+    pub measurements: u64,
+    /// Runs over every measurement
+    pub measurement_runs: u64,
+    /// The database file plus its write-ahead log
+    pub db_bytes: u64,
+}
+
 /// Hybrid storage backend that stores immutable measurement JSON and indexed metadata in SQLite.
 #[derive(Debug)]
 pub struct HybridDiskStorage {
@@ -119,6 +130,30 @@ impl HybridDiskStorage {
     #[must_use]
     pub fn host(&self) -> &KeyValue {
         &self.host
+    }
+
+    /// Whole-history counts for the metrics pushed at batch start, see [`crate::metrics`].
+    ///
+    /// The in-scope view (groups, cases, suspicious workloads, sweep age) comes from the
+    /// scheduler's scan instead, which follows the current config. Two queries and two file
+    /// sizes, so cheap enough to run every batch.
+    pub fn dataset_stats(&self) -> Result<DatasetStats, HybridDiskError> {
+        let mut stats = self.read_transaction(|tx| {
+            let count = |sql: &str| tx.query_one(sql, [], |row| row.get::<_, u64>(0));
+            Ok(DatasetStats {
+                measurements: count("SELECT COUNT(*) FROM measurements")?,
+                measurement_runs: count("SELECT COALESCE(SUM(run_count), 0) FROM measurements")?,
+                db_bytes: 0,
+            })
+        })?;
+
+        let wal_path = self.db_path.with_file_name(format!("{DB_FILE}-wal"));
+        stats.db_bytes = [&self.db_path, &wal_path]
+            .into_iter()
+            .filter_map(|path| fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum();
+        Ok(stats)
     }
 
     // Used for full configs where the host is required

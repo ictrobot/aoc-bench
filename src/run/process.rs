@@ -12,6 +12,7 @@ use crate::config::{BenchmarkId, Config, ConfigFile, KeyValue};
 use crate::group::{CaseGroup, GroupError, IsolatedGroup, RunGroup};
 use crate::host_config::HostConfig;
 use crate::measurement::{MEASUREMENT_SCHEMA, Measurement};
+use crate::metrics::{self, Labels};
 use crate::run::RunSeries;
 use crate::runner::{RunError, Runner};
 use crate::stable::{DriftCounters, DriftUpdate, RecordOutcome, compute_drift};
@@ -380,6 +381,12 @@ fn record_measurement(
 
         Ok((workload_id, outcome))
     })?;
+
+    if let Some(metrics) = metrics::global() {
+        let labels =
+            Labels::case(&identity.benchmark, executed_case).with("outcome", outcome.label());
+        metrics.increment(metrics::SERIES_OUTCOMES, &labels, 1.0);
+    }
 
     Ok((workload_id, measurement_id, outcome, json_path))
 }

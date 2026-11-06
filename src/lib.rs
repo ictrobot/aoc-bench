@@ -3,6 +3,7 @@ pub mod engine;
 pub mod group;
 pub mod host_config;
 pub mod measurement;
+pub mod metrics;
 pub mod protocol;
 pub mod rapl;
 pub mod run;

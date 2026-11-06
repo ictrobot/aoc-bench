@@ -203,12 +203,15 @@ impl ConfigFile {
 /// Cheap to clone (uses Arc internally).
 #[derive(Clone)]
 pub struct Key(Arc<KeyInner>);
+#[derive(Clone)]
 struct KeyInner {
     name: Arc<str>,
     values: Vec<Arc<str>>,
     name_to_idx: HashMap<Arc<str>, usize>,
     annotations: HashMap<usize, Arc<str>>,
     link_template: Option<Arc<str>>,
+    /// Whether the key is attached as a label to exported metrics
+    metric_label: bool,
 }
 
 impl Key {
@@ -293,7 +296,25 @@ impl Key {
             name_to_idx,
             annotations: indexed_annotations,
             link_template: link_template.map(Arc::from),
+            metric_label: false,
         })))
+    }
+
+    /// Attach the key as a `config_<name>` label to exported metrics (see [`crate::metrics`]).
+    ///
+    /// Must be called before the key is cloned: keys compare by identity, so a copy made after
+    /// this call would be a different key.
+    #[must_use]
+    pub fn with_metric_label(mut self, metric_label: bool) -> Self {
+        assert_eq!(Arc::strong_count(&self.0), 1, "key already shared");
+        Arc::make_mut(&mut self.0).metric_label = metric_label;
+        self
+    }
+
+    /// Whether the key is attached as a label to exported metrics
+    #[must_use]
+    pub fn metric_label(&self) -> bool {
+        self.0.metric_label
     }
 
     fn new_host_key(results_dir: &Path, current_host: Option<&str>) -> Result<Self, ConfigError> {
@@ -351,6 +372,7 @@ impl Key {
             name_to_idx,
             annotations: HashMap::new(),
             link_template: None,
+            metric_label: false,
         })))
     }
 
