@@ -95,3 +95,18 @@ they build on the host. Installed by `setup.yml`:
 
 `ssh rbench@<host> status` shows the service and lock state. To resume immediately after a cut-off run,
 `systemctl start aoc-bench.service`. To disable, set `bench_enable_rbench` to false and rerun the playbook.
+
+## Metrics
+
+With `metrics_push_url` set, the unit passes it to `aoc-bench` as `AOC_BENCH_METRICS_PUSH_URL`, which pushes the
+metrics described in section 11.3 of `DESIGN.md`. `bench-all.sh` pushes series of its own to the same URL with curl,
+through `metrics.sh`:
+
+* Each stage of a cycle (`aoc_bench_build`, `aoc_rs_bench_build`, `config`, `deploy` and `run`) pushes
+  `aoc_bench_stage_start_timestamp_seconds{stage}` when it starts and an `aoc_bench_stage_seconds{stage,outcome}`
+  increment when it ends, outcome `ok` or `failed`.
+* `build.sh` reports progress through `AOC_BENCH_BUILD_HOOK`, which `bench-all.sh` points at `metrics.sh`. Before
+  building, each profile pushes the gauges `aoc_bench_build_commits{profile}` and
+  `aoc_bench_build_commits_remaining{profile}`, the latter again after every commit it builds. Each built commit also
+  pushes the increments `aoc_bench_build_commit_seconds{profile}` and `aoc_bench_build_binaries{profile,outcome}`,
+  outcome `new` for a binary not already in `by-hash` and `reused` otherwise.

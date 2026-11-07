@@ -24,6 +24,7 @@ usage: $0 <data_dir>
        $0 --checksum
 
 The first form builds every commit of the upstream repository for the enabled profiles into <data_dir>/builds.
+Setting AOC_BENCH_BUILD_HOOK runs that command with progress events, described at build_hook in this script.
 
 The second form builds a single day from a local checkout's working tree, including uncommitted and untracked
 changes, and leaves the binary at <out_dir>/<year>-<day>. The checkout itself is never modified. Setting
@@ -186,6 +187,8 @@ build_binaries() (
     fi
 
     binaries=0
+    new_binaries=0
+    reused_binaries=0
     declare -A day_bins=() base_uses=()
     while read -r path; do
         if [[ $path =~ /crates/year([0-9]{4})/src/day([0-9]{2})\.rs$ ]]; then
@@ -413,9 +416,11 @@ build_binaries() (
             hash="$(sha256sum "$build.tmp/.$year-$day.tmp" | cut -d' ' -f1)"
             if [[ -e "$builds_dir/by-hash/$hash" ]]; then
                 rm -f "$build.tmp/.$year-$day.tmp"
+                reused_binaries=$((reused_binaries + 1))
             else
                 chmod a-w "$build.tmp/.$year-$day.tmp"
                 mv "$build.tmp/.$year-$day.tmp" "$builds_dir/by-hash/$hash"
+                new_binaries=$((new_binaries + 1))
             fi
             ln -f "$builds_dir/by-hash/$hash" "$build.tmp/$year-$day"
 
@@ -474,7 +479,24 @@ build_binaries() (
     fi
 
     mv "$build.tmp" "$build"
+    report_built "$new_binaries" "$reused_binaries"
 )
+
+# Run AOC_BENCH_BUILD_HOOK, if set, with a progress event. The events are:
+#     start <profile> <commits> <remaining>
+#         Once per enabled profile before anything is built, with the number of commits and how many have no build
+#     built <profile> <commit> <microseconds> <new> <reused> <remaining>
+#         After each commit is built, with the wall time it took, how many of its binaries were new to by-hash and how
+#         many were already there, and how many commits the profile still has to build
+# A failing hook only prints a warning, so it never fails the build.
+build_hook() {
+    if [[ -z "${AOC_BENCH_BUILD_HOOK:-}" ]]; then
+        return 0
+    fi
+    if ! "$AOC_BENCH_BUILD_HOOK" "$@"; then
+        echo "Build hook failed for event $1" >&2
+    fi
+}
 
 # Build every commit of the upstream repository. The source tree is a clone of upstream with each commit checked
 # out in turn, so the clone answers the history questions and pruning reads the clean files from git.
@@ -508,19 +530,40 @@ main_all() {
     source_reset() {
         git -C "$tmp_clone" checkout --force "$commit" -q
     }
+    # Called by build_binaries with how many binaries were new to by-hash and how many were already there. The start
+    # time and remaining counts are set by the loop below before each build.
+    report_built() {
+        build_hook built "$profile" "$commit" "$(( $(date +%s%6N) - start_us ))" "$1" "$2" "${remaining[$profile]}"
+    }
 
     git -C "$tmp_clone" rev-list --topo-order --reverse "$start_ref" > "$builds_commit_list.tmp"
     mv "$builds_commit_list.tmp" "$builds_commit_list"
 
+    # Queue every commit without a build, profile by profile and oldest first, so each profile's progress can be
+    # reported before anything is built
+    local start_us build_id
+    local -a commit_list queue=()
+    local -A remaining=()
+    mapfile -t commit_list < "$builds_commit_list"
     for profile in "${profiles[@]}"; do
         mkdir -p "$builds_dir/$profile"
-
-        while read -r commit <&3; do
-            build="$builds_dir/$profile/$commit"
-            if [[ ! -d "$build" ]]; then
-                build_binaries
+        remaining[$profile]=0
+        for commit in "${commit_list[@]}"; do
+            if [[ ! -d "$builds_dir/$profile/$commit" ]]; then
+                queue+=("$profile/$commit")
+                remaining[$profile]=$(( remaining[$profile] + 1 ))
             fi
-        done 3< "$builds_commit_list"
+        done
+        build_hook start "$profile" "${#commit_list[@]}" "${remaining[$profile]}"
+    done
+
+    for build_id in "${queue[@]}"; do
+        profile="${build_id%/*}"
+        commit="${build_id#*/}"
+        build="$builds_dir/$build_id"
+        start_us="$(date +%s%6N)"
+        remaining[$profile]=$(( remaining[$profile] - 1 ))
+        build_binaries
     done
 }
 
@@ -584,6 +627,10 @@ main_single() {
     only_bin="$year-$day"
     source_reset() {
         rsync -rlp --checksum --delete --exclude=/.git --exclude=/target/ "$checkout/" "$tmp_clone/"
+    }
+    # A single build reports no progress
+    report_built() {
+        :
     }
 
     build="$builds_dir/$profile/single"

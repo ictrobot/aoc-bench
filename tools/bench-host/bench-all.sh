@@ -2,7 +2,15 @@
 set -eou pipefail
 
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 SCRIPT_ARGS=("$@")
+
+# shellcheck source-path=SCRIPTDIR source=metrics.sh
+source "$SCRIPT_DIR/metrics.sh"
+
+# A stage still in progress when the script exits, from a failed command or a stop signal, ends as failed.
+# exec does not run this, but restart_self is only called between stages.
+trap 'metrics_stage_end 1' EXIT
 
 # Environment-specific paths
 REPO_DIR="${AOC_BENCH_DIR:-$HOME/aoc-bench}"
@@ -172,6 +180,7 @@ run_benchmarks() {
     echo "Running '${command[*]}'" >&2
 
     start=$(date +%s)
+    metrics_stage_start run
 
     set +e
     "${command[@]}" &
@@ -190,6 +199,7 @@ run_benchmarks() {
 
     end=$(date +%s)
     elapsed=$(( end - start ))
+    metrics_stage_end "$status"
 
     echo "Command '${command[*]}' exited with code $status after ${elapsed}s" >&2
 }
@@ -205,16 +215,27 @@ main() {
         echo "Repository updated by git pull, restarting script to use latest version" >&2
         restart_self
     fi
+
+    metrics_stage_start aoc_bench_build
     run_on_all_cores cargo build --release
     share_build
+    metrics_stage_end
 
     cd "$AOC_RS_BENCH_DIR"
-    run_on_all_cores ./build.sh "$DATA_DIR/"
+
+    metrics_stage_start aoc_rs_bench_build
+    AOC_BENCH_BUILD_HOOK="$SCRIPT_DIR/metrics.sh" run_on_all_cores ./build.sh "$DATA_DIR/"
+    metrics_stage_end
+
+    metrics_stage_start config
     run_on_all_cores ./config.py "$DATA_DIR/" "$INPUTS_DIR/"
+    metrics_stage_end
 
     cd "$REPO_DIR"
 
+    metrics_stage_start deploy
     maybe_sync_and_deploy
+    metrics_stage_end
 
     run_benchmarks
 
