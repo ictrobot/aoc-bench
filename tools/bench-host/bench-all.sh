@@ -105,8 +105,6 @@ maybe_sync_and_deploy() {
         return 0
     fi
 
-    export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
-
     command=(wrangler pages deploy "$WEB_DIST_DIR" --project-name "$CF_PAGES_PROJECT")
     if [[ -n "${CF_PAGES_BRANCH:-}" ]]; then
         command+=(--branch "$CF_PAGES_BRANCH")
@@ -115,7 +113,7 @@ maybe_sync_and_deploy() {
     printf '%s\n' "$now" > "$LAST_DEPLOY_EPOCH_FILE"
 
     echo "Deploying snapshot '$snapshot_id' to Cloudflare Pages project '$CF_PAGES_PROJECT'" >&2
-    if "${command[@]}"; then
+    if CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" "${command[@]}"; then
         printf '%s\n' "$snapshot_id" > "$LAST_DEPLOY_SNAPSHOT_FILE"
     else
         echo "Cloudflare deploy failed" >&2
@@ -205,7 +203,7 @@ main() {
     head_after_pull="$(git rev-parse --verify HEAD)"
     if [[ "$head_before_pull" != "$head_after_pull" ]]; then
         echo "Repository updated by git pull, restarting script to use latest version" >&2
-        exec "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
+        restart_self
     fi
     run_on_all_cores cargo build --release
     share_build
