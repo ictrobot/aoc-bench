@@ -292,7 +292,6 @@ fn build_indexed_results(
                 mean_ns: round_ns(r.stable_stats.mean_ns),
                 ci95_half_ns: r.stable_stats.ci95_half_ns.map(round_ns),
                 run_count: r.stable_stats.run_count,
-                multimodal: r.stable_stats.multimodal.unwrap_or(false),
             })
         })
         .collect()
@@ -329,7 +328,6 @@ fn build_indexed_latest(
                 mean_ns: round_ns(r.stable_stats.mean_ns),
                 ci95_half_ns: r.stable_stats.ci95_half_ns.map(round_ns),
                 run_count: r.stable_stats.run_count,
-                multimodal: r.stable_stats.multimodal.unwrap_or(false),
             })
         })
         .collect();
@@ -360,7 +358,6 @@ fn build_indexed_history(
                             mean_ns: round_ns(r.stats.mean_ns),
                             ci95_half_ns: r.stats.ci95_half_ns.map(round_ns),
                             run_count: r.stats.run_count,
-                            multimodal: r.stats.multimodal.unwrap_or(false),
                         }
                     }),
             );
@@ -432,7 +429,7 @@ fn partition_history(mut rows: Vec<HistoryRow>, target_bytes: usize) -> Vec<Hist
 /// `prev` is the row before it in the same sequence, used for the delta columns. Deltas restart
 /// at each part boundary, so this is a close estimate rather than exact across a cut.
 fn history_row_json_len(row: &HistoryRow, prev: Option<&HistoryRow>) -> usize {
-    const SEPARATORS: usize = 7;
+    const SEPARATORS: usize = 6;
     let (prev_config_idx, prev_timestamp_s) =
         prev.map_or((0, 0), |p| (p.config_idx, p.timestamp_s));
     SEPARATORS
@@ -442,7 +439,6 @@ fn history_row_json_len(row: &HistoryRow, prev: Option<&HistoryRow>) -> usize {
         + signed_decimal_len(row.mean_ns)
         + row.ci95_half_ns.map_or("null".len(), signed_decimal_len)
         + unsigned_decimal_len(row.run_count as u64)
-        + 1 // multimodal is a single digit
 }
 
 fn to_i64(value: usize) -> i64 {
@@ -728,7 +724,6 @@ mod tests {
         assert_eq!(r0.mean_ns, 101); // round(100.5)
         assert_eq!(r0.ci95_half_ns, None); // a single run has no interval
         assert_eq!(r0.run_count, 1);
-        assert!(!r0.multimodal);
 
         // Second result: bench_idx=0, config_idx=1 (build=y), mean=201, ci=1
         let r1 = &data.compact.results[1];
@@ -812,7 +807,6 @@ mod tests {
         assert_eq!(s0.measurement_token, 0); // isolated
         assert_eq!(s0.timestamp_s, 1000);
         assert_eq!(s0.run_count, 1);
-        assert!(!s0.multimodal);
 
         let s1 = &history.series[1];
         assert_eq!(s1.config_idx, 0); // build=x
@@ -831,7 +825,6 @@ mod tests {
             mean_ns: 123_456,
             ci95_half_ns: Some(789),
             run_count: 3,
-            multimodal: false,
         }
     }
 
@@ -858,7 +851,6 @@ mod tests {
                 mean_ns: -1_000_000_000,
                 ci95_half_ns: Some(10),
                 run_count: 100,
-                multimodal: true,
             },
             HistoryRow {
                 config_idx: 8,
@@ -867,7 +859,6 @@ mod tests {
                 mean_ns: 1,
                 ci95_half_ns: None,
                 run_count: 1,
-                multimodal: false,
             },
         ];
         let empty_len = serde_json::to_vec(&WebIndexedHistory { series: vec![] })
@@ -878,7 +869,7 @@ mod tests {
             .unwrap()
             .len();
         // Each row is charged one separator per column; the actual columns have one fewer.
-        assert_eq!(empty_len + estimate - 7, serialized);
+        assert_eq!(empty_len + estimate - 6, serialized);
     }
 
     #[test]
@@ -1074,7 +1065,6 @@ mod tests {
                             run_count: 1,
                             mean_ns: 10.0,
                             ci95_half_ns: None,
-                            multimodal: Some(false),
                         },
                         checksum: None,
                     },

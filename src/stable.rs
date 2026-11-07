@@ -224,7 +224,6 @@ mod tests {
             run_count: 9,
             mean_ns: mean,
             ci95_half_ns: Some(ci),
-            multimodal: Some(false),
         }
     }
 

@@ -222,7 +222,6 @@ impl Runner {
             mean_ns = summary.mean_ns,
             ci95_half_ns = summary.ci95_half_ns,
             runs = summary.run_count,
-            multimodal = summary.multimodal,
             "completed run series"
         );
 

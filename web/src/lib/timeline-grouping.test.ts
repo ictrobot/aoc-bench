@@ -9,7 +9,6 @@ const result = (commit: string, token: number): CompactResult => ({
   mean_ns: 100,
   ci95_half_ns: 2,
   run_count: 3,
-  multimodal: false,
 })
 
 describe("groupTimelineResults", () => {
@@ -38,21 +37,10 @@ describe("groupTimelineResults", () => {
     expect(groupTimelineResults([result("a", 1), differentBuild], "commit", ["a", "b"])).toHaveLength(2)
   })
 
-  it("does not merge cases whose multimodal flag or run count differ", () => {
-    const multimodal = result("b", 1)
-    multimodal.multimodal = true
+  it("does not merge cases whose run count differs", () => {
     const fewerRuns = result("b", 1)
     fewerRuns.run_count = 1
-    expect(groupTimelineResults([result("a", 1), multimodal], "commit", ["a", "b"])).toHaveLength(2)
     expect(groupTimelineResults([result("a", 1), fewerRuns], "commit", ["a", "b"])).toHaveLength(2)
-
-    const groups = groupTimelineResults(
-      [multimodal, { ...multimodal, config: { ...multimodal.config, commit: "c" } }],
-      "commit",
-      ["a", "b", "c"],
-    )
-    expect(groups).toHaveLength(1)
-    expect(groups[0].multimodal).toBe(true)
   })
 
   it("does not merge a missing interval with a zero-width one", () => {

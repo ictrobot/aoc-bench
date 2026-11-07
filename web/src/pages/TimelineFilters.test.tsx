@@ -104,7 +104,6 @@ describe("Timeline filters", () => {
         mean_ns: 100,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-a",
@@ -113,7 +112,6 @@ describe("Timeline filters", () => {
         mean_ns: 101,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -133,7 +131,6 @@ describe("Timeline filters", () => {
         mean_ns: 100,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-a",
@@ -142,7 +139,6 @@ describe("Timeline filters", () => {
         mean_ns: 101,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -172,7 +168,7 @@ describe("Timeline breakdown badges", () => {
     mockLoadResults.mockResolvedValue([])
   })
 
-  it("marks only multimodal measurements and formats a single run as having no interval", async () => {
+  it("formats a single run as having no interval", async () => {
     mockDecodeResultsForBenchmark.mockReturnValue([
       {
         bench: "bench-a",
@@ -181,7 +177,6 @@ describe("Timeline breakdown badges", () => {
         mean_ns: 100,
         ci95_half_ns: null,
         run_count: 1,
-        multimodal: false,
       },
       {
         bench: "bench-a",
@@ -190,7 +185,6 @@ describe("Timeline breakdown badges", () => {
         mean_ns: 120,
         ci95_half_ns: 4,
         run_count: 5,
-        multimodal: true,
       },
     ])
 
@@ -201,9 +195,6 @@ describe("Timeline breakdown badges", () => {
     const rows = await screen.findAllByRole("row")
     // header row plus one row per case
     expect(rows).toHaveLength(3)
-    expect(screen.getAllByText("multimodal")).toHaveLength(1)
-    expect(rows[2]).toHaveTextContent("multimodal")
-    expect(rows[1]).not.toHaveTextContent("multimodal")
     expect(rows[1]).toHaveTextContent("no interval")
     expect(rows[2]).toHaveTextContent("±4 ns")
   })

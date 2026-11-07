@@ -13,7 +13,7 @@ use std::path::Path;
 use tempfile::{Builder, NamedTempFile, TempDir};
 use tracing::info;
 
-const WEB_INDEX_SCHEMA_VERSION: u32 = 5;
+const WEB_INDEX_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct WebSnapshotExport {

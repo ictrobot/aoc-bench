@@ -14,7 +14,6 @@ function makeGroup(overrides: Partial<TimelineChartGroup>): TimelineChartGroup {
     mean_ns: 100,
     ci95_half_ns: 2,
     run_count: 3,
-    multimodal: false,
     configs: [{ commit: "a" }],
     measurement_token: 1,
     caseCount: 1,
@@ -108,8 +107,8 @@ describe("StepTimelineChart", () => {
     expect(screen.queryByText(/Mean:/)).not.toBeInTheDocument()
   })
 
-  it("shows the run count and a multimodal badge only for flagged groups", () => {
-    const flagged = [
+  it("shows the run count and whether there is an interval", () => {
+    const groups = [
       makeGroup({ run_count: 1, ci95_half_ns: null }),
       makeGroup({
         startValue: "b",
@@ -118,12 +117,11 @@ describe("StepTimelineChart", () => {
         endIndex: 1,
         configs: [{ commit: "b" }],
         run_count: 5,
-        multimodal: true,
       }),
     ]
     render(
       <StepTimelineChart
-        groups={flagged}
+        groups={groups}
         varyingKey="commit"
         significantGroupIndices={new Set()}
         xLabels="all"
@@ -132,17 +130,15 @@ describe("StepTimelineChart", () => {
     )
     const svg = screen.getByRole("img", { name: "Performance by commit" })
 
-    // slot 0: a single run has no interval and no badge
+    // slot 0: a single run has no interval
     fireEvent.pointerMove(svg, { clientX: 85, clientY: 100 })
     expect(screen.getByText(/Runs: 1/)).toBeInTheDocument()
     expect(screen.getByText(/no interval/)).toBeInTheDocument()
-    expect(screen.queryByText("multimodal")).not.toBeInTheDocument()
 
-    // slot 1 (plot is 700px wide, two slots): flagged, with an interval
+    // slot 1 (plot is 700px wide, two slots): with an interval
     fireEvent.pointerMove(svg, { clientX: 600, clientY: 100 })
     expect(screen.getByText(/Runs: 5/)).toBeInTheDocument()
     expect(screen.getByText(/±2 ns/)).toBeInTheDocument()
-    expect(screen.getByText("multimodal")).toBeInTheDocument()
   })
 
   it("renders a genuine zero-width interval as ±0 ns", () => {

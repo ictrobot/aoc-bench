@@ -89,9 +89,6 @@ pub fn format_series_summary(series: &RunSeries, with_runs: bool) -> String {
         }
         None => out.push_str("(1 run)"),
     }
-    if summary.multimodal {
-        out.push_str(" MULTIMODAL");
-    }
     out.push('\n');
 
     let mut means: Vec<f64> = series
@@ -183,7 +180,7 @@ mod tests {
 
     #[test]
     fn summary_with_runs_lists_them_in_time_order() {
-        // Two levels, so the flag is set; the runs line is sorted but the per-run lines are not
+        // The runs line is sorted but the per-run lines are not
         let runs = vec![
             run(30, 95_500_000.0, Some(28_000.0), 24),
             run(0, 82_000_000.0, Some(25_000.0), 24),
@@ -192,7 +189,7 @@ mod tests {
         ];
         let text = format_series_summary(&series(runs), true);
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[0].ends_with("(4 runs) MULTIMODAL"), "{}", lines[0]);
+        assert!(lines[0].ends_with("(4 runs)"), "{}", lines[0]);
         assert_eq!(lines[1], "runs: 82.00 82.10 95.40 95.50 ms");
         assert_eq!(lines[2], "run 1: 82.00 ms/iter se ±0.03% (24 samples)");
         assert_eq!(lines[3], "run 2: 95.40 ms/iter (24 samples)");

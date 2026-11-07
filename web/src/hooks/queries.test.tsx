@@ -84,7 +84,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: ResultRow[] = [[0, 0, 0, 100, 5, 3, 0]]
+    const rawData: ResultRow[] = [[0, 0, 0, 100, 5, 3]]
     const decoded = [
       {
         bench: BENCH,
@@ -93,7 +93,6 @@ describe("useBenchmarkResults", () => {
         mean_ns: 100,
         ci95_half_ns: 5,
         run_count: 3,
-        multimodal: false,
       },
     ]
 
@@ -119,8 +118,8 @@ describe("useBenchmarkResults", () => {
     const hostIndexB = makeHostIndex("results-b.json")
     const indexA = makeIndex("snapshot-a", hostIndexA)
     const indexB = makeIndex("snapshot-b", hostIndexB)
-    const rawDataA: ResultRow[] = [[0, 0, 0, 111, 3, 3, 0]]
-    const rawDataB: ResultRow[] = [[0, 0, 0, 222, 7, 3, 0]]
+    const rawDataA: ResultRow[] = [[0, 0, 0, 111, 3, 3]]
+    const rawDataB: ResultRow[] = [[0, 0, 0, 222, 7, 3]]
 
     mockLoadIndex.mockResolvedValueOnce(indexA).mockResolvedValueOnce(indexB)
     mockLoadResults.mockResolvedValueOnce(rawDataA).mockResolvedValueOnce(rawDataB)
@@ -132,7 +131,6 @@ describe("useBenchmarkResults", () => {
         mean_ns: data[0][3],
         ci95_half_ns: data[0][4],
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -158,7 +156,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: ResultRow[] = [[0, 0, 0, 333, 2, 3, 0]]
+    const rawData: ResultRow[] = [[0, 0, 0, 333, 2, 3]]
     const decoded = [
       {
         bench: BENCH,
@@ -167,7 +165,6 @@ describe("useBenchmarkResults", () => {
         mean_ns: 333,
         ci95_half_ns: 2,
         run_count: 3,
-        multimodal: false,
       },
     ]
 
@@ -213,7 +210,7 @@ describe("useBenchmarkResults", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawData: ResultRow[] = [[0, 0, 0, 100, 5, 3, 0]]
+    const rawData: ResultRow[] = [[0, 0, 0, 100, 5, 3]]
 
     mockLoadIndex.mockResolvedValue(index)
     mockLoadResults.mockResolvedValue(rawData)
@@ -225,7 +222,6 @@ describe("useBenchmarkResults", () => {
         mean_ns: bench === BENCH ? 100 : 200,
         ci95_half_ns: 5,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -251,7 +247,7 @@ describe("useBenchmarkHistory", () => {
     const queryClient = createQueryClient()
     const hostIndex = makeHostIndex("results-a.json")
     const index = makeIndex("snapshot-a", hostIndex)
-    const rawHistory: HistoryRow[] = [[0, 0, 1_000, 100, 5, 10, 0]]
+    const rawHistory: HistoryRow[] = [[0, 0, 1_000, 100, 5, 10]]
 
     const configA = { compiler: "stable", input: "small" }
     const configB = { compiler: "stable", input: "large" }
@@ -267,7 +263,6 @@ describe("useBenchmarkHistory", () => {
         mean_ns: config.input === "small" ? 100 : 200,
         ci95_half_ns: 5,
         run_count: 10,
-        multimodal: false,
       },
     ])
 
@@ -304,7 +299,7 @@ describe("useBenchmarkHistory", () => {
 
     mockLoadIndex.mockResolvedValue(index)
     mockHistoryPart.mockImplementation((_index, _bench, config) => (config.input === "small" ? 0 : 1))
-    mockLoadHistory.mockImplementation(async (_index, _bench, part) => [[part, 0, 1_000 * (part + 1), 100, 5, 10, 0]])
+    mockLoadHistory.mockImplementation(async (_index, _bench, part) => [[part, 0, 1_000 * (part + 1), 100, 5, 10]])
     mockDecodeHistory.mockImplementation((_index, data, _bench, config) => [
       {
         config: { ...config },
@@ -313,7 +308,6 @@ describe("useBenchmarkHistory", () => {
         mean_ns: 100,
         ci95_half_ns: 5,
         run_count: 10,
-        multimodal: false,
       },
     ])
 

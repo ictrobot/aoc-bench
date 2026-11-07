@@ -1,12 +1,11 @@
 /**
  * A row of results.json or of `latest_results`:
- * `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns, run_count, multimodal]`.
+ * `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns, run_count]`.
  *
  * `mean_ns` is the mean over `run_count` independent runs and `ci95_half_ns` the 95%
  * t-interval half-width over those runs. It is null when there is no interval: a single run,
  * or a measurement from before run summaries existed (whose legacy value was dropped). Zero
  * is a genuine zero-width interval.
- * `multimodal` is 0 or 1, flagging that the run values fell into more than one cluster.
  */
 export type ResultRow = [
   bench_idx: number,
@@ -15,12 +14,11 @@ export type ResultRow = [
   mean_ns: number,
   ci95_half_ns: number | null,
   run_count: number,
-  multimodal: number,
 ]
 
 /**
  * A row of a history part:
- * `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count, multimodal]`.
+ * `[config_idx, measurement_token, timestamp_s, mean_ns, ci95_half_ns, run_count]`.
  */
 export type HistoryRow = [
   config_idx: number,
@@ -29,7 +27,6 @@ export type HistoryRow = [
   mean_ns: number,
   ci95_half_ns: number | null,
   run_count: number,
-  multimodal: number,
 ]
 
 export interface GlobalIndex {
@@ -71,7 +68,6 @@ export interface IndexedResults {
     mean_ns: number[]
     ci95_half_ns: (number | null)[]
     run_count: number[]
-    multimodal: number[]
   }
 }
 
@@ -84,7 +80,6 @@ export interface IndexedHistory {
     mean_ns: number[]
     ci95_half_ns: (number | null)[]
     run_count: number[]
-    multimodal: number[]
   }
 }
 
@@ -101,8 +96,6 @@ export interface CompactResult {
    */
   ci95_half_ns: number | null
   run_count: number
-  /** The run values fell into more than one cluster. Annotation only, changes no number. */
-  multimodal: boolean
 }
 
 export interface HistorySeries {
@@ -118,6 +111,4 @@ export interface HistorySeries {
    */
   ci95_half_ns: number | null
   run_count: number
-  /** The run values fell into more than one cluster. Annotation only, changes no number. */
-  multimodal: boolean
 }

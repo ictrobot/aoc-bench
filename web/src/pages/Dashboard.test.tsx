@@ -51,7 +51,6 @@ describe("Dashboard", () => {
         mean_ns: 100,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-a",
@@ -60,7 +59,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -101,7 +99,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-a",
@@ -110,7 +107,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -135,7 +131,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -144,7 +139,6 @@ describe("Dashboard", () => {
         mean_ns: 90,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -188,7 +182,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -214,7 +207,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -247,7 +239,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -256,7 +247,6 @@ describe("Dashboard", () => {
         mean_ns: 90,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -280,7 +270,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -310,7 +299,6 @@ describe("Dashboard", () => {
         mean_ns: 80,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -319,7 +307,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -355,7 +342,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -378,7 +364,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -387,7 +372,6 @@ describe("Dashboard", () => {
         mean_ns: 90,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -445,7 +429,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -454,7 +437,6 @@ describe("Dashboard", () => {
         mean_ns: 90,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 
@@ -477,7 +459,6 @@ describe("Dashboard", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -486,7 +467,6 @@ describe("Dashboard", () => {
         mean_ns: 90,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 

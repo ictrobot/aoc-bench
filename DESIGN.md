@@ -851,26 +851,6 @@ deviation needs a handful of degrees of freedom before interval widths stop bein
 | 9    | 2.31 | 0.77                             | 0.58 to 1.39                        |
 | 12   | 2.20 | 0.64                             | 0.64 to 1.34                        |
 
-### Multimodal flag
-
-Some binaries land in one of a few performance levels per run, due to effects such as predictor state, huge-page
-availability or runtime variant selection. With nine runs, the t-interval's nominal 95% coverage relies on
-independent, approximately normal run values. Multiple levels can widen it, but coverage may fall below 95%,
-especially if a level is missed. The summary flags observed clustering without changing the mean or interval:
-
-1. Sort the run values. Every gap between neighbours wider than 1% of the mean is a break, and the runs between
-   breaks form clusters.
-2. A cluster of one run is an outlier: it is no level, counts toward nothing, and is skipped over. A level is a
-   cluster of two or more runs.
-3. While the gap between two consecutive levels, measured across any outliers between them, is no wider than four
-   times the pooled within-level standard deviation (degrees of freedom: members minus levels), merge the narrowest
-   such pair and everything between them.
-4. `multimodal` is true when two or more levels remain, so a level has to be seen at least twice and the separation
-   test holds for exactly the levels reported. Never true below four runs.
-
-The 1% floor and factor of four are tuning choices. A missed level is invisible to both the interval and the flag,
-though it may appear in later reruns.
-
 ## 7.5 Per-run diagnostic
 
 Each run also records the standard error of its value, for the estimator that produced it, as a diagnostic only.
@@ -915,8 +895,7 @@ Per run series (collection of runs), the system produces:
 * `config`: configuration JSON
 * `timestamp`: when the run series was performed (start time)
 * `runs`: array of run results (sorted by mean)
-* `summary`: `{run_count, mean_ns, ci95_half_ns, multimodal}` from section 7.4, with `ci95_half_ns` null for
-  a single run
+* `summary`: `{run_count, mean_ns, ci95_half_ns}` from section 7.4, with `ci95_half_ns` null for a single run
 * `checksum`: output validation
 
 The summary's mean and interval are the **representative values** for:
@@ -941,7 +920,7 @@ The following is abridged; each `runs` entry uses the complete structure from se
 
 ```json
 {
-  "schema": 3,
+  "schema": 4,
   "measurement_id": "0195f4c1-3a4b-7abc-8123-456789abcdef",
   "bench": "2015-04",
   "workload_sha256": "...",
@@ -979,8 +958,7 @@ The following is abridged; each `runs` entry uses the complete structure from se
   "summary": {
     "run_count": 9,
     "mean_ns": 106300.0,
-    "ci95_half_ns": 425.0,
-    "multimodal": false
+    "ci95_half_ns": 425.0
   },
   "runs": [
     {
@@ -1007,7 +985,8 @@ The summary is the display and drift value, for example:
 106.3 µs/iter ±0.40% (9 runs)
 ```
 
-Schema 2 files have the same layout without the `summary` block; their database rows summarise the median run
+Schema 3 files also carry `summary.multimodal`, which attempted to flag runs that fell into multiple clusters.
+Schema 2 files have the same layout without the `summary` block, and their database rows summarise the median run
 instead (section 9.2).
 
 ---
@@ -1058,11 +1037,10 @@ Each host's `metadata.db` has four normalized tables:
 | `measurements`      | One row per workload run series: timestamp, schema version, checksum, and run summary (see below) |
 | `measurement_cases` | Append-only case-visible measurement history                                                      |
 
-The summary columns `run_count`, `mean_ns`, `ci95_half_ns` and `multimodal` hold the run summary of section 7.4,
-with `ci95_half_ns` NULL where there is no interval. Rows from schema 1 or 2 keep their median run's mean in
-`mean_ns` but have no interval and no flag: their within-run bootstrap half-width is not a run interval, so
-migration 05 dropped it (the raw JSON keeps it). A row without an interval, legacy or single-run, never counts as
-changed.
+The summary columns `run_count`, `mean_ns` and `ci95_half_ns` hold the run summary of section 7.4, with
+`ci95_half_ns` NULL where there is no interval. Rows from schema 1 or 2 keep their median run's mean in `mean_ns`
+but have no interval: their within-run bootstrap half-width is not a run interval, so migration 05 dropped it (the
+raw JSON keeps it). A row without an interval, legacy or single-run, never counts as changed.
 
 Important invariants:
 
@@ -1325,8 +1303,8 @@ aoc-bench export --host silicon --config commit=abc1234,profile=release,threads=
 The `export` command outputs TSV suitable for plotting:
 
 ```text
-host    bench   cfg_commit  cfg_profile cfg_threads  stable_timestamp  stable_measurement_id                 run_count  mean_ns   ci95_half_ns  multimodal
-silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-3a4b-7abc-8123-456789abcdef  9             30930000  30000         0
+host    bench   cfg_commit  cfg_profile cfg_threads  stable_timestamp  stable_measurement_id                 run_count  mean_ns   ci95_half_ns
+silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-3a4b-7abc-8123-456789abcdef  9             30930000  30000
 ...
 ```
 
@@ -1334,8 +1312,8 @@ silicon 2015-04 abc1234     release     1            1731437601        0195f4c1-
 
 The config JSON is always extracted into a column per key. Keys other than `host` are prefixed with `cfg_`.
 
-**Note:** Exported values are the run summaries of stable measurements; `ci95_half_ns` and `multimodal` are empty
-for a single-run or legacy row respectively. For run-level details access the JSON files directly in the
+**Note:** Exported values are the run summaries of stable measurements. `ci95_half_ns` is empty for a single-run or
+legacy row. For run-level details access the JSON files directly in the
 `runs/` directory.
 
 Use with gnuplot, matplotlib, R, or any other plotting tool.

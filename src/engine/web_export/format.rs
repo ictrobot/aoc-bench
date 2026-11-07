@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// A row of the indexed results file, or of `latest_results` in the host index.
 ///
 /// In `latest_results` it serializes as `[bench_idx, config_idx, measurement_token, mean_ns,
-/// ci95_half_ns, run_count, multimodal]`; `results.json` stores rows as columns instead, see
+/// ci95_half_ns, run_count]`; `results.json` stores rows as columns instead, see
 /// [`WebIndexedResults`].
 /// Decoded using the host's `config_keys` and `benchmarks` from `index.json`.
 #[derive(Debug, PartialEq)]
@@ -19,20 +19,17 @@ pub struct ResultRow {
     /// `None` (JSON null) where there is no interval: a single run, or a legacy measurement
     pub ci95_half_ns: Option<i64>,
     pub run_count: usize,
-    /// 0 or 1; legacy measurements without a flag export as 0
-    pub multimodal: bool,
 }
 
 impl Serialize for ResultRow {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut seq = serializer.serialize_seq(Some(7))?;
+        let mut seq = serializer.serialize_seq(Some(6))?;
         seq.serialize_element(&self.bench_idx)?;
         seq.serialize_element(&self.config_idx)?;
         seq.serialize_element(&self.measurement_token)?;
         seq.serialize_element(&self.mean_ns)?;
         seq.serialize_element(&self.ci95_half_ns)?;
         seq.serialize_element(&self.run_count)?;
-        seq.serialize_element(&u8::from(self.multimodal))?;
         seq.end()
     }
 }
@@ -51,8 +48,6 @@ pub struct HistoryRow {
     /// `None` (JSON null) where there is no interval: a single run, or a legacy measurement
     pub ci95_half_ns: Option<i64>,
     pub run_count: usize,
-    /// 0 or 1; legacy measurements without a flag export as 0
-    pub multimodal: bool,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -65,7 +60,7 @@ pub struct WebHostIndex {
     pub timeline_key: Option<String>,
     /// Latest stable results for the most recent timeline key value.
     /// Each row: `[bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns,
-    /// run_count, multimodal]`
+    /// run_count]`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_results: Option<Vec<ResultRow>>,
 }
@@ -96,7 +91,7 @@ pub struct WebBenchmarkEntry {
 ///
 /// Serializes column-wise as
 /// `{"results": {"bench_idx_delta": [..], "config_idx_delta": [..], "measurement_token": [..],
-/// "mean_ns": [..], "ci95_half_ns": [..], "run_count": [..], "multimodal": [..]}}` where every
+/// "mean_ns": [..], "ci95_half_ns": [..], "run_count": [..]}}` where every
 /// column has one entry per row. Grouping
 /// values by column lets generic transfer compression find the long runs in the low-entropy
 /// columns; `*_delta` columns hold the difference from the previous row's value (from zero for
@@ -116,7 +111,6 @@ impl Serialize for WebIndexedResults {
             mean_ns: Column<'a, ResultRow, i64>,
             ci95_half_ns: Column<'a, ResultRow, Option<i64>>,
             run_count: Column<'a, ResultRow, i64>,
-            multimodal: Column<'a, ResultRow, i64>,
         }
         #[derive(Serialize)]
         struct Payload<'a> {
@@ -132,7 +126,6 @@ impl Serialize for WebIndexedResults {
                 mean_ns: Column(rows, |r| r.mean_ns),
                 ci95_half_ns: Column(rows, |r| r.ci95_half_ns),
                 run_count: Column(rows, |r| to_i64(r.run_count)),
-                multimodal: Column(rows, |r| i64::from(r.multimodal)),
             },
         }
         .serialize(serializer)
@@ -145,7 +138,7 @@ impl Serialize for WebIndexedResults {
 ///
 /// Serializes column-wise in the same style as [`WebIndexedResults`], as
 /// `{"series": {"config_idx_delta": [..], "measurement_token": [..], "timestamp_s_delta": [..],
-/// "mean_ns": [..], "ci95_half_ns": [..], "run_count": [..], "multimodal": [..]}}`. Deltas
+/// "mean_ns": [..], "ci95_half_ns": [..], "run_count": [..]}}`. Deltas
 /// restart from zero in every part file.
 #[derive(Debug, PartialEq)]
 pub struct WebIndexedHistory {
@@ -162,7 +155,6 @@ impl Serialize for WebIndexedHistory {
             mean_ns: Column<'a, HistoryRow, i64>,
             ci95_half_ns: Column<'a, HistoryRow, Option<i64>>,
             run_count: Column<'a, HistoryRow, i64>,
-            multimodal: Column<'a, HistoryRow, i64>,
         }
         #[derive(Serialize)]
         struct Payload<'a> {
@@ -178,7 +170,6 @@ impl Serialize for WebIndexedHistory {
                 mean_ns: Column(rows, |r| r.mean_ns),
                 ci95_half_ns: Column(rows, |r| r.ci95_half_ns),
                 run_count: Column(rows, |r| to_i64(r.run_count)),
-                multimodal: Column(rows, |r| i64::from(r.multimodal)),
             },
         }
         .serialize(serializer)
@@ -218,22 +209,19 @@ mod tests {
 
     #[test]
     fn results_serialize_as_delta_columns() {
-        let row = |bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns, multimodal| {
-            ResultRow {
-                bench_idx,
-                config_idx,
-                measurement_token,
-                mean_ns,
-                ci95_half_ns,
-                run_count: 9,
-                multimodal,
-            }
+        let row = |bench_idx, config_idx, measurement_token, mean_ns, ci95_half_ns| ResultRow {
+            bench_idx,
+            config_idx,
+            measurement_token,
+            mean_ns,
+            ci95_half_ns,
+            run_count: 9,
         };
         let data = WebIndexedResults {
             results: vec![
-                row(0, 3, 0, 100, Some(5), false),
-                row(0, 7, 2, 110, None, true),
-                row(1, 1, 2, 120, Some(7), false),
+                row(0, 3, 0, 100, Some(5)),
+                row(0, 7, 2, 110, None),
+                row(1, 1, 2, 120, Some(7)),
             ],
         };
         let json: serde_json::Value = serde_json::to_value(&data).unwrap();
@@ -246,7 +234,6 @@ mod tests {
                 "mean_ns": [100, 110, 120],
                 "ci95_half_ns": [5, null, 7],
                 "run_count": [9, 9, 9],
-                "multimodal": [0, 1, 0],
             }})
         );
     }
@@ -261,7 +248,6 @@ mod tests {
                 mean_ns,
                 ci95_half_ns,
                 run_count,
-                multimodal: run_count == 3,
             }
         };
         let data = WebIndexedHistory {
@@ -281,7 +267,6 @@ mod tests {
                 "mean_ns": [100, 101, 200],
                 "ci95_half_ns": [5, null, 9],
                 "run_count": [3, 1, 3],
-                "multimodal": [1, 0, 1],
             }})
         );
     }

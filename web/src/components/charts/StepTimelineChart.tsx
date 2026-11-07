@@ -2,7 +2,6 @@ import React, { useLayoutEffect, useMemo, useRef, useState } from "react"
 import { formatCi, formatDurationNs, shortenValue } from "@/lib/format.ts"
 import type { TimelineResultGroup } from "@/lib/timeline-grouping.ts"
 import { GroupValueLabel } from "@/components/config/GroupValueLabel.tsx"
-import { MultimodalBadge } from "@/components/benchmarks/MultimodalBadge.tsx"
 
 export type TimelineChartGroup = TimelineResultGroup & {
   color: string
@@ -396,10 +395,7 @@ export function StepTimelineChart({
               {hoverGroup.ci95_half_ns === null ? "(no interval)" : formatCi(hoverGroup.ci95_half_ns)}
             </span>
           </div>
-          <div className="text-muted-foreground">
-            Runs: {hoverGroup.run_count}
-            {hoverGroup.multimodal && <MultimodalBadge className="ml-2 font-sans text-xs" />}
-          </div>
+          <div className="text-muted-foreground">Runs: {hoverGroup.run_count}</div>
           {hoverGroup.delta !== null && (
             <div className="text-muted-foreground">
               vs previous: {hoverGroup.delta > 0 ? "+" : ""}

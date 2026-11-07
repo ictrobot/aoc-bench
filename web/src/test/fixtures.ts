@@ -54,7 +54,6 @@ export function columnarResults(rows: ResultRow[]): IndexedResults {
       mean_ns: column(rows, 3, false),
       ci95_half_ns: nullableColumn(rows, 4),
       run_count: column(rows, 5, false),
-      multimodal: column(rows, 6, false),
     },
   }
 }
@@ -69,7 +68,6 @@ export function columnarHistory(rows: HistoryRow[]): IndexedHistory {
       mean_ns: column(rows, 3, false),
       ci95_half_ns: nullableColumn(rows, 4),
       run_count: column(rows, 5, false),
-      multimodal: column(rows, 6, false),
     },
   }
 }
@@ -85,7 +83,7 @@ export function makeGlobalIndex(
   } = {},
 ): GlobalIndex {
   return {
-    schema_version: 5,
+    schema_version: 6,
     snapshot_id: snapshotId,
     hosts: { [host]: hostIndex },
   }

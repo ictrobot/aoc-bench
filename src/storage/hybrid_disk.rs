@@ -420,8 +420,8 @@ impl StorageRead for HybridDiskStorage {
                     w.suspicious_count,
                     w.matched_count,
                     w.replaced_count,
-                    sm.run_count, sm.mean_ns, sm.ci95_half_ns, sm.multimodal,
-                    lm.run_count, lm.mean_ns, lm.ci95_half_ns, lm.multimodal,
+                    sm.run_count, sm.mean_ns, sm.ci95_half_ns,
+                    lm.run_count, lm.mean_ns, lm.ci95_half_ns,
                     sm.measurement_id,
                     w.executable_sha256 IS NOT NULL
              FROM cases c
@@ -444,9 +444,9 @@ impl StorageRead for HybridDiskStorage {
                         replaced_count: row.get(4)?,
                     },
                     stable_stats: stats_from_row(row, 5)?,
-                    last_stats: stats_from_row(row, 9)?,
-                    stable_measurement_id: row.get(13)?,
-                    is_shared: row.get(14)?,
+                    last_stats: stats_from_row(row, 8)?,
+                    stable_measurement_id: row.get(11)?,
+                    is_shared: row.get(12)?,
                 })
             })
             .optional()?)
@@ -480,8 +480,8 @@ impl StorageRead for HybridDiskStorage {
                     w.suspicious_count AS suspicious_count,
                     w.matched_count AS matched_count,
                     w.replaced_count AS replaced_count,
-                    sm.run_count, sm.mean_ns, sm.ci95_half_ns, sm.multimodal,
-                    lm.run_count, lm.mean_ns, lm.ci95_half_ns, lm.multimodal,
+                    sm.run_count, sm.mean_ns, sm.ci95_half_ns,
+                    lm.run_count, lm.mean_ns, lm.ci95_half_ns,
                     sm.measurement_id,
                     w.executable_sha256 IS NOT NULL
              FROM cases c
@@ -512,12 +512,12 @@ impl StorageRead for HybridDiskStorage {
             }
 
             let stable_stats = stats_from_row(row, 7)?;
-            let last_stats = stats_from_row(row, 11)?;
+            let last_stats = stats_from_row(row, 10)?;
 
             results.push(ResultsRowWithStats {
                 row: base_row,
-                stable_measurement_id: row.get(15)?,
-                is_shared: row.get(16)?,
+                stable_measurement_id: row.get(13)?,
+                is_shared: row.get(14)?,
                 stable_stats,
                 last_stats,
             });
@@ -539,7 +539,7 @@ impl StorageRead for HybridDiskStorage {
     ) -> Result<(), Self::Error> {
         let mut stmt = tx.prepare_cached(
             "SELECT c.config, m.measurement_id, w.executable_sha256 IS NOT NULL,
-                    m.timestamp, m.run_count, m.mean_ns, m.ci95_half_ns, m.multimodal
+                    m.timestamp, m.run_count, m.mean_ns, m.ci95_half_ns
              FROM measurement_cases mc
              JOIN measurements m ON m.measurement_id = mc.measurement_id
              JOIN workloads w ON w.workload_id = m.workload_id
@@ -883,8 +883,8 @@ impl Storage for HybridDiskStorage {
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO measurements
                  (measurement_id, workload_id, timestamp, schema_version,
-                  run_count, mean_ns, ci95_half_ns, multimodal, checksum)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  run_count, mean_ns, ci95_half_ns, checksum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         stmt.execute(params![
             record.measurement_id,
@@ -894,7 +894,6 @@ impl Storage for HybridDiskStorage {
             record.stats.run_count,
             record.stats.mean_ns,
             record.stats.ci95_half_ns,
-            record.stats.multimodal,
             record.checksum,
         ])?;
         Ok(())
@@ -921,7 +920,7 @@ impl Storage for HybridDiskStorage {
         measurement_id: MeasurementId,
     ) -> Result<Option<MeasurementStats>, HybridDiskError> {
         let mut stmt = tx.prepare_cached(
-            "SELECT run_count, mean_ns, ci95_half_ns, multimodal
+            "SELECT run_count, mean_ns, ci95_half_ns
              FROM measurements WHERE measurement_id = ?1",
         )?;
         Ok(stmt
@@ -930,14 +929,13 @@ impl Storage for HybridDiskStorage {
     }
 }
 
-/// Read the summary columns `run_count, mean_ns, ci95_half_ns, multimodal` starting at column
-/// `offset`. `ci95_half_ns` is NULL where there is no interval, `multimodal` NULL on legacy rows.
+/// Read the summary columns `run_count, mean_ns, ci95_half_ns` starting at column `offset`.
+/// `ci95_half_ns` is NULL where there is no interval.
 fn stats_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<MeasurementStats> {
     Ok(MeasurementStats {
         run_count: row.get(offset)?,
         mean_ns: row.get(offset + 1)?,
         ci95_half_ns: row.get(offset + 2)?,
-        multimodal: row.get(offset + 3)?,
     })
 }
 
@@ -1472,7 +1470,6 @@ mod tests {
             run_count: 9,
             mean_ns: mean,
             ci95_half_ns: Some(1.0),
-            multimodal: Some(false),
         }
     }
 
@@ -1779,7 +1776,7 @@ mod tests {
                     tx.query_one("SELECT MAX(version) FROM schema_migrations", [], |r| {
                         r.get(0)
                     })?;
-                assert_eq!(migration_version, 5);
+                assert_eq!(migration_version, 6);
                 // The legacy bootstrap half-width is dropped: it was not a run interval
                 let stats = storage.get_measurement_stats(tx, measurement_id)?.unwrap();
                 assert_eq!(
@@ -1788,7 +1785,6 @@ mod tests {
                         run_count: 3,
                         mean_ns: 1000.0,
                         ci95_half_ns: None,
-                        multimodal: None,
                     }
                 );
                 let stored_half: Option<f64> = tx.query_one(
@@ -1823,14 +1819,12 @@ mod tests {
                             run_count: 1,
                             mean_ns: 1010.0,
                             ci95_half_ns: None,
-                            multimodal: Some(false),
                         },
                         checksum: None,
                     },
                 )?;
                 let stats = storage.get_measurement_stats(tx, one_run)?.unwrap();
                 assert_eq!(stats.ci95_half_ns, None);
-                assert_eq!(stats.multimodal, Some(false));
 
                 let identical = MeasurementId::new_v7();
                 storage.insert_measurement(
@@ -1843,7 +1837,6 @@ mod tests {
                             run_count: 9,
                             mean_ns: 1000.0,
                             ci95_half_ns: Some(0.0),
-                            multimodal: Some(false),
                         },
                         checksum: None,
                     },
@@ -1908,7 +1901,7 @@ mod tests {
                     tx.query_one("SELECT MAX(version) FROM schema_migrations", [], |r| {
                         r.get(0)
                     })?;
-                assert_eq!(migration_version, 5);
+                assert_eq!(migration_version, 6);
                 let free_pages: i64 = tx.query_one("PRAGMA freelist_count", [], |r| r.get(0))?;
                 assert_eq!(free_pages, 0);
                 // The case's result points at the migrated isolated workload with copied counters.

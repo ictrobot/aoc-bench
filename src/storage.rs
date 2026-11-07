@@ -304,18 +304,16 @@ pub struct ResultsRowWithStats {
 
 /// Summary statistics stored for one measurement.
 ///
-/// For run-summary rows (measurement schema 3) `mean_ns` is the mean over runs and
+/// For run-summary rows (measurement schema 3 and 4) `mean_ns` is the mean over runs and
 /// `ci95_half_ns` the t-interval half-width over them, `None` for a single run. Legacy rows
 /// (schema 1 and 2) carry the median run's mean, have no interval (their within-run bootstrap
-/// half-width was dropped by migration 05), and have no `multimodal` flag.
+/// half-width was dropped by migration 05).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeasurementStats {
     pub run_count: usize,
     pub mean_ns: f64,
     /// `None` where there is no interval: a single run, or a legacy row
     pub ci95_half_ns: Option<f64>,
-    /// `None` for legacy rows
-    pub multimodal: Option<bool>,
 }
 
 impl MeasurementStats {
@@ -339,7 +337,6 @@ impl From<RunSummary> for MeasurementStats {
             run_count: summary.run_count,
             mean_ns: summary.mean_ns,
             ci95_half_ns: summary.ci95_half_ns,
-            multimodal: Some(summary.multimodal),
         }
     }
 }

@@ -162,7 +162,6 @@ describe("App", () => {
         mean_ns: 50,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-b",
@@ -171,7 +170,6 @@ describe("App", () => {
         mean_ns: 60,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
       {
         bench: "bench-c",
@@ -180,7 +178,6 @@ describe("App", () => {
         mean_ns: 70,
         ci95_half_ns: 1,
         run_count: 3,
-        multimodal: false,
       },
     ])
 

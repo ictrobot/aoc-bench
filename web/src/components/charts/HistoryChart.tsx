@@ -1,7 +1,6 @@
 import { ComposedChart, Line, ErrorBar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
 import { formatDurationNs, formatCi, formatTimestamp } from "@/lib/format.ts"
 import type { HistorySeries } from "@/lib/types.ts"
-import { MultimodalBadge } from "@/components/benchmarks/MultimodalBadge.tsx"
 
 interface HistoryChartProps {
   series: HistorySeries[]
@@ -16,7 +15,6 @@ export function HistoryChart({ series }: HistoryChartProps) {
     // recharts skips a falsy error value, so a missing interval draws no bar
     error_bar_ns: s.ci95_half_ns ?? 0,
     run_count: s.run_count,
-    multimodal: s.multimodal,
   }))
 
   return (
@@ -58,7 +56,6 @@ function HistoryTooltip({
       mean_ns: number
       ci95_half_ns: number | null
       run_count: number
-      multimodal: boolean
     }
   }>
 }) {
@@ -69,10 +66,7 @@ function HistoryTooltip({
       <div className="font-medium">{d.dateLabel}</div>
       <div>Mean: {formatDurationNs(d.mean_ns)}</div>
       <div className="text-muted-foreground">{formatCi(d.ci95_half_ns)}</div>
-      <div className="text-muted-foreground">
-        Runs: {d.run_count}
-        {d.multimodal && <MultimodalBadge className="ml-2 font-sans text-xs" />}
-      </div>
+      <div className="text-muted-foreground">Runs: {d.run_count}</div>
     </div>
   )
 }

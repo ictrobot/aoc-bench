@@ -1,5 +1,5 @@
 // Statistics engine: per-run estimation (mode detection, WLS, the run value) and the
-// across-run summary (mean and 95% t-interval over runs, multimodal flag).
+// across-run summary (mean and 95% t-interval over runs).
 //
 // A run continues until its sampling floors are met and then stops. Nothing here adapts to the data:
 // the interval reported for a measurement is computed over runs, and the samples inside a
@@ -403,9 +403,6 @@ pub struct RunSummary {
     pub mean_ns: f64,
     /// Half-width of the 95% t-interval over runs. `None` with a single run.
     pub ci95_half_ns: Option<f64>,
-    /// Whether the run values fall into more than one cluster (see [`multimodal`]). An
-    /// annotation only: it changes no number.
-    pub multimodal: bool,
 }
 
 /// Summarise the run values of one measurement. The values need not be sorted.
@@ -429,7 +426,6 @@ pub fn run_summary(means: &[f64]) -> RunSummary {
         run_count: n,
         mean_ns,
         ci95_half_ns,
-        multimodal: multimodal(means),
     }
 }
 
@@ -451,85 +447,6 @@ pub fn t_quantile_975(df: usize) -> f64 {
         61..=100 => 1.9997,
         _ => 1.9838,
     }
-}
-
-/// Whether run values fall into more than one level.
-///
-/// Sort the values. Every gap between neighbours wider than 1% of the mean is a break, and the
-/// runs between breaks form clusters. A cluster of one run is an outlier: it is no level, counts
-/// toward nothing, and is skipped over. A level is a cluster of two or more runs. While the gap
-/// between two consecutive levels (measured across any outliers between them) is no wider than
-/// four times the pooled within-level standard deviation, merge the narrowest such pair and
-/// everything between them. Flagged when two or more levels remain, so a level has to be seen at
-/// least twice and the separation test holds for exactly the levels reported. Never flagged below
-/// four values.
-#[must_use]
-pub fn multimodal(values: &[f64]) -> bool {
-    let n = values.len();
-    if n < 4 {
-        return false;
-    }
-    let mut xs = values.to_vec();
-    xs.sort_by(f64::total_cmp);
-    let mean = xs.iter().sum::<f64>() / n as f64;
-    if mean.is_nan() || mean <= 0.0 {
-        return false;
-    }
-
-    // Breaks, by the index of the gap after xs[i]
-    let mut cuts: Vec<usize> = xs
-        .windows(2)
-        .enumerate()
-        .filter(|(_, w)| w[1] - w[0] > 0.01 * mean)
-        .map(|(i, _)| i)
-        .collect();
-
-    loop {
-        let clusters = split(&xs, &cuts);
-        let levels: Vec<&Vec<f64>> = clusters.iter().filter(|c| c.len() >= 2).collect();
-        if levels.len() < 2 {
-            return false;
-        }
-
-        let members: usize = levels.iter().map(|l| l.len()).sum();
-        let ss: f64 = levels
-            .iter()
-            .map(|l| {
-                let m = l.iter().sum::<f64>() / l.len() as f64;
-                l.iter().map(|x| (x - m) * (x - m)).sum::<f64>()
-            })
-            .sum();
-        let within = (ss / (members - levels.len()) as f64).sqrt();
-
-        // The narrowest gap between consecutive levels that fails the separation test
-        let weakest = levels
-            .windows(2)
-            .map(|pair| {
-                (
-                    pair[1][0] - pair[0][pair[0].len() - 1],
-                    pair[0][pair[0].len() - 1],
-                )
-            })
-            .filter(|&(gap, _)| gap <= 4.0 * within)
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        let Some((gap, from)) = weakest else {
-            return true;
-        };
-        // Merge the pair and anything between them by dropping every break inside their span
-        let to = from + gap;
-        cuts.retain(|&c| !(xs[c] >= from && xs[c] < to));
-    }
-}
-
-fn split(xs: &[f64], cuts: &[usize]) -> Vec<Vec<f64>> {
-    let mut clusters = Vec::with_capacity(cuts.len() + 1);
-    let mut start = 0;
-    for &cut in cuts {
-        clusters.push(xs[start..=cut].to_vec());
-        start = cut + 1;
-    }
-    clusters.push(xs[start..].to_vec());
-    clusters
 }
 
 #[cfg(test)]
@@ -808,7 +725,6 @@ mod tests {
         assert_eq!(s.run_count, 1);
         assert!((s.mean_ns - 100.0).abs() < 1e-9);
         assert_eq!(s.ci95_half_ns, None);
-        assert!(!s.multimodal);
     }
 
     #[test]
@@ -819,7 +735,6 @@ mod tests {
         assert!((s.mean_ns - 100.0).abs() < 1e-9);
         let expected = 2.3061 * 1.0 / 3.0;
         assert!((s.ci95_half_ns.unwrap() - expected).abs() < 1e-9);
-        assert!(!s.multimodal, "unsorted input, tight spread");
     }
 
     #[test]
@@ -836,84 +751,5 @@ mod tests {
         assert!((t_quantile_975(101) - 1.9838).abs() < 1e-9);
         assert!((t_quantile_975(100_000) - 1.9838).abs() < 1e-9);
         assert!(t_quantile_975(0).is_infinite());
-    }
-
-    #[test]
-    fn unimodal_is_not_flagged() {
-        assert!(!multimodal(&[
-            100.1, 100.4, 99.8, 100.6, 100.2, 99.9, 100.3, 100.5, 100.0
-        ]));
-    }
-
-    #[test]
-    fn two_modes_are_flagged() {
-        // 5 fast at ~82.1, 4 slow at ~95.5
-        assert!(multimodal(&[
-            82.2, 95.3, 82.1, 95.6, 82.2, 82.1, 95.4, 82.0, 95.5
-        ]));
-        // 60/40 split with a 4% gap
-        assert!(multimodal(&[
-            100.0, 100.2, 99.9, 104.1, 100.1, 103.9, 104.0, 100.0, 104.2
-        ]));
-    }
-
-    #[test]
-    fn three_levels_are_flagged() {
-        assert!(multimodal(&[
-            100.0, 104.0, 108.1, 100.1, 103.9, 107.9, 100.2, 104.1, 108.0
-        ]));
-    }
-
-    #[test]
-    fn lone_outlier_is_not_a_mode() {
-        assert!(!multimodal(&[
-            100.0, 100.1, 99.9, 100.2, 100.0, 99.8, 100.1, 100.0, 112.0
-        ]));
-    }
-
-    #[test]
-    fn lone_runs_are_outliers_not_levels() {
-        // Every gap is a break but no level was seen twice, so there is nothing to flag, and a
-        // small nudge to the spacing must not change that
-        assert!(!multimodal(&[
-            100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0, 116.0
-        ]));
-        assert!(!multimodal(&[
-            100.0, 102.1, 103.9, 106.2, 107.8, 110.3, 111.7, 114.4, 115.6
-        ]));
-        assert!(!multimodal(&[100.0, 102.0, 105.0, 107.0]));
-    }
-
-    #[test]
-    fn outlier_beside_two_levels_does_not_hide_them() {
-        assert!(multimodal(&[
-            82.0, 82.1, 82.0, 82.2, 82.1, 95.4, 95.5, 95.6, 112.0
-        ]));
-    }
-
-    #[test]
-    fn levels_too_close_for_their_spread_merge() {
-        // Two levels of three with within-level sd 4 (pooled over 4 df). A 14 gap is under four
-        // times that and merges them; a 22 gap keeps them apart
-        assert!(!multimodal(&[
-            1000.0, 1004.0, 1008.0, 1022.0, 1026.0, 1030.0
-        ]));
-        assert!(multimodal(&[
-            1000.0, 1004.0, 1008.0, 1030.0, 1034.0, 1038.0
-        ]));
-    }
-
-    #[test]
-    fn gaps_under_one_percent_never_split() {
-        // Two clusters 0.5% apart with zero within spread
-        assert!(!multimodal(&[
-            100.0, 100.0, 100.0, 100.0, 100.5, 100.5, 100.5, 100.5, 100.5
-        ]));
-    }
-
-    #[test]
-    fn fewer_than_four_values_never_flagged() {
-        assert!(!multimodal(&[100.0, 120.0, 100.0]));
-        assert!(!multimodal(&[]));
     }
 }

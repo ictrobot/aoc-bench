@@ -47,7 +47,7 @@ impl StatsEngine {
         }
         writeln!(
             writer,
-            "\tstable_timestamp\tstable_measurement_id\trun_count\tmean_ns\tci95_half_ns\tmultimodal"
+            "\tstable_timestamp\tstable_measurement_id\trun_count\tmean_ns\tci95_half_ns"
         )
         .map_err(StatsEngineError::OutputError)?;
 
@@ -68,7 +68,7 @@ impl StatsEngine {
             let stats = &row.stable_stats;
             writeln!(
                 writer,
-                "\t{}\t{}\t{}\t{}\t{}\t{}",
+                "\t{}\t{}\t{}\t{}\t{}",
                 row.row.stable_measurement_timestamp.as_second(),
                 row.stable_measurement_id,
                 stats.run_count,
@@ -76,9 +76,6 @@ impl StatsEngine {
                 stats
                     .ci95_half_ns
                     .map_or(String::new(), |ci| ci.to_string()),
-                stats
-                    .multimodal
-                    .map_or(String::new(), |m| u8::from(m).to_string()),
             )?;
 
             Ok(())
@@ -662,40 +659,13 @@ mod tests {
         assert_eq!(
             lines.next(),
             Some(
-                "host\tbench\tcfg_build\tstable_timestamp\tstable_measurement_id\trun_count\tmean_ns\tci95_half_ns\tmultimodal"
+                "host\tbench\tcfg_build\tstable_timestamp\tstable_measurement_id\trun_count\tmean_ns\tci95_half_ns"
             )
         );
         for expected in [
-            [
-                "h1",
-                "bench",
-                "x",
-                "1700000000",
-                "2",
-                "1700000010",
-                "0",
-                "0",
-            ],
-            [
-                "h1",
-                "bench",
-                "y",
-                "1700000100",
-                "2",
-                "1700000110",
-                "0",
-                "0",
-            ],
-            [
-                "h1",
-                "bench2",
-                "x",
-                "1700000200",
-                "2",
-                "1700000210",
-                "0",
-                "0",
-            ],
+            ["h1", "bench", "x", "1700000000", "2", "1700000010", "0"],
+            ["h1", "bench", "y", "1700000100", "2", "1700000110", "0"],
+            ["h1", "bench2", "x", "1700000200", "2", "1700000210", "0"],
         ] {
             let fields: Vec<_> = lines.next().unwrap().split('\t').collect();
             assert_eq!(&fields[..4], &expected[..4]);
