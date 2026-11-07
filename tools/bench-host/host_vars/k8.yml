@@ -34,6 +34,11 @@ bench_enable_web_export: false
 
 bench_enable_rbench: false
 
+# Push run metrics to the local vmagent, labelled like its scraped series
+# yamllint disable rule:line-length
+metrics_push_url: "http://127.0.0.1:8429/api/v1/import/prometheus?extra_label=job=aoc-bench&extra_label=instance=k8"
+# yamllint enable rule:line-length
+
 # yamllint disable rule:line-length
 host_description: >-
   [aoc-rs](https://github.com/ictrobot/aoc-rs) benchmarks running on an AMD Athlon 64 X2 3800+.
