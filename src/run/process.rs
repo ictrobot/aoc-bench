@@ -157,7 +157,7 @@ pub fn process_shared_group(
         &representative,
         artifacts,
         representative.config.clone(),
-        host_config.clone(),
+        host_config,
     )
     .with_stop_flag(Arc::clone(stop));
     let series = runner.run_series()?;
@@ -248,7 +248,7 @@ fn process_isolated(
         context.config_file.data_dir(),
         variant,
         config,
-        context.host_config.clone(),
+        context.host_config,
     )?
     .with_stop_flag(Arc::clone(context.stop));
     let series = runner.run_series()?;

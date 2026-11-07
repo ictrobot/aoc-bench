@@ -1,4 +1,6 @@
+use crate::config::{Config, ConfigFile, Key};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,34 @@ pub struct HostConfig {
     /// headroom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_limit_watts: Option<f64>,
+    /// Settings for particular cases, in order. The first override whose config matches a case
+    /// replaces the settings it sets for that case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_overrides: Vec<ConfigOverride>,
+}
+
+/// Runner settings for the cases that have every config value in `config`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigOverride {
+    /// Config key names mapped to the value name a case must have.
+    pub config: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_affinity: Option<CpuAffinity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_aslr: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_limit_watts: Option<f64>,
+}
+
+impl ConfigOverride {
+    fn matches(&self, config: &Config) -> bool {
+        self.config.iter().all(|(name, value)| {
+            config
+                .get_by_name(name)
+                .is_some_and(|kv| kv.value_name() == value)
+        })
+    }
 }
 
 impl HostConfig {
@@ -37,8 +67,93 @@ impl HostConfig {
         if let Some(watts) = parsed.power_limit_watts {
             validate_power_limit(watts).map_err(HostConfigError::Invalid)?;
         }
+        for (index, config_override) in parsed.config_overrides.iter().enumerate() {
+            if config_override.config.is_empty() {
+                return Err(HostConfigError::Override {
+                    index,
+                    reason: "config must name at least one key".to_string(),
+                });
+            }
+            if let Some(watts) = config_override.power_limit_watts {
+                validate_power_limit(watts).map_err(|reason| HostConfigError::Override {
+                    index,
+                    reason: reason.to_string(),
+                })?;
+            }
+        }
 
         Ok(parsed)
+    }
+
+    /// The settings for one case, with the first matching override applied.
+    #[must_use]
+    pub fn for_config(&self, config: &Config) -> HostConfig {
+        let mut settings = HostConfig {
+            cpu_affinity: self.cpu_affinity.clone(),
+            disable_aslr: self.disable_aslr,
+            description: self.description.clone(),
+            power_limit_watts: self.power_limit_watts,
+            config_overrides: Vec::new(),
+        };
+        if let Some(config_override) = self.config_overrides.iter().find(|o| o.matches(config)) {
+            if let Some(cpu_affinity) = &config_override.cpu_affinity {
+                settings.cpu_affinity = cpu_affinity.clone();
+            }
+            if let Some(disable_aslr) = config_override.disable_aslr {
+                settings.disable_aslr = disable_aslr;
+            }
+            if let Some(watts) = config_override.power_limit_watts {
+                settings.power_limit_watts = Some(watts);
+            }
+        }
+        settings
+    }
+
+    /// Check the overrides against the benchmark config.
+    ///
+    /// Each benchmark that uses a key with overrides must appear in the arguments of every
+    /// benchmark command. Cases with different arguments never share a workload, so every case a
+    /// measurement covers gets the same settings. A key used only in the executable path, could
+    /// otherwise give shared workloads different settings.
+    pub fn check_config_overrides(&self, config_file: &ConfigFile) -> Result<(), HostConfigError> {
+        // Each key with the first override that uses it, so the benchmarks are checked once per key
+        let mut keys: BTreeMap<&str, (usize, &Key)> = BTreeMap::new();
+        for (index, config_override) in self.config_overrides.iter().enumerate() {
+            let invalid = |reason: String| HostConfigError::Override { index, reason };
+            for (name, value) in &config_override.config {
+                let key = config_file
+                    .key_from_name(name)
+                    .ok_or_else(|| invalid(format!("unknown config key {name:?}")))?;
+                if key == config_file.host_key() {
+                    return Err(invalid(format!("{name:?} is the host key")));
+                }
+                if key.value_from_name(value).is_none() {
+                    return Err(invalid(format!("{value:?} is not a value of {name:?}")));
+                }
+                keys.entry(name).or_insert((index, key));
+            }
+        }
+        for (name, (index, key)) in keys {
+            let placeholder = format!("{{{name}}}");
+            for benchmark in config_file.benchmarks() {
+                for variant in benchmark.variants() {
+                    let uses_key = variant.config().keys().any(|k| k == key);
+                    let in_arguments = variant.command_template()[1..]
+                        .iter()
+                        .any(|argument| argument.contains(&placeholder));
+                    if uses_key && !in_arguments {
+                        return Err(HostConfigError::Override {
+                            index,
+                            reason: format!(
+                                "{name:?} is not in the command arguments of {}",
+                                benchmark.id()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -66,6 +181,7 @@ impl Default for HostConfig {
             disable_aslr: default_disable_aslr(),
             description: None,
             power_limit_watts: None,
+            config_overrides: Vec::new(),
         }
     }
 }
@@ -195,6 +311,8 @@ pub enum HostConfigError {
     },
     #[error("invalid host config: {0}")]
     Invalid(&'static str),
+    #[error("invalid host config config_overrides[{index}]: {reason}")]
+    Override { index: usize, reason: String },
 }
 
 #[cfg(test)]
@@ -277,8 +395,7 @@ mod tests {
         let cfg = HostConfig {
             cpu_affinity: CpuAffinity::Cpus(vec![0, 1, 2, 4]),
             disable_aslr: false,
-            description: None,
-            power_limit_watts: None,
+            ..HostConfig::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"cpu_affinity\":\"0-2,4\""));
@@ -326,6 +443,158 @@ mod tests {
                     "case={json}"
                 );
             }
+        }
+    }
+
+    fn write_host(dir: &TempDir, json: &str) {
+        let hosts = dir.path().join("hosts");
+        fs::create_dir_all(&hosts).unwrap();
+        fs::write(hosts.join("h.json"), json).unwrap();
+    }
+
+    fn overrides_config_file(dir: &TempDir) -> ConfigFile {
+        let json = r#"{
+            "config_keys": {
+                "commit": { "values": ["abc1234", "def5678"] },
+                "threads": { "values": ["1", "n"] },
+                "multiversion": { "values": ["default", "Scalar"] }
+            },
+            "benchmarks": [
+                {
+                    "benchmark": "b",
+                    "command": ["builds/{commit}/b", "bench", "{threads}", "{multiversion}"],
+                    "config": {
+                        "commit": ["abc1234", "def5678"],
+                        "threads": ["1", "n"],
+                        "multiversion": ["default", "Scalar"]
+                    }
+                },
+                { "benchmark": "plain", "command": ["true"], "config": {} }
+            ]
+        }"#;
+        ConfigFile::from_str(dir.path(), Some("h"), json).unwrap()
+    }
+
+    #[test]
+    fn test_config_overrides_first_match_applies() {
+        let dir = TempDir::new().unwrap();
+        write_host(
+            &dir,
+            r#"{
+                "cpu_affinity": "0-1",
+                "power_limit_watts": 65,
+                "config_overrides": [
+                    { "config": { "multiversion": "Scalar" } },
+                    { "config": { "threads": "1" }, "cpu_affinity": "1" },
+                    { "config": { "threads": "1", "multiversion": "default" }, "cpu_affinity": "0" },
+                    { "config": { "threads": "n" }, "disable_aslr": false, "power_limit_watts": 50 }
+                ]
+            }"#,
+        );
+        let cfg = HostConfig::load(dir.path(), "h").unwrap();
+        assert_eq!(cfg.config_overrides.len(), 4);
+        let config_file = overrides_config_file(&dir);
+        cfg.check_config_overrides(&config_file).unwrap();
+
+        let settings = |s: &str| cfg.for_config(&config_file.config_from_string(s).unwrap());
+
+        // The earlier threads=1 override wins over the more specific one after it
+        let single = settings("commit=abc1234,threads=1,multiversion=default");
+        assert_eq!(single.cpu_affinity, CpuAffinity::Cpus(vec![1]));
+        assert!(single.disable_aslr);
+        assert_eq!(single.power_limit_watts, Some(65.0));
+        assert_eq!(single.config_overrides, Vec::new());
+
+        // An override that sets nothing still stops the search
+        let scalar = settings("commit=abc1234,threads=1,multiversion=Scalar");
+        assert_eq!(scalar.cpu_affinity, CpuAffinity::Cpus(vec![0, 1]));
+
+        let multi = settings("commit=def5678,threads=n,multiversion=default");
+        assert_eq!(multi.cpu_affinity, CpuAffinity::Cpus(vec![0, 1]));
+        assert!(!multi.disable_aslr);
+        assert_eq!(multi.power_limit_watts, Some(50.0));
+
+        // A case without the key never matches
+        let plain = settings("");
+        assert_eq!(plain.cpu_affinity, CpuAffinity::Cpus(vec![0, 1]));
+        assert_eq!(plain.power_limit_watts, Some(65.0));
+    }
+
+    #[test]
+    fn test_config_overrides_round_trip_keeps_order() {
+        let json = r#"{"cpu_affinity":"0,1","disable_aslr":true,"config_overrides":[{"config":{"threads":"1"},"cpu_affinity":"1"},{"config":{"threads":"n"},"disable_aslr":false}]}"#;
+        let cfg: HostConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&cfg).unwrap(), json);
+        assert!(
+            !serde_json::to_string(&HostConfig::default())
+                .unwrap()
+                .contains("config_overrides")
+        );
+    }
+
+    #[test]
+    fn test_rejects_invalid_config_overrides_on_load() {
+        let dir = TempDir::new().unwrap();
+        for json in [
+            r#"{ "config_overrides": [{ "config": {}, "cpu_affinity": "1" }] }"#,
+            r#"{ "config_overrides": [{ "cpu_affinity": "1" }] }"#,
+            r#"{ "config_overrides": [{ "config": { "threads": "1" }, "cpus": "1" }] }"#,
+            r#"{ "config_overrides": [{ "config": { "threads": "1" }, "description": "x" }] }"#,
+            r#"{ "config_overrides": [{ "config": { "threads": "1" }, "cpu_affinity": "2-" }] }"#,
+            r#"{ "config_overrides": [{ "config": { "threads": "1" }, "power_limit_watts": 0 }] }"#,
+        ] {
+            write_host(&dir, json);
+            assert!(HostConfig::load(dir.path(), "h").is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn test_check_config_overrides_rejects_unsafe_keys() {
+        let dir = TempDir::new().unwrap();
+        let config_file = overrides_config_file(&dir);
+        for (config, reason) in [
+            (r#"{ "thread": "1" }"#, "unknown config key \"thread\""),
+            (
+                r#"{ "threads": "2" }"#,
+                "\"2\" is not a value of \"threads\"",
+            ),
+            (r#"{ "host": "h" }"#, "\"host\" is the host key"),
+            (
+                r#"{ "commit": "abc1234" }"#,
+                "\"commit\" is not in the command arguments of b",
+            ),
+        ] {
+            let json = format!(r#"{{ "config_overrides": [{{ "config": {config} }}] }}"#);
+            let cfg: HostConfig = serde_json::from_str(&json).unwrap();
+            match cfg.check_config_overrides(&config_file) {
+                Err(HostConfigError::Override {
+                    index: 0,
+                    reason: r,
+                }) => {
+                    assert_eq!(r, reason, "{config}");
+                }
+                other => panic!("{config}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_config_overrides_reports_first_override_using_key() {
+        let dir = TempDir::new().unwrap();
+        let config_file = overrides_config_file(&dir);
+        let cfg: HostConfig = serde_json::from_str(
+            r#"{ "config_overrides": [
+                { "config": { "threads": "1" } },
+                { "config": { "commit": "abc1234" } },
+                { "config": { "commit": "def5678", "threads": "n" } }
+            ] }"#,
+        )
+        .unwrap();
+        match cfg.check_config_overrides(&config_file) {
+            Err(HostConfigError::Override { index: 1, reason }) => {
+                assert_eq!(reason, "\"commit\" is not in the command arguments of b");
+            }
+            other => panic!("{other:?}"),
         }
     }
 

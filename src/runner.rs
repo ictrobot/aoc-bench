@@ -46,7 +46,7 @@ impl Runner {
         data_dir: &Path,
         benchmark: &BenchmarkVariant,
         config: Config,
-        host_config: HostConfig,
+        host_config: &HostConfig,
     ) -> Result<Self, RunError> {
         let resolved = resolve_case(data_dir, benchmark, &config)?;
         Self::from_resolved(&resolved, config, host_config)
@@ -59,7 +59,7 @@ impl Runner {
     pub fn from_resolved(
         resolved: &ResolvedCase,
         config: Config,
-        host_config: HostConfig,
+        host_config: &HostConfig,
     ) -> Result<Self, RunError> {
         let stdin_input = resolved.read_stdin()?;
         Ok(Self::build(resolved, stdin_input, config, host_config))
@@ -71,7 +71,7 @@ impl Runner {
         resolved: &ResolvedCase,
         artifacts: HashedArtifacts,
         config: Config,
-        host_config: HostConfig,
+        host_config: &HostConfig,
     ) -> Self {
         let stdin_input = artifacts.into_stdin_input();
         Self::build(resolved, stdin_input, config, host_config)
@@ -81,7 +81,7 @@ impl Runner {
         resolved: &ResolvedCase,
         stdin_input: Option<Vec<u8>>,
         config: Config,
-        host_config: HostConfig,
+        host_config: &HostConfig,
     ) -> Self {
         assert_eq!(resolved.stdin_path.is_some(), stdin_input.is_some());
         Runner {
@@ -91,7 +91,7 @@ impl Runner {
             stdin_input,
             benchmark_id: resolved.benchmark.clone(),
             benchmark_config: config,
-            host_config,
+            host_config: host_config.for_config(&resolved.config),
             stats: resolved.group_spec.stats,
             stop: None,
         }
@@ -133,6 +133,7 @@ impl Runner {
                 .collect::<Vec<_>>()
                 .join(" "),
             runs = run_count,
+            cpu_affinity = %self.host_config.cpu_affinity,
             "starting run series"
         );
 
@@ -739,7 +740,7 @@ mod tests {
             tmp_dir.path(),
             variant,
             Config::default(),
-            HostConfig::default(),
+            &HostConfig::default(),
         )
         .unwrap();
 
@@ -780,6 +781,39 @@ mod tests {
     }
 
     #[test]
+    fn test_runner_applies_matching_config_override() {
+        let tmp_dir = TempDir::new().unwrap();
+        let json = r#"{
+            "config_keys": { "threads": { "values": ["1", "n"] } },
+            "benchmarks": [
+                { "benchmark": "b", "command": ["/usr/bin/true", "{threads}"], "config": { "threads": ["1", "n"] } }
+            ]
+        }"#;
+        let config_file = crate::config::ConfigFile::from_str(tmp_dir.path(), None, json).unwrap();
+        let host_config: HostConfig = serde_json::from_str(
+            r#"{ "cpu_affinity": "0-1", "config_overrides": [{ "config": { "threads": "1" }, "cpu_affinity": "1" }] }"#,
+        )
+        .unwrap();
+        host_config.check_config_overrides(&config_file).unwrap();
+
+        let benchmark = config_file
+            .benchmark_by_id(&"b".try_into().unwrap())
+            .unwrap();
+        for (threads, expected) in [("1", vec![1]), ("n", vec![0, 1])] {
+            let config = config_file
+                .config_from_string(&format!("threads={threads}"))
+                .unwrap();
+            let variant = benchmark.variant_for_config(&config).unwrap();
+            let runner = Runner::new(tmp_dir.path(), variant, config, &host_config).unwrap();
+            assert_eq!(
+                runner.host_config.cpu_affinity,
+                CpuAffinity::Cpus(expected),
+                "threads={threads}"
+            );
+        }
+    }
+
+    #[test]
     fn test_runner_respects_runs_per_series_override() {
         for runs in [1, 2, 9] {
             let tmp_dir = TempDir::new().unwrap();
@@ -803,7 +837,7 @@ mod tests {
                 tmp_dir.path(),
                 variant,
                 Config::default(),
-                HostConfig::default(),
+                &HostConfig::default(),
             )
             .unwrap();
 
@@ -836,7 +870,7 @@ mod tests {
             tmp_dir.path(),
             variant,
             Config::default(),
-            HostConfig::default(),
+            &HostConfig::default(),
         )
         .unwrap();
 
@@ -866,7 +900,7 @@ mod tests {
             tmp_dir.path(),
             variant,
             Config::default(),
-            HostConfig::default(),
+            &HostConfig::default(),
         )
         .unwrap();
         let result = runner.run_single();
@@ -888,7 +922,7 @@ mod tests {
             tmp_dir.path(),
             variant,
             Config::default(),
-            HostConfig::default(),
+            &HostConfig::default(),
         )
         .unwrap();
         let result = runner.run_single().unwrap();
@@ -912,7 +946,7 @@ mod tests {
             tmp_dir.path(),
             variant,
             Config::default(),
-            HostConfig::default(),
+            &HostConfig::default(),
         )
         .unwrap();
 

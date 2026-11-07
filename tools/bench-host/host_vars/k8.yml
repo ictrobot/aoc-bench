@@ -2,7 +2,21 @@
 bench_home_vg: vg-nvme
 bench_home_size: 128G
 
-bench_enable_tuned_cpu_partitioning: false
+# With only two cores there are no spare cores for the runner process and background tasks. threads=1 runs alone on
+# the isolated core, but multithreaded benchmarks also use the other core, sharing it with them.
+bench_enable_tuned_cpu_partitioning: true
+isolated_cores: "1"
+bench_host_config:
+  cpu_affinity: "0-1"
+  config_overrides:
+    - config:
+        threads: "1"
+      cpu_affinity: "1"
+
+# Drop tsc=reliable as this host's TSC is unstable, and nohz_full as it breaks CPU time accounting here.
+bench_tuned_overrides:
+  bootloader:
+    cmdline_aoc_bench_host: "-tsc=reliable nohz_full=${isolated_cores} rcu_nocbs=${isolated_cores}"
 
 bench_profiles:
   - generic

@@ -92,6 +92,7 @@ migration number. Appendix A summarizes V1 and its migration.
     - `disable_aslr`: bool, defaults to `true` on Linux to reduce noise
     - `power_limit_watts`: the host's sustained package power limit, to delay warmup until package power has
       settled below it (see section 6.6), or omitted to disable
+    - `config_overrides`: an ordered list of settings for particular cases (see section 6.3)
 
 # 2. Concepts and Terminology
 
@@ -658,16 +659,27 @@ Supported keys:
 {
   "cpu_affinity": "0-3,6",
   "disable_aslr": true,
-  "power_limit_watts": 65
+  "power_limit_watts": 65,
+  "config_overrides": [
+    {
+      "config": {
+        "threads": "1"
+      },
+      "cpu_affinity": "3"
+    }
+  ]
 }
 ```
 
 All keys are optional.
 
+For each case, the first entry in `config_overrides` whose `config` values all match replaces the settings it sets.
+Override keys must appear in the command arguments, so cases in a shared workload always get the same settings.
+
 ## 6.4 CPU Affinity (Linux)
 
 The `cpu_affinity` host config option is optional and specifies a list of CPU numbers to pin the process to.
-If present, the child process is pinned using a `pre_exec` hook that calls `sched_setaffinity`:
+If present, the child process is pinned using a `pre_exec` hook that calls `sched_setaffinity`.
 
 **Rationale**:
 

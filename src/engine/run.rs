@@ -48,6 +48,7 @@ impl RunEngine {
         let host = host_kv.value_name();
 
         let host_config = HostConfig::load(config_file.data_dir(), host)?;
+        host_config.check_config_overrides(&config_file)?;
 
         let storage = HybridDiskStorage::new(config_file.clone(), host)
             .map_err(RunEngineError::StorageError)?;

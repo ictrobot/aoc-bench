@@ -175,18 +175,23 @@
         path: /etc/tuned/cpu-partitioning-variables.conf
         regexp: '^isolated_cores=.+'
         line: 'isolated_cores={{ isolated_cores }}'
+      register: tuned_variables
       when: bench_enable_tuned_cpu_partitioning | bool
 
     # Custom profile inheriting cpu-partitioning but with intel_pstate re-enabled
     # for max turbo boost. See /usr/lib/tuned/profiles/cpu-partitioning/tuned.conf
     # which also includes network-latency and latency-performance.
-    - name: Ensure tuned aoc-bench profile directory exists
+    # The active aoc-bench-host profile inherits it and adds bench_tuned_overrides from the host vars.
+    - name: Ensure tuned profile directories exist
       ansible.builtin.file:
-        path: /etc/tuned/profiles/aoc-bench
+        path: "/etc/tuned/profiles/{{ item }}"
         state: directory
         owner: root
         group: root
         mode: "0755"
+      loop:
+        - aoc-bench
+        - aoc-bench-host
       when: bench_enable_tuned_cpu_partitioning | bool
 
     - name: Install custom tuned aoc-bench profile
@@ -196,6 +201,17 @@
         owner: root
         group: root
         mode: "0644"
+      register: tuned_base_profile
+      when: bench_enable_tuned_cpu_partitioning | bool
+
+    - name: Install tuned aoc-bench-host profile
+      ansible.builtin.template:
+        src: templates/tuned-host.conf.j2
+        dest: /etc/tuned/profiles/aoc-bench-host/tuned.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: tuned_host_profile
       when: bench_enable_tuned_cpu_partitioning | bool
 
     - name: Check current tuned profile
@@ -204,12 +220,30 @@
       changed_when: false
       failed_when: false
 
-    - name: Enable tuned aoc-bench profile
-      ansible.builtin.command: tuned-adm profile aoc-bench
+    - name: Read tuned boot parameters before applying the profile
+      ansible.builtin.command: cat /etc/tuned/bootcmdline
+      register: tuned_bootcmdline_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Enable tuned aoc-bench-host profile
+      ansible.builtin.command: tuned-adm profile aoc-bench-host
       changed_when: true
       when:
         - bench_enable_tuned_cpu_partitioning | bool
-        - "'Current active profile: aoc-bench' not in tuned_profile.stdout"
+        - >-
+          tuned_profile.stdout is not search('^Current active profile: aoc-bench-host$', multiline=True)
+          or tuned_variables is changed
+          or tuned_base_profile is changed
+          or tuned_host_profile is changed
+
+    - name: Read tuned boot parameters after applying the profile
+      ansible.builtin.command: cat /etc/tuned/bootcmdline
+      register: tuned_bootcmdline_after
+      changed_when: false
+      failed_when: false
+      check_mode: false
 
     - name: Disable active tuned profile when CPU partitioning is disabled
       ansible.builtin.command: tuned-adm off
@@ -232,15 +266,20 @@
       changed_when: false
       check_mode: false
 
+    # With the profile enabled, reboot when a parameter tuned wants is missing or this run changed them. The change check
+    # covers parameters that were removed, which the missing check can't see.
     - name: Reboot to apply CPU isolation state
       ansible.builtin.reboot:
         reboot_timeout: 600
+      vars:
+        tuned_boot_params: >-
+          {{ (tuned_bootcmdline_after.stdout | regex_findall('^TUNED_BOOT_CMDLINE="(.*)"$', multiline=True) + ['']) | first }}
       when: >-
         (
           bench_enable_tuned_cpu_partitioning | bool
           and (
-            ("nohz_full=" ~ isolated_cores) not in cmdline.stdout
-            or "intel_pstate=disable" in cmdline.stdout
+            tuned_bootcmdline_before.stdout != tuned_bootcmdline_after.stdout
+            or tuned_boot_params.split() | difference(cmdline.stdout.split()) | length > 0
           )
         )
         or (
@@ -428,6 +467,7 @@
             | combine({'cpu_affinity': isolated_cores} if isolated_cores is defined else {})
             | combine({'description': host_description} if host_description is defined else {})
             | combine({'power_limit_watts': power_limit_watts} if power_limit_watts is defined else {})
+            | combine(bench_host_config | default({}))
           }}
 
     - name: Ensure benchmark config directory exists

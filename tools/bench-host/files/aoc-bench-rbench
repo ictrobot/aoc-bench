@@ -110,7 +110,7 @@ print_status() {
 run_benchmark() {
     local year="$1" day="$2" threads="$3" multiversion="$4" checksum="$5"
     local upload size check_checksum check_multiversion check_multithreading
-    local affinity disable_aslr power_limit_watts started stop_pid paused_here rc
+    local settings affinity disable_aslr power_limit_watts started stop_pid paused_here rc
     local -a command
 
     [[ "$year" =~ ^20[0-9]{2}$ ]] || die "invalid year '$year'"
@@ -213,9 +213,16 @@ run_benchmark() {
         die "threads=$threads requested but the binary does not use multithreading"
     fi
 
+    # Apply the first config override matching this run, as the main service does. Overrides on other keys, such as
+    # the commit, never match here.
+    settings="$(jq -c --arg threads "$threads" --arg multiversion "$multiversion" '
+        {threads: $threads, multiversion: $multiversion} as $case
+        | (first(.config_overrides // [] | .[] | select(.config | to_entries | all(.value == $case[.key]))) // {})
+            as $match
+        | del(.config_overrides) + ($match | del(.config))' "$HOST_CONFIG")"
     # select rather than // so an explicit false is passed on instead of being treated as missing
-    affinity="$(jq -r 'select(.cpu_affinity != null) | .cpu_affinity' "$HOST_CONFIG")"
-    disable_aslr="$(jq -r 'select(.disable_aslr != null) | .disable_aslr' "$HOST_CONFIG")"
+    affinity="$(jq -r 'select(.cpu_affinity != null) | .cpu_affinity' <<< "$settings")"
+    disable_aslr="$(jq -r 'select(.disable_aslr != null) | .disable_aslr' <<< "$settings")"
     command=("$AOC_BENCH_BIN" debug --input "$job_dir/input.txt" --checksum "$checksum")
     if (( ! raw )); then
         command+=(--summary)
@@ -229,7 +236,7 @@ run_benchmark() {
     if [[ -n "$disable_aslr" ]]; then
         command+=(--disable-aslr "$disable_aslr")
     fi
-    power_limit_watts="$(jq -r 'select(.power_limit_watts != null) | .power_limit_watts' "$HOST_CONFIG")"
+    power_limit_watts="$(jq -r 'select(.power_limit_watts != null) | .power_limit_watts' <<< "$settings")"
     if [[ -n "$power_limit_watts" ]]; then
         command+=(--power-limit-watts "$power_limit_watts")
     fi

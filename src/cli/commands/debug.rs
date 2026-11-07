@@ -2,6 +2,7 @@ use crate::cli::CliError;
 use crate::cli::args::HostConfigArgs;
 use crate::cli::format::format_series_summary;
 use aoc_bench::config::{Benchmark, Config, ConfigProduct};
+use aoc_bench::host_config::HostConfig;
 use aoc_bench::runner;
 use aoc_bench::stats::StatsOptions;
 use clap::Args;
@@ -46,9 +47,9 @@ pub fn execute(args: DebugArgs) -> Result<(), CliError> {
     .map_err(CliError::BenchmarkConstructionError)?;
     let variant = &benchmark.variants()[0];
 
-    let host_config = args.host_config.into();
+    let host_config: HostConfig = args.host_config.into();
 
-    let runner = Runner::new(Path::new("."), variant, Config::new(), host_config)
+    let runner = Runner::new(Path::new("."), variant, Config::new(), &host_config)
         .map_err(CliError::RunnerConstructionError)?;
 
     let series = runner.run_series().map_err(CliError::BenchmarkRunError)?;
