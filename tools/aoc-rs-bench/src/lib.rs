@@ -93,7 +93,22 @@ pub fn main<I, E>(
 
             // Only solve once the thread count and variant are set: the first solve initialises
             // the dispatch, after which set_override panics
+            let start = Instant::now();
             let (checksum, iterate) = prepare(&input);
+            let reference_duration = start.elapsed();
+
+            // aoc-bench always discards the first sample, so reporting the reference solve as the
+            // first sample saves a solve per run, which adds up on slow days. Kept out of the EWMA
+            // so the sample sizes that follow are unchanged
+            if writeln!(
+                stdout(),
+                "SAMPLE\t1\t{}\tchecksum={checksum:016x}",
+                reference_duration.as_nanos()
+            )
+            .is_err()
+            {
+                return;
+            }
 
             let mut iters_per_sample = 1;
             let mut ewma_iter_seconds = 0.0;
