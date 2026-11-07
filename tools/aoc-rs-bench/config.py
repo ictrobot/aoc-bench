@@ -18,6 +18,7 @@ class BuildPuzzleDetails(TypedDict):
     checksum: str
     uses_threads: bool
     multiversion: list[str]
+    all_multiversion: list[str]
 
 
 class MatrixBuilder:
@@ -181,7 +182,10 @@ class MatrixBuilder:
                 if v not in results["config_keys"]["multiversion"]["values"]:
                     results["config_keys"]["multiversion"]["values"].append(v)
 
-            results["benchmarks"][f"{puzzle[0]}-{puzzle[1]}"][commit] = details
+            # Compiled but unsupported versions must not split otherwise identical commit groups.
+            results["benchmarks"][f"{puzzle[0]}-{puzzle[1]}"][commit] = {
+                k: v for k, v in details.items() if k != "all_multiversion"
+            }
 
     def post_process_benchmark(self, name: str, benchmark: dict, config_keys: dict) -> dict:
         variants = []
@@ -310,13 +314,16 @@ class MatrixBuilder:
             raise RuntimeError(f"error: running {build} on {puzzle} failed with exit code {code}:\n{stderr}")
 
         matches = re.fullmatch(
-            r'^Checksum: ([a-f0-9]+)\r?\nMultiversion: ([a-zA-z0-9_,]+)\r?\nMultithreading: (true|false)\r?\n?$',
+            r'^Checksum: ([a-f0-9]+)\r?\n'
+            r'Multiversion: ([a-zA-Z0-9_,]+)\r?\n'
+            r'MultiversionAll: ([a-zA-Z0-9_,]+)\r?\n'
+            r'Multithreading: (true|false)\r?\n?$',
             stdout)
         if not matches:
             raise RuntimeError(f"error: unexpected output from {build} on {puzzle}: {stdout}")
 
         uses_threads = trace != b''
-        multithreading = matches.group(3) == "true"
+        multithreading = matches.group(4) == "true"
         if multithreading != uses_threads:
             raise RuntimeError(f"error: {build} on {puzzle} was built "
                                f"{'with' if multithreading else 'without'} multithreading, but "
@@ -325,6 +332,7 @@ class MatrixBuilder:
         return {
             "checksum": matches.group(1),
             "multiversion": matches.group(2).split(","),
+            "all_multiversion": matches.group(3).split(","),
             "uses_threads": uses_threads,
         }
 

@@ -28,6 +28,7 @@ glue-v2 = ["utils", "year2015"]
 glue-v3 = ["utils", "year2015"]
 glue-v4 = ["utils", "year2015", "year2016"]
 glue-v5 = []
+glue-v6 = ["glue-v5"] # Version::all
 
 [profile.release]
 incremental = false

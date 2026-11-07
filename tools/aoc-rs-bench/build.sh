@@ -48,6 +48,7 @@ framework_revisions=(
     "2ee87f5e33a26a1fc99237c49120214a568c014c" # glue-v3 Multithreading support
     "ab1e77c27919360630046d825583af16a1423d16" # glue-v4 Year 2016 added
     "6b4e6580aa9aaa771e36c4fb214fdc56099e041d" # glue-v5 Year crates reexported from aoc, nested macro repeats for year and day
+    "b56267e7179a0db425472d8ad2ddc78ed1590c29" # glue-v6 Version::all lists compiled multiversions
 )
 
 # First framework version whose glue can drive each feature

@@ -34,6 +34,7 @@ pub fn main<I, E>(
     prepare: fn(&str) -> Result<(u64, I), E>,
     multiversion_used: fn() -> bool,
     get_supported_versions: fn() -> Vec<String>,
+    get_all_versions: fn() -> Vec<String>,
     set_override: fn(&str),
     set_thread_count: fn(NonZeroUsize),
     multithreading: bool,
@@ -71,9 +72,11 @@ pub fn main<I, E>(
                 println!(
                     "Multiversion: default,{}",
                     get_supported_versions().join(",")
-                )
+                );
+                println!("MultiversionAll: default,{}", get_all_versions().join(","));
             } else {
-                println!("Multiversion: default")
+                println!("Multiversion: default");
+                println!("MultiversionAll: default");
             }
 
             // config.py checks this against whether the check run actually created threads
@@ -221,6 +224,10 @@ macro_rules! main {
             panic!("built with multiversion stub, cannot list supported versions");
         }
 
+        fn get_all_versions() -> Vec<String> {
+            panic!("built with multiversion stub, cannot list compiled versions");
+        }
+
         fn multiversion_used() -> bool {
             false
         }
@@ -237,6 +244,25 @@ macro_rules! main {
 
         fn get_supported_versions() -> Vec<String> {
             VERSIONS.iter().map(|v| format!("{v:?}")).collect()
+        }
+
+        #[cfg(feature = "glue-v6")]
+        fn get_all_versions() -> Vec<String> {
+            Version::all().iter().map(|v| format!("{v:?}")).collect()
+        }
+
+        #[cfg(not(feature = "glue-v6"))]
+        fn get_all_versions() -> Vec<String> {
+            // All names used before Version::all was added. Parsing checks whether the version
+            // was compiled into this revision, without requiring CPU support or executing it.
+            [
+                "Scalar", "Array128", "Array256", "Array4096", "AVX2", "AVX2x2", "AVX2x4", "AVX2x8",
+                "AVX512", "AVX512x2", "AVX512x4", "AVX512x8", "Neon", "Neonx2", "Neonx4", "Neonx8",
+            ]
+            .into_iter()
+            .filter_map(|name| name.parse::<Version>().ok())
+            .map(|v| format!("{v:?}"))
+            .collect()
         }
 
         // This can only be used once, and returns if the override was set or get prior.
@@ -274,6 +300,7 @@ macro_rules! main {
                 prepare,
                 multiversion_used,
                 get_supported_versions,
+                get_all_versions,
                 set_override,
                 set_thread_count,
                 MULTITHREADING,
