@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// This is part of every workload identity: bumping it splits all durable workloads, which is the
 /// intended escape hatch for "the meaning of a measurement changed". It is deliberately distinct
 /// from the on-the-wire `version=1` protocol field (which only guards line parsing).
-pub const SEMANTICS_VERSION: u32 = 2;
+pub const SEMANTICS_VERSION: u32 = 3;
 
 /// Domain separator for the shared (content-backed) workload hash.
 const DOMAIN_SHARED: &[u8] = b"aoc-bench/workload/shared/v1";

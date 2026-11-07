@@ -355,6 +355,11 @@ impl Runner {
             cmd.stdin(Stdio::null());
         }
 
+        // With ASLR disabled the size of the environment decides where the child's stack starts,
+        // which changes some benchmarks significantly. An empty environment keeps every run of
+        // a workload on the same stack address whatever the service's own environment holds.
+        cmd.env_clear();
+
         // Create a new temp directory for this spawn
         let temp_dir = TempDir::with_prefix(env!("CARGO_PKG_NAME"))?;
         cmd.current_dir(temp_dir.path());
@@ -927,6 +932,36 @@ mod tests {
         .unwrap();
         let result = runner.run_single().unwrap();
         assert!((result.stats.mean_ns_per_iter - 50000.0).abs() < 0.001);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_runner_clears_child_env() {
+        let tmp_dir = TempDir::new().unwrap();
+        let benchmark = Benchmark::new(
+            "yes".try_into().unwrap(),
+            ConfigProduct::default(),
+            vec!["/usr/bin/yes".into()],
+            None,
+            None,
+            StatsOptions::default(),
+        )
+        .unwrap();
+        let variant = &benchmark.variants()[0];
+        let runner = Runner::new(
+            tmp_dir.path(),
+            variant,
+            Config::default(),
+            &HostConfig::default(),
+        )
+        .unwrap();
+
+        let (child, stdout) = runner.spawn_child().unwrap();
+        // Output means the exec has finished. The pipe stays open so the child does not exit
+        let mut stdout = BufReader::new(stdout);
+        stdout.read_line(&mut String::new()).unwrap();
+        let environ = std::fs::read(format!("/proc/{}/environ", child.child.id())).unwrap();
+        assert_eq!(environ, b"");
     }
 
     #[test]

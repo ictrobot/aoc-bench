@@ -956,7 +956,7 @@ The following is abridged; each `runs` entry uses the complete structure from se
     "stats": {
       "...": "..."
     },
-    "semantics_version": 2
+    "semantics_version": 3
   },
   "executable_sha256": "...",
   "stdin_sha256": "...",
