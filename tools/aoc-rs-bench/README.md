@@ -9,6 +9,8 @@ commit, built so that only code changes alter the bytes.
   hosts do, `build.sh --single <checkout> <year> <day> <profile> <out_dir>` builds one day from a working tree without
   modifying the checkout, and `build.sh --checksum` prints the checksum guarding existing builds.
 * `prune.py`: trims each year crate to one day number before a batch is built.
+* `normalize_panic_locations.py`: normalizes aoc-rs panic lines and columns so moving code doesn't change binaries.
+  Panics report `<file>:1650683745:1751346789` (`b"aocbench"` read as two u32s).
 * `rustc-wrapper-strip-metadata.sh`, `layout.ld`: stable symbol names and code layout.
 * `config.py`: generates `data/config.json` from the builds and inputs.
 * `rbench`: benchmark a local checkout on a benchmark host, see below.

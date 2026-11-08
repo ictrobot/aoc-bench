@@ -72,6 +72,7 @@ checksum_files=(
     "layout.ld"
     "prune.py"
     "gc-relink-wrapper.sh"
+    "normalize_panic_locations.py"
 )
 # Files/folders to delete inside builds_dir on hash change
 checksum_delete=(
@@ -163,6 +164,7 @@ build_binaries() (
     cp "layout.ld" "$tmp_crate/layout.ld"
     cp "prune.py" "$tmp_crate/prune.py"
     cp "gc-relink-wrapper.sh" "$tmp_crate/gc-relink-wrapper.sh"
+    cp "normalize_panic_locations.py" "$tmp_crate/normalize_panic_locations.py"
     cd "$tmp_crate" || exit 1
 
     # Discards the previous build's pruned lib.rs files
@@ -265,7 +267,8 @@ build_binaries() (
     # duplicates with e.g. different versions.
     export RUSTC_WRAPPER='./rustc-wrapper-strip-metadata.sh'
 
-    # Remap paths to $tmp_clone and $tmp_crate to avoid the temporary paths being included in binaries
+    # Remap paths to $tmp_clone and $tmp_crate to avoid the temporary paths being included in binaries.
+    # normalize_panic_locations.py expects the aoc-rs paths under /aoc-rs/.
     export RUSTFLAGS="--remap-path-prefix $tmp_clone=/aoc-rs/ --remap-path-prefix $tmp_crate=/aoc-rs-bench/"
 
     # Cap lints to allow. Cargo silences lints in dependencies, but the year crates are patched to local paths which
@@ -408,6 +411,12 @@ build_binaries() (
             # dead functions. Together with --build-id=none above, rebuilds which produce the same code then produce
             # byte-identical files. All the function symbols are kept for perf and gdb.
             objcopy -w --strip-symbol='GCC_except_table*' "$executable" "$build.tmp/.$year-$day.tmp"
+
+            # Normalize the aoc-rs panic locations so the binary doesn't depend on where its panic sites are. An edit
+            # moves the panic sites below it, which otherwise changes every binary that can panic in that file even
+            # when no code changed. The locations are checked against the tree as compiled, which is still pruned for
+            # this batch.
+            python3 ./normalize_panic_locations.py "$build.tmp/.$year-$day.tmp" "$tmp_clone"
 
             # Store the binaries by hash and hardlink them into the per commit directories. Most commits leave
             # most binaries unchanged, so this saves space and makes checking whether two commits produced the
