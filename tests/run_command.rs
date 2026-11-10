@@ -130,8 +130,8 @@ fn run_command_stores_isolated_measurement() {
     let data = fs::read_to_string(&json_path).unwrap();
     let v: Value = serde_json::from_str(&data).unwrap();
 
-    // Isolated benchmarks (no dedupe strategy) are recorded as schema-4 isolated measurements.
-    assert_eq!(v["schema"], 4);
+    // Isolated benchmarks (no dedupe strategy) are recorded as schema-5 isolated measurements.
+    assert_eq!(v["schema"], 5);
     assert_eq!(v["summary"]["run_count"], 9);
     assert_eq!(v["bench"], "bench");
     assert_eq!(v["executed_case"]["build"], "opt");
@@ -231,7 +231,7 @@ fn run_command_stores_single_case_shared_measurement() {
     let files = measurement_json_files(&data_dir);
     assert_eq!(files.len(), 1, "one execution must write one JSON file");
     let measurement = read_measurement(&files[0]);
-    assert_eq!(measurement["schema"], 4);
+    assert_eq!(measurement["schema"], 5);
     assert_eq!(
         measurement["measurement_id"],
         database_measurement_id(&conn)
@@ -251,6 +251,7 @@ fn run_command_stores_single_case_shared_measurement() {
         measurement["covered_cases"],
         serde_json::json!([{ "commit": "a" }])
     );
+    assert!(measurement["series_wall_ns"].as_u64().unwrap() > 0);
 }
 
 #[cfg(unix)]
@@ -318,7 +319,7 @@ fn run_command_dedupe_executes_once_for_hardlinked_commits() {
         "one shared execution must write one JSON file"
     );
     let measurement = read_measurement(&files[0]);
-    assert_eq!(measurement["schema"], 4);
+    assert_eq!(measurement["schema"], 5);
     assert_eq!(
         measurement["measurement_id"],
         database_measurement_id(&conn)

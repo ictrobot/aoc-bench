@@ -142,6 +142,7 @@ mod tests {
             },
             warmup: None,
             power: None,
+            wall_ns: None,
         }
     }
 
@@ -151,6 +152,7 @@ mod tests {
             bench: "2015-04".try_into().unwrap(),
             config: Config::new(),
             timestamp: Timestamp::from_second(0).unwrap(),
+            wall: std::time::Duration::ZERO,
             runs,
             checksum: None,
         }

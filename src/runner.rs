@@ -104,6 +104,20 @@ impl Runner {
         self
     }
 
+    /// The executable and its arguments, with any argument containing whitespace quoted.
+    fn command_line(&self) -> String {
+        std::iter::once(self.executable.display().to_string())
+            .chain(self.args.iter().map(|arg| {
+                if arg.chars().any(char::is_whitespace) {
+                    format!("{arg:?}")
+                } else {
+                    arg.clone()
+                }
+            }))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn stop_requested(&self) -> bool {
         self.stop
             .as_ref()
@@ -113,25 +127,17 @@ impl Runner {
     /// Execute a complete run series (a fixed `runs_per_series` runs) with no retries on
     /// timeout
     ///
-    /// Returns a `RunSeries` containing all runs sorted by mean.
+    /// Returns a `RunSeries` containing all runs in the order they ran.
     #[tracing::instrument(skip(self))]
     pub fn run_series(&self) -> Result<RunSeries, RunError> {
         let series_start = Timestamp::now();
+        let started = Instant::now();
 
         let run_count = self.stats.runs_per_series.get();
 
         info!(
             config = %self.benchmark_config,
-            command = %std::iter::once(self.executable.display().to_string())
-                .chain(self.args.iter().map(|arg| {
-                    if arg.chars().any(char::is_whitespace) {
-                        format!("{arg:?}")
-                    } else {
-                        arg.clone()
-                    }
-                }))
-                .collect::<Vec<_>>()
-                .join(" "),
+            command = %self.command_line(),
             runs = run_count,
             cpu_affinity = %self.host_config.cpu_affinity,
             "starting run series"
@@ -200,19 +206,12 @@ impl Runner {
             }
         }
 
-        // Sort runs by mean_ns_per_iter
-        runs.sort_by(|a, b| {
-            a.stats
-                .mean_ns_per_iter
-                .partial_cmp(&b.stats.mean_ns_per_iter)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
         let series = RunSeries {
             schema: 1,
             bench: self.benchmark_id.clone(),
             config: self.benchmark_config.clone(),
             timestamp: series_start,
+            wall: started.elapsed(),
             runs,
             checksum: self.expected_checksum.clone(),
         };
@@ -334,11 +333,17 @@ impl Runner {
             None => None,
         };
 
+        // Kill the child and wait for it to exit before reading the clock, so the run's wall time
+        // covers it
+        drop(child);
+        let wall = start_instant.elapsed();
+
         Ok(Run {
             timestamp: start_time,
             warmup: warmup.summary(),
             power,
             stats: stats.finish(),
+            wall_ns: Some(u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX)),
         })
     }
 
@@ -773,12 +778,15 @@ mod tests {
 
         let run_count = variant.stats_options().runs_per_series.get();
 
-        // Check runs match, ignoring the timestamp and the package power readings, which are
-        // live measurements on hosts where the counter is readable
+        // Check runs match, ignoring the live timestamp, wall time and package power readings
+        assert!(result.wall_ns.is_some_and(|wall| wall > 0));
+        assert!(series_result.runs.iter().all(|r| r.wall_ns.is_some()));
         result.timestamp = Timestamp::now();
+        result.wall_ns = None;
         result.power = None;
         series_result.runs.iter_mut().for_each(|r| {
             r.timestamp = result.timestamp;
+            r.wall_ns = None;
             r.power = None;
         });
         assert_eq!(series_result.runs, vec![result; run_count]);

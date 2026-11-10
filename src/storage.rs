@@ -21,6 +21,7 @@ use jiff::Timestamp;
 use std::fmt::Debug;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::time::Duration;
 
 mod hybrid_disk;
 mod measurement_file;
@@ -274,6 +275,8 @@ pub struct MeasurementRecord {
     pub measurement_id: MeasurementId,
     pub workload_id: WorkloadId,
     pub timestamp: Timestamp,
+    /// The run series' wall time, see [`crate::run::RunSeries::wall`]
+    pub series_wall: Duration,
     pub stats: MeasurementStats,
     pub checksum: Option<String>,
 }

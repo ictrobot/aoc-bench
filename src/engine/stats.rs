@@ -521,6 +521,7 @@ mod tests {
                 .config_from_string(&format!("build={build},host={host}"))
                 .unwrap(),
             timestamp: jiff::Timestamp::from_second(i64::from(ts)).unwrap(),
+            wall: std::time::Duration::ZERO,
             runs: vec![
                 Run {
                     timestamp: jiff::Timestamp::from_second(i64::from(ts) + 1).unwrap(),
@@ -536,6 +537,7 @@ mod tests {
                     },
                     warmup: None,
                     power: None,
+                    wall_ns: None,
                 };
                 2
             ],
@@ -596,6 +598,7 @@ mod tests {
                 .config_from_string(&format!("commit={commit},threads={threads},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(ts).unwrap(),
+            wall: std::time::Duration::ZERO,
             runs: vec![
                 Run {
                     timestamp: Timestamp::from_second(ts + 1).unwrap(),
@@ -611,6 +614,7 @@ mod tests {
                     },
                     warmup: None,
                     power: None,
+                    wall_ns: None,
                 };
                 2
             ],
@@ -734,6 +738,7 @@ mod tests {
                 .config_from_string(&format!("build={build},commit={commit},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(i64::from(ts)).unwrap(),
+            wall: std::time::Duration::ZERO,
             runs: vec![
                 Run {
                     timestamp: Timestamp::from_second(i64::from(ts) + 1).unwrap(),
@@ -749,6 +754,7 @@ mod tests {
                     },
                     warmup: None,
                     power: None,
+                    wall_ns: None,
                 };
                 2
             ],
@@ -810,6 +816,7 @@ mod tests {
                 .config_from_string(&format!("build={build},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(ts).unwrap(),
+            wall: std::time::Duration::ZERO,
             runs: vec![
                 Run {
                     timestamp: Timestamp::from_second(ts + 1).unwrap(),
@@ -825,6 +832,7 @@ mod tests {
                     },
                     warmup: None,
                     power: None,
+                    wall_ns: None,
                 };
                 2
             ],

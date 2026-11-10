@@ -883,8 +883,8 @@ impl Storage for HybridDiskStorage {
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO measurements
                  (measurement_id, workload_id, timestamp, schema_version,
-                  run_count, mean_ns, ci95_half_ns, checksum)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  run_count, mean_ns, ci95_half_ns, checksum, series_wall_ns)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
         stmt.execute(params![
             record.measurement_id,
@@ -895,6 +895,7 @@ impl Storage for HybridDiskStorage {
             record.stats.mean_ns,
             record.stats.ci95_half_ns,
             record.checksum,
+            i64::try_from(record.series_wall.as_nanos()).unwrap_or(i64::MAX),
         ])?;
         Ok(())
     }
@@ -1121,6 +1122,7 @@ mod tests {
             bench: "2015-04".try_into().unwrap(),
             config,
             timestamp: Timestamp::from_second(1_700_000_000).unwrap(),
+            wall: Duration::ZERO,
             runs: vec![Run {
                 timestamp: Timestamp::from_second(1_700_000_001).unwrap(),
                 stats: StatsResult {
@@ -1135,6 +1137,7 @@ mod tests {
                 },
                 warmup: None,
                 power: None,
+                wall_ns: None,
             }],
             checksum: None,
         }
@@ -1565,6 +1568,7 @@ mod tests {
                         measurement_id: measurement,
                         workload_id: workload,
                         timestamp: Timestamp::from_second(100).unwrap(),
+                        series_wall: Duration::ZERO,
                         stats: op_stats(1000.0),
                         checksum: None,
                     },
@@ -1619,6 +1623,7 @@ mod tests {
                             measurement_id: m,
                             workload_id: workload,
                             timestamp: Timestamp::from_second(1).unwrap(),
+                            series_wall: Duration::ZERO,
                             stats: op_stats(1.0),
                             checksum: None,
                         },
@@ -1651,6 +1656,7 @@ mod tests {
                         measurement_id: other_measurement,
                         workload_id: other_workload,
                         timestamp: Timestamp::from_second(2).unwrap(),
+                        series_wall: Duration::ZERO,
                         stats: op_stats(2.0),
                         checksum: None,
                     },
@@ -1776,7 +1782,7 @@ mod tests {
                     tx.query_one("SELECT MAX(version) FROM schema_migrations", [], |r| {
                         r.get(0)
                     })?;
-                assert_eq!(migration_version, 6);
+                assert_eq!(migration_version, 7);
                 // The legacy bootstrap half-width is dropped: it was not a run interval
                 let stats = storage.get_measurement_stats(tx, measurement_id)?.unwrap();
                 assert_eq!(
@@ -1793,6 +1799,13 @@ mod tests {
                     |r| r.get(0),
                 )?;
                 assert_eq!(stored_half, None);
+                // Migration 07 adds the series wall time, unknown for rows written before it
+                let series_wall: Option<i64> = tx.query_one(
+                    "SELECT series_wall_ns FROM measurements WHERE measurement_id = ?1",
+                    params![measurement_id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(series_wall, None);
                 let dropped: i64 = tx.query_one(
                     "SELECT COUNT(*) FROM pragma_table_info('measurements')
                      WHERE name IN ('median_run_outlier_count', 'median_run_sample_count')",
@@ -1815,6 +1828,7 @@ mod tests {
                         measurement_id: one_run,
                         workload_id: WorkloadId(1),
                         timestamp: Timestamp::from_second(200).unwrap(),
+                        series_wall: Duration::ZERO,
                         stats: MeasurementStats {
                             run_count: 1,
                             mean_ns: 1010.0,
@@ -1833,6 +1847,7 @@ mod tests {
                         measurement_id: identical,
                         workload_id: WorkloadId(1),
                         timestamp: Timestamp::from_second(300).unwrap(),
+                        series_wall: Duration::ZERO,
                         stats: MeasurementStats {
                             run_count: 9,
                             mean_ns: 1000.0,
@@ -1901,7 +1916,7 @@ mod tests {
                     tx.query_one("SELECT MAX(version) FROM schema_migrations", [], |r| {
                         r.get(0)
                     })?;
-                assert_eq!(migration_version, 6);
+                assert_eq!(migration_version, 7);
                 let free_pages: i64 = tx.query_one("PRAGMA freelist_count", [], |r| r.get(0))?;
                 assert_eq!(free_pages, 0);
                 // The case's result points at the migrated isolated workload with copied counters.

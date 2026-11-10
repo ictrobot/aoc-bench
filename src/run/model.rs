@@ -4,6 +4,7 @@ use crate::warmup::WarmupSummary;
 use jiff::Timestamp;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
+use std::time::Duration;
 
 /// Result from a single benchmark run
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19,6 +20,9 @@ pub struct Run {
     /// Present when the host's package energy counter is readable
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power: Option<PowerSummary>,
+    /// Wall time from before the spawn until the process exited, absent in older run files
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -42,7 +46,10 @@ pub struct RunSeries {
     pub config: Config,
     /// Unix timestamp when this run series started
     pub timestamp: Timestamp,
-    /// Individual run results (sorted by `mean_ns_per_iter`)
+    /// Wall time from the start of the series to the end of its last run: the samples plus any time
+    /// outside them, such as failed attempts
+    pub wall: Duration,
+    /// Individual run results, in the order they ran
     pub runs: Vec<Run>,
     /// Output validation checksum (if provided)
     pub checksum: Option<String>,
@@ -50,11 +57,12 @@ pub struct RunSeries {
 
 impl Serialize for RunSeries {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("RunSeries", 7)?;
+        let mut state = serializer.serialize_struct("RunSeries", 8)?;
         state.serialize_field("schema", &self.schema)?;
         state.serialize_field("bench", &self.bench)?;
         state.serialize_field("config", &self.config)?;
         state.serialize_field("timestamp", &self.timestamp.as_second())?;
+        state.serialize_field("series_wall_ns", &self.wall_ns())?;
         state.serialize_field("summary", &self.summary())?;
         state.serialize_field("runs", &self.runs)?;
         state.serialize_field("checksum", &self.checksum)?;
@@ -63,6 +71,12 @@ impl Serialize for RunSeries {
 }
 
 impl RunSeries {
+    /// [`RunSeries::wall`] in nanoseconds, saturating.
+    #[must_use]
+    pub fn wall_ns(&self) -> u64 {
+        u64::try_from(self.wall.as_nanos()).unwrap_or(u64::MAX)
+    }
+
     /// The measurement summary: mean and 95% t-interval over the runs.
     #[must_use]
     pub fn summary(&self) -> RunSummary {
@@ -109,6 +123,7 @@ mod tests {
             },
             warmup: None,
             power: None,
+            wall_ns: None,
         }
     }
 
@@ -126,6 +141,7 @@ mod tests {
             bench: "test-bench".try_into().unwrap(),
             config: Config::new(),
             timestamp: Timestamp::from_second(1000).unwrap(),
+            wall: Duration::ZERO,
             runs,
             checksum: None,
         };
@@ -164,6 +180,7 @@ mod tests {
             bench: "2015-04".try_into().unwrap(),
             config: config.clone(),
             timestamp: Timestamp::from_second(1_763_287_200).unwrap(),
+            wall: Duration::from_secs(40),
             runs: vec![Run {
                 timestamp: Timestamp::from_second(1_763_287_201).unwrap(),
                 stats: StatsResult {
@@ -178,6 +195,7 @@ mod tests {
                 },
                 warmup: None,
                 power: None,
+                wall_ns: Some(31_000_000_000),
             }],
             checksum: Some("8f024a8e".to_string()),
         };
@@ -190,11 +208,13 @@ mod tests {
         assert!(json.contains("\"mode\": \"per_iter\"")); // Verify snake_case serialization
         assert!(!json.contains("\"stats\":")); // Verify stats is flattened
         assert!(json.contains("\"timestamp\": 1763287200")); // Verify timestamp encoded in seconds
+        assert!(json.contains("\"series_wall_ns\": 40000000000"));
         assert!(json.contains("\"summary\": {")); // The run summary travels with the series
         assert!(json.contains("\"run_count\": 1"));
 
         // Serialize RunResult to JSON
         let json = serde_json::to_string_pretty(&series.runs[0]).unwrap();
         assert!(json.contains("\"timestamp\": 1763287201")); // Verify timestamp encoded in seconds
+        assert!(json.contains("\"wall_ns\": 31000000000"));
     }
 }

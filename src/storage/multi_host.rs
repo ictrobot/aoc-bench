@@ -228,11 +228,13 @@ mod tests {
             bench,
             config,
             timestamp,
+            wall: std::time::Duration::ZERO,
             runs: vec![Run {
                 timestamp: run_ts,
                 stats,
                 warmup: None,
                 power: None,
+                wall_ns: None,
             }],
             checksum: None,
         }

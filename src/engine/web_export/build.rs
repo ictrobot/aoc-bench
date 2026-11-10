@@ -573,6 +573,7 @@ mod tests {
                 .config_from_string(&format!("{config_str},host={host}"))
                 .unwrap(),
             timestamp: Timestamp::from_second(ts).unwrap(),
+            wall: std::time::Duration::ZERO,
             runs: vec![Run {
                 timestamp: Timestamp::from_second(ts + 1).unwrap(),
                 stats: StatsResult {
@@ -587,6 +588,7 @@ mod tests {
                 },
                 warmup: None,
                 power: None,
+                wall_ns: None,
             }],
             checksum: None,
         }
@@ -1061,6 +1063,7 @@ mod tests {
                         measurement_id,
                         workload_id: workload,
                         timestamp,
+                        series_wall: std::time::Duration::ZERO,
                         stats: MeasurementStats {
                             run_count: 1,
                             mean_ns: 10.0,

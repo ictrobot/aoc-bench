@@ -94,7 +94,7 @@ pub enum Phase {
     Warmup,
     /// The sampled time the measurement is computed from
     Measurement,
-    /// Everything else: hashing, spawning, storage, scheduling, failed attempts
+    /// Everything outside the samples, such as spawning, failed attempts, hashing and storage
     Other,
 }
 

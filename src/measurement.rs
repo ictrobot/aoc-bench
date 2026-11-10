@@ -1,14 +1,15 @@
-//! Schema-4 measurement JSON: the immutable per-execution sample file.
+//! Schema-5 measurement JSON: the immutable per-execution sample file.
 //!
 //! One measurement backs every case covered by a recorded workload run series. The file records
 //! the workload identity, the measured executable/stdin artifact digests, the executed case
 //! (JSON-only provenance — never surfaced or pointed at from the database), the covered-case
-//! snapshot, the run summary, and the raw runs and samples. Cases that inherit the workload
-//! later are stored as database links rather than by mutating this immutable file.
+//! snapshot, the run summary, the series' wall time, and the raw runs and samples. Cases that
+//! inherit the workload later are stored as database links rather than by mutating this
+//! immutable file.
 //!
-//! Schema 3 files also carry `summary.multimodal`, which attempted to flag runs that fell into
-//! multiple clusters. Schema 2 files lack the `summary` block (their database summary was the
-//! median run's own statistics).
+//! Schema 4 and older files lack the wall times and sort `runs` by mean. Schema 3 files also carry
+//! `summary.multimodal`, which attempted to flag runs that fell into multiple clusters. Schema 2
+//! files lack the `summary` block (their database summary was the median run's own statistics).
 
 use crate::config::{BenchmarkId, Config};
 use crate::run::Run;
@@ -19,9 +20,9 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 /// The current measurement JSON schema version.
-pub const MEASUREMENT_SCHEMA: u32 = 4;
+pub const MEASUREMENT_SCHEMA: u32 = 5;
 
-/// A schema-4 measurement, ready to serialize to its immutable JSON file.
+/// A schema-5 measurement, ready to serialize to its immutable JSON file.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Measurement {
     /// Schema version (always [`MEASUREMENT_SCHEMA`]).
@@ -45,11 +46,13 @@ pub struct Measurement {
     /// When the run series started.
     #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
     pub timestamp: Timestamp,
+    /// Wall time from `timestamp` to the end of the last run.
+    pub series_wall_ns: u64,
     /// Expected checksum, if any.
     pub checksum: Option<String>,
     /// The headline numbers, computed from `runs` alone.
     pub summary: RunSummary,
-    /// Raw runs (sorted by mean), each carrying its samples.
+    /// Raw runs in the order they ran, each carrying its samples.
     pub runs: Vec<Run>,
 }
 
@@ -76,6 +79,7 @@ mod tests {
             },
             warmup: None,
             power: None,
+            wall_ns: None,
         }
     }
 
@@ -106,13 +110,15 @@ mod tests {
             executed_case: config.clone(),
             covered_cases: vec![config],
             timestamp: Timestamp::from_second(100).unwrap(),
+            series_wall_ns: 40,
             checksum: Some("deadbeef".into()),
             summary: crate::stats::run_summary(&[10.0, 20.0, 30.0]),
             runs: vec![run(10.0), run(20.0), run(30.0)],
         };
 
         let text = serde_json::to_string(&measurement).unwrap();
-        assert!(text.contains("\"schema\":4"));
+        assert!(text.contains("\"schema\":5"));
+        assert!(text.contains("\"series_wall_ns\":40,"));
         assert!(text.contains("\"summary\":{\"run_count\":3,\"mean_ns\":20.0,"));
         assert!(text.contains("\"workload_sha256\":"));
         assert!(text.contains("\"executable_sha256\":"));

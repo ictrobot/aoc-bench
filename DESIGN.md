@@ -886,6 +886,7 @@ Per run within a series, the stats engine produces:
 * `se_ns`: standard error of the run value from its own samples (section 7.5), null below two samples
 * `samples`: array of `{"iters": N_i, "total_ns": T_i}` for each sample
 * `warmup` and `power`: warmup accounting and package power, when recorded
+* `wall_ns`: the run's wall time, from before its spawn until its process exited, absent before schema 5
 
 ## 7.7 Output fields (per run series)
 
@@ -894,7 +895,8 @@ Per run series (collection of runs), the system produces:
 * `bench`: benchmark name
 * `config`: configuration JSON
 * `timestamp`: when the run series was performed (start time)
-* `runs`: array of run results (sorted by mean)
+* `series_wall_ns`: the run series' wall time, see section 8.1
+* `runs`: array of run results, in the order they ran
 * `summary`: `{run_count, mean_ns, ci95_half_ns}` from section 7.4, with `ci95_half_ns` null for a single run
 * `checksum`: output validation
 
@@ -920,7 +922,7 @@ The following is abridged; each `runs` entry uses the complete structure from se
 
 ```json
 {
-  "schema": 4,
+  "schema": 5,
   "measurement_id": "0195f4c1-3a4b-7abc-8123-456789abcdef",
   "bench": "2015-04",
   "workload_sha256": "...",
@@ -954,6 +956,7 @@ The following is abridged; each `runs` entry uses the complete structure from se
     }
   ],
   "timestamp": 1731437601,
+  "series_wall_ns": 31482000000,
   "checksum": "8f024a8e...",
   "summary": {
     "run_count": 9,
@@ -985,9 +988,12 @@ The summary is the display and drift value, for example:
 106.3 µs/iter ±0.40% (9 runs)
 ```
 
-Schema 3 files also carry `summary.multimodal`, which attempted to flag runs that fell into multiple clusters.
-Schema 2 files have the same layout without the `summary` block, and their database rows summarise the median run
-instead (section 9.2).
+`series_wall_ns` is the wall time from `timestamp` to the end of the last run, covering the samples and any time
+outside them, such as spawning and failed attempts.
+
+Schema 4 and older files lack `series_wall_ns` and the runs' `wall_ns`, and sort `runs` by mean. Schema 3 files also
+carry `summary.multimodal`, which attempted to flag runs that fell into multiple clusters. Schema 2 files have the same
+layout without the `summary` block, and their database rows summarise the median run instead (section 9.2).
 
 ---
 
@@ -1030,17 +1036,18 @@ measurement update uses one immediate transaction.
 
 Each host's `metadata.db` has four normalized tables:
 
-| Table               | Role                                                                                              |
-|---------------------|---------------------------------------------------------------------------------------------------|
-| `cases`             | One row per `(benchmark, canonical hostless config)` and its current `workload_id`                |
-| `workloads`         | Durable shared/isolated identity plus stable/last measurement pointers and drift counters         |
-| `measurements`      | One row per workload run series: timestamp, schema version, checksum, and run summary (see below) |
-| `measurement_cases` | Append-only case-visible measurement history                                                      |
+| Table               | Role                                                                                             |
+|---------------------|--------------------------------------------------------------------------------------------------|
+| `cases`             | One row per `(benchmark, canonical hostless config)` and its current `workload_id`               |
+| `workloads`         | Durable shared/isolated identity plus stable/last measurement pointers and drift counters        |
+| `measurements`      | One row per workload run series: timestamp, wall time, schema version, checksum, and run summary |
+| `measurement_cases` | Append-only case-visible measurement history                                                     |
 
 The summary columns `run_count`, `mean_ns` and `ci95_half_ns` hold the run summary of section 7.4, with
 `ci95_half_ns` NULL where there is no interval. Rows from schema 1 or 2 keep their median run's mean in `mean_ns`
 but have no interval: their within-run bootstrap half-width is not a run interval, so migration 05 dropped it (the
-raw JSON keeps it). A row without an interval, legacy or single-run, never counts as changed.
+raw JSON keeps it). A row without an interval, legacy or single-run, never counts as changed. `series_wall_ns` is the
+JSON's run series wall time, NULL for rows written before migration 07.
 
 Important invariants:
 
@@ -1223,7 +1230,7 @@ scheduling to exit, into phases that add up:
 | `wait`        | Discarding samples until package power settled below the host limit (section 6.6)            |
 | `warmup`      | The other discarded samples, including the initial batch, until the warmup minimums were met |
 | `measurement` | The sampled time the measurement is computed from                                            |
-| `other`       | The rest of each group's wall time, including failed attempts                                |
+| `other`       | The rest of each group's wall time: everything outside the samples, such as failed attempts  |
 
 The batch's time outside groups, mostly scheduling, is also `other` but carries no `bench`.
 

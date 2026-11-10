@@ -51,6 +51,7 @@ pub(super) static MIGRATIONS: &[Migration] = &[
     Migration::sql(include_str!("sql_migrations/04-drop-v1-schema.sql")),
     Migration::sql(include_str!("sql_migrations/05-run-summary.sql")),
     Migration::sql(include_str!("sql_migrations/06-drop-multimodal.sql")),
+    Migration::sql(include_str!("sql_migrations/07-series-wall.sql")),
 ];
 
 type V1CaseMap = BTreeMap<(String, String), V1Case>;
