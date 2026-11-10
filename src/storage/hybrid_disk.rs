@@ -23,7 +23,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 use super::measurement_file;
 use super::migration::MIGRATIONS;
@@ -268,6 +268,16 @@ impl HybridDiskStorage {
                     conn.execute_batch("VACUUM").map_err(|source| {
                         HybridDiskError::MigrationVacuumError { version, source }
                     })?;
+                    // VACUUM rewrites the whole database into the WAL, and the automatic checkpoint
+                    // leaves the file that size, so truncate it now rather than at close.
+                    let blocked: bool =
+                        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+                    if blocked {
+                        warn!(
+                            db = ?self.db_path,
+                            "WAL not truncated after vacuum"
+                        );
+                    }
                 }
                 return Ok(());
             };
@@ -1931,6 +1941,9 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        // The vacuum after migrating leaves an empty WAL behind it
+        let wal = db_path.with_file_name(format!("{DB_FILE}-wal"));
+        assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
 
         // Reopening at the latest migration is idempotent and does not duplicate the backfill.
         drop(storage);
