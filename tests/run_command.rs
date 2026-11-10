@@ -652,13 +652,15 @@ fn run_command_pushes_metrics() {
         "aoc_bench_dataset_groups{host=\"testhost\",class=\"rerun\"} 0 ",
         "aoc_bench_dataset_cases{host=\"testhost\",class=\"new\"} 1 ",
         "aoc_bench_dataset_workloads_suspicious{host=\"testhost\"} 0 ",
+        // Nothing measured yet, so both classes are 0
+        "aoc_bench_dataset_oldest_measurement_timestamp_seconds{host=\"testhost\",class=\"new\"} 0 ",
+        "aoc_bench_dataset_oldest_measurement_timestamp_seconds{host=\"testhost\",class=\"rerun\"} 0 ",
         "aoc_bench_dataset_measurements{host=\"testhost\"} 0 ",
         "aoc_bench_dataset_db_bytes{host=\"testhost\"} ",
     ] {
         assert!(opening.contains(line), "{line} in {opening}");
     }
-    // No rerun, so no sweep age. Increments only appear once a group checkpoints them.
-    assert!(!opening.contains("oldest_measurement"), "{opening}");
+    // Increments only appear once a group checkpoints them
     assert!(!opening.contains("aoc_bench_time_seconds"), "{opening}");
 
     // The closing push carries the group's increments, labelled by the opted-in key only, all

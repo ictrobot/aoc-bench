@@ -74,7 +74,8 @@ pub const DATASET_GROUPS: &str = "aoc_bench_dataset_groups";
 pub const DATASET_CASES: &str = "aoc_bench_dataset_cases";
 /// Rerun workloads whose latest measurement disagreed with their stable result.
 pub const DATASET_WORKLOADS_SUSPICIOUS: &str = "aoc_bench_dataset_workloads_suspicious";
-/// The oldest last measurement over rerun workloads, the age of the sweep.
+/// The oldest last measurement by `class`: over rerun workloads (the age of the sweep), or over the
+/// workloads new groups' cases still point at. 0 when the class has none.
 pub const DATASET_OLDEST_MEASUREMENT_TIMESTAMP: &str =
     "aoc_bench_dataset_oldest_measurement_timestamp_seconds";
 /// Every measurement ever recorded for the host.

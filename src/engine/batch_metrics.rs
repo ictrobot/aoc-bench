@@ -56,26 +56,45 @@ impl<'a> BatchMetrics<'a> {
         }
 
         if let Some(pool) = pool {
-            for (class, groups, cases) in [
-                ("new", pool.new_groups, pool.new_cases),
-                ("rerun", pool.rerun_groups, pool.rerun_cases),
+            for (class, groups, cases, oldest) in [
+                (
+                    "new",
+                    pool.new_groups,
+                    pool.new_cases,
+                    pool.oldest_new_measurement,
+                ),
+                (
+                    "rerun",
+                    pool.rerun_groups,
+                    pool.rerun_cases,
+                    pool.oldest_rerun_measurement,
+                ),
             ] {
                 let labels = none.clone().with("class", class);
                 metrics.gauge_set(metrics::DATASET_GROUPS, &labels, count(groups));
                 metrics.gauge_set(metrics::DATASET_CASES, &labels, count(cases));
+                // 0 for a class with none, so the series is always sent and a backend lookback
+                // window never returns an earlier batch's value
+                match oldest {
+                    Some(oldest) => metrics.gauge_timestamp(
+                        metrics::DATASET_OLDEST_MEASUREMENT_TIMESTAMP,
+                        &labels,
+                        oldest,
+                    ),
+                    None => {
+                        metrics.gauge_set(
+                            metrics::DATASET_OLDEST_MEASUREMENT_TIMESTAMP,
+                            &labels,
+                            0.0,
+                        );
+                    }
+                }
             }
             metrics.gauge_set(
                 metrics::DATASET_WORKLOADS_SUSPICIOUS,
                 &none,
                 count(pool.suspicious_workloads),
             );
-            if let Some(oldest) = pool.oldest_measurement {
-                metrics.gauge_timestamp(
-                    metrics::DATASET_OLDEST_MEASUREMENT_TIMESTAMP,
-                    &none,
-                    oldest,
-                );
-            }
         }
         match storage.dataset_stats() {
             Ok(stats) => {
@@ -178,6 +197,34 @@ mod tests {
     use crate::group::IsolatedGroup;
     use crate::metrics::test_support::sink;
     use crate::run::test_support::Fixture;
+
+    #[test]
+    fn oldest_measurement_is_sent_for_both_classes() {
+        let f = Fixture::new(
+            r#"{
+                "config_keys": {},
+                "benchmarks": [{ "benchmark": "b", "command": ["true"], "config": {} }]
+            }"#,
+            |_| {},
+        );
+        let (url, rx) = sink("204 No Content");
+        let metrics = Metrics::start(&url, "testhost", Duration::from_secs(3600));
+        let pool = PoolStats {
+            new_groups: 1,
+            rerun_groups: 1,
+            oldest_rerun_measurement: Some(Timestamp::from_second(1000).unwrap()),
+            ..PoolStats::default()
+        };
+
+        let _batch = BatchMetrics::start(&metrics, &f.storage, Instant::now(), Some(&pool), &[]);
+        let opening = rx.recv().unwrap();
+        for line in [
+            "aoc_bench_dataset_oldest_measurement_timestamp_seconds{host=\"testhost\",class=\"new\"} 0 ",
+            "aoc_bench_dataset_oldest_measurement_timestamp_seconds{host=\"testhost\",class=\"rerun\"} 1000 ",
+        ] {
+            assert!(opening.contains(line), "{line} in {opening}");
+        }
+    }
 
     #[test]
     fn dropping_with_a_group_open_counts_it_as_failed() {

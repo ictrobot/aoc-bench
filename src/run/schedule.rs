@@ -55,8 +55,10 @@ pub struct PoolStats {
     pub new_cases: usize,
     /// Cases covered by the rerun groups
     pub rerun_cases: usize,
+    /// The oldest last measurement over the workloads the new groups' cases still point at
+    pub oldest_new_measurement: Option<Timestamp>,
     /// The oldest last measurement over the rerun groups' workloads
-    pub oldest_measurement: Option<Timestamp>,
+    pub oldest_rerun_measurement: Option<Timestamp>,
     /// Rerun workloads whose latest measurement disagreed with their stable result
     pub suspicious_workloads: usize,
 }
@@ -128,9 +130,12 @@ pub fn select_for_run_with_pool<R: Rng>(
                 continue;
             }
             match group.classify(storage, tx)? {
-                GroupClass::New => {
+                GroupClass::New { oldest_measurement } => {
                     pool.new_groups += 1;
                     pool.new_cases += group.case_count();
+                    if let Some(oldest) = oldest_measurement {
+                        keep_oldest(&mut pool.oldest_new_measurement, oldest);
+                    }
                     if selected_new.len() < new_limit {
                         selected_new.push(index);
                     }
@@ -141,10 +146,7 @@ pub fn select_for_run_with_pool<R: Rng>(
                 } => {
                     pool.rerun_groups += 1;
                     pool.rerun_cases += group.case_count();
-                    pool.oldest_measurement = Some(
-                        pool.oldest_measurement
-                            .map_or(last_measurement, |oldest| oldest.min(last_measurement)),
-                    );
+                    keep_oldest(&mut pool.oldest_rerun_measurement, last_measurement);
                     rerun_workloads.push(workload);
                     retain_oldest(
                         &mut oldest_reruns,
@@ -279,6 +281,11 @@ fn timeline_priority(
     }
 }
 
+/// Lower `oldest` to `timestamp` when that is older, or set it when unset.
+fn keep_oldest(oldest: &mut Option<Timestamp>, timestamp: Timestamp) {
+    *oldest = Some(oldest.map_or(timestamp, |current| current.min(timestamp)));
+}
+
 fn retain_oldest(
     heap: &mut BinaryHeap<(Timestamp, usize)>,
     limit: usize,
@@ -319,7 +326,7 @@ pub fn select_for_run_all(groups: &[RunGroup], config_filter: &Config) -> Vec<Se
 mod tests {
     use super::*;
     use crate::group::{CaseGroup, IsolatedGroup, RunGroup, resolve_and_group};
-    use crate::run::process::process_shared_group;
+    use crate::run::process::{GroupOutcome, process_shared_group};
     use crate::run::test_support::{Fixture, write_sampler};
     use crate::storage::Storage;
 
@@ -500,7 +507,9 @@ mod tests {
         assert_eq!(pool.rerun_groups, 1);
         assert_eq!(pool.new_cases, 1);
         assert_eq!(pool.rerun_cases, 1);
-        assert!(pool.oldest_measurement.is_some());
+        // The new group's case was never recorded
+        assert_eq!(pool.oldest_new_measurement, None);
+        assert!(pool.oldest_rerun_measurement.is_some());
         assert_eq!(pool.suspicious_workloads, 0);
 
         // No reruns requested and the new limit met with eligible groups left: the scan stops
@@ -523,6 +532,62 @@ mod tests {
         if let Some(pool) = selection.pool {
             assert_eq!((pool.new_groups, pool.rerun_groups), (1, 1));
         }
+    }
+
+    #[test]
+    fn spec_changed_group_reports_its_last_measurement() {
+        let f = fixture();
+        let _lock = f.storage.acquire_lock().unwrap();
+
+        let recorded = first_shared(&f);
+        let GroupOutcome::Executed { workload_id, .. } = process_shared_group(
+            &f.storage,
+            &f.host_config,
+            &recorded,
+            true,
+            false,
+            false,
+            &crate::shutdown::never(),
+        )
+        .unwrap() else {
+            panic!("an unrecorded group executes");
+        };
+        let measured = f
+            .storage
+            .read_transaction(|tx| f.storage.get_workload_last_measurement_ts(tx, workload_id))
+            .unwrap()
+            .expect("the execution recorded a measurement");
+
+        // A changed group spec, as after a semantics bump, moves the recorded group to the new
+        // pool while its case still points at the old workload
+        let representative = recorded.resolve_representative().unwrap();
+        let mut stored = serde_json::to_value(&representative.group_spec).unwrap();
+        let version = stored["semantics_version"].as_u64().unwrap();
+        stored["semantics_version"] = (version + 1).into();
+        f.storage
+            .write_transaction(|tx| {
+                tx.execute(
+                    "UPDATE workloads SET group_spec = ?1 WHERE workload_id = ?2",
+                    rusqlite::params![stored.to_string(), workload_id.0],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let mut groups = shared_groups(&f);
+        let pool = select_for_run_with_pool(
+            &f.storage,
+            &mut groups,
+            &Config::new(),
+            random_schedule(16, 8),
+            &mut rand::rng(),
+        )
+        .unwrap()
+        .pool
+        .expect("reruns requested, so the whole pool was scanned");
+        assert_eq!((pool.new_groups, pool.rerun_groups), (2, 0));
+        assert_eq!(pool.oldest_new_measurement, Some(measured));
+        assert_eq!(pool.oldest_rerun_measurement, None);
     }
 
     #[test]

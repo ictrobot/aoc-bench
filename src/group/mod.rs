@@ -39,7 +39,10 @@ pub struct IsolatedGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupClass {
     /// Needs new processing (missing result, isolated/spec-changed/disagreeing shared association).
-    New,
+    New {
+        /// The oldest last measurement of the workloads its cases point at, `None` if none has one
+        oldest_measurement: Option<Timestamp>,
+    },
     /// A rerun candidate, ordered by its workload's last-measurement time.
     Rerun {
         workload: WorkloadId,
@@ -115,33 +118,42 @@ fn classify_shared(
     group: &CaseGroup,
 ) -> Result<GroupClass, HybridDiskError> {
     let current_spec_digest = group.key.group_spec_digest;
-    let mut agreed_workload: Option<WorkloadId> = None;
+    // Look up every member, even once the group is known to be new, to find its oldest last
+    // measurement
+    let mut workloads: Vec<WorkloadId> = Vec::new();
+    let mut all_recorded = true;
 
     for config in group.configs() {
         let config_json = serde_json::to_string(&config)?;
-        let Some(case) = storage.find_case_id(tx, group.key.benchmark.as_str(), &config_json)?
-        else {
-            return Ok(GroupClass::New); // case never recorded
+        let workload = match storage.find_case_id(tx, group.key.benchmark.as_str(), &config_json)? {
+            Some(case) => storage.get_case_workload(tx, case)?,
+            None => None, // case never recorded
         };
-        let Some(workload) = storage.get_case_workload(tx, case)? else {
-            return Ok(GroupClass::New); // no recorded result
-        };
-        match agreed_workload {
-            None => agreed_workload = Some(workload),
-            Some(existing) if existing == workload => {}
-            Some(_) => return Ok(GroupClass::New), // members disagree
+        match workload {
+            Some(workload) if !workloads.contains(&workload) => workloads.push(workload),
+            Some(_) => {}
+            None => all_recorded = false, // no recorded result
         }
     }
 
-    let Some(workload) = agreed_workload else {
-        return Ok(GroupClass::New); // empty group (should not happen)
+    let new = || {
+        Ok(GroupClass::New {
+            oldest_measurement: oldest_last_measurement(storage, tx, &workloads)?,
+        })
     };
+    // Members disagree, none has a result, or the group is empty (should not happen)
+    let &[workload] = workloads.as_slice() else {
+        return new();
+    };
+    if !all_recorded {
+        return new();
+    }
     let Some(meta) = storage.get_workload_meta(tx, workload)? else {
-        return Ok(GroupClass::New);
+        return new();
     };
     if !meta.is_shared || meta.group_spec_digest != Some(current_spec_digest) {
         // Isolated association or the recorded spec no longer matches the current group.
-        return Ok(GroupClass::New);
+        return new();
     }
     Ok(GroupClass::Rerun {
         workload,
@@ -157,16 +169,34 @@ fn classify_isolated(
     config: &Config,
 ) -> Result<GroupClass, HybridDiskError> {
     let config_json = serde_json::to_string(config)?;
+    let new = GroupClass::New {
+        oldest_measurement: None,
+    };
     let Some(case) = storage.find_case_id(tx, benchmark.as_str(), &config_json)? else {
-        return Ok(GroupClass::New);
+        return Ok(new);
     };
     let Some(workload) = storage.get_case_workload(tx, case)? else {
-        return Ok(GroupClass::New);
+        return Ok(new);
     };
     Ok(GroupClass::Rerun {
         workload,
         last_measurement: last_measurement_ts(storage, tx, workload)?,
     })
+}
+
+/// The oldest last measurement of `workloads`, `None` if none has one.
+fn oldest_last_measurement(
+    storage: &HybridDiskStorage,
+    tx: &Transaction<'_>,
+    workloads: &[WorkloadId],
+) -> Result<Option<Timestamp>, HybridDiskError> {
+    let mut oldest: Option<Timestamp> = None;
+    for &workload in workloads {
+        if let Some(last) = storage.get_workload_last_measurement_ts(tx, workload)? {
+            oldest = Some(oldest.map_or(last, |oldest| oldest.min(last)));
+        }
+    }
+    Ok(oldest)
 }
 
 fn last_measurement_ts(

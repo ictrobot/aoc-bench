@@ -1245,8 +1245,10 @@ few minutes.
 whole pool, so it follows the current config and ignores cases whose values were dropped from it:
 `aoc_bench_dataset_groups{class}`, `aoc_bench_dataset_cases{class}`, `aoc_bench_dataset_workloads_suspicious`
 (rerun workloads whose latest measurement disagreed with their stable result) and
-`aoc_bench_dataset_oldest_measurement_timestamp_seconds` (the age of the sweep). The whole history comes from the
-database: `aoc_bench_dataset_measurements`, `aoc_bench_dataset_measurement_runs` and `aoc_bench_dataset_db_bytes`.
+`aoc_bench_dataset_oldest_measurement_timestamp_seconds{class}` (the oldest last measurement: the age of the sweep for
+`rerun`, and for `new` the oldest among cases still on a previous workload, such as after a group spec change). Both
+classes are always sent, with 0 for a class that has none. The whole history comes from the database:
+`aoc_bench_dataset_measurements`, `aoc_bench_dataset_measurement_runs` and `aoc_bench_dataset_db_bytes`.
 
 ---
 
