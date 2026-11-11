@@ -11,6 +11,7 @@ use aoc_bench::storage::HybridDiskError;
 use clap::Parser;
 use std::io;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing::error;
 use tracing::span::EnteredSpan;
@@ -102,6 +103,12 @@ pub enum CliError {
     RunnerConstructionError(#[source] RunError),
     #[error("failed to run benchmark: {0}")]
     BenchmarkRunError(#[source] RunError),
+    #[error("failed to write run series JSON to {}: {error}", .path.display())]
+    JsonWriteError {
+        path: PathBuf,
+        #[source]
+        error: io::Error,
+    },
 
     // export-web command
     #[error(transparent)]

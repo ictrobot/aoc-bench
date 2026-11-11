@@ -19,13 +19,17 @@ pub struct DebugArgs {
     #[arg(long)]
     pub checksum: Option<String>,
 
-    /// Print the measurement summary as text instead of the run series JSON
+    /// Print the measurement summary as text. Disables printing the run series JSON to stdout
     #[arg(long)]
     pub summary: bool,
 
     /// With --summary, also list each run in the order it ran
     #[arg(long, requires = "summary")]
     pub runs: bool,
+
+    /// Write the run series JSON to this file. Disables printing it to stdout
+    #[arg(long, value_name = "PATH", value_parser = clap::value_parser!(std::path::PathBuf))]
+    pub json: Option<std::path::PathBuf>,
 
     #[command(flatten)]
     pub host_config: HostConfigArgs,
@@ -54,9 +58,17 @@ pub fn execute(args: DebugArgs) -> Result<(), CliError> {
 
     let series = runner.run_series().map_err(CliError::BenchmarkRunError)?;
 
+    if let Some(path) = &args.json {
+        let json = serde_json::to_vec_pretty(&series).unwrap();
+        std::fs::write(path, json).map_err(|error| CliError::JsonWriteError {
+            path: path.clone(),
+            error,
+        })?;
+    }
+
     if args.summary {
         print!("{}", format_series_summary(&series, args.runs));
-    } else {
+    } else if args.json.is_none() {
         serde_json::to_writer_pretty(std::io::stdout(), &series).unwrap();
     }
 

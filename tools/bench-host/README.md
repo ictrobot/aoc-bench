@@ -93,6 +93,8 @@ they build on the host. Installed by `setup.yml`:
   run. A lock held for over an hour is treated as stuck and the user's processes are killed.
 * `bench-all.sh` copies the built `aoc-bench` and host config to `/var/lib/aoc-bench` for the runs to use.
 
+`journalctl -t aoc-bench-rbench` shows past runs with the sha256 of each binary and input.
+
 `ssh rbench@<host> status` shows the service and lock state. To resume immediately after a cut-off run,
 `systemctl start aoc-bench.service`. To disable, set `bench_enable_rbench` to false and rerun the playbook.
 

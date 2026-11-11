@@ -10,6 +10,8 @@
 # unless -v is given, which also lists each run under the summary. Only one run can be active at a time.
 # The main service is not restarted here. aoc-bench-watchdog restarts it a few minutes after the last run.
 #
+# Runs are also logged to the journal as aoc-bench-rbench, with the sha256 of the binary and input.
+#
 # The pushed binary is trusted but still confined: Landlock allows it to read the system and the job directory and
 # to write only to the job's scratch directory, it gets an empty network namespace, and a timeout bounds how long
 # it can run.
@@ -30,6 +32,8 @@ HOST_CONFIG="$AOC_BENCH_DIR/host.json"
 
 MAIN_SERVICE=aoc-bench.service
 
+JOURNAL_ID=aoc-bench-rbench
+
 MAX_UPLOAD_BYTES=$((256 * 1024 * 1024))
 CHECK_TIMEOUT=300
 BENCH_TIMEOUT=1800
@@ -46,7 +50,21 @@ die() {
 log() {
     if (( verbose )); then
         echo "$*" >&2
+    else
+        echo "$*" >&8
     fi
+}
+
+# Open fd 8 to the journal and copy stdout and stderr to it from here on. Connecting is how to tell whether journald
+# is there, so systemd-cat is started quietly. If it cannot connect or exits later, the rest is discarded so writes to
+# fd 8 never fail, and a journal failure cannot break a run. With --raw, stdout only carries the JSON, so it is not
+# copied and run_benchmark sends the summary instead.
+start_journal() {
+    exec 8> >(systemd-cat -t "$JOURNAL_ID" --level-prefix=false 2> /dev/null || true; exec cat > /dev/null)
+    if (( ! raw )); then
+        exec > >(exec tee /dev/fd/8)
+    fi
+    exec 2> >(exec tee /dev/fd/8 >&2)
 }
 
 job_dir=""
@@ -72,7 +90,7 @@ cleanup() {
 # Run a command confined to the job. The order matters: timeout puts itself and everything below it in a new
 # process group so the whole tree can be killed, unshare gives an empty network namespace and setpriv applies the
 # Landlock rules last so they also cover the command itself. The exec means a backgrounded call's PID is timeout's,
-# which is also that group's ID. fd 9 holds the job lock and must not be inherited.
+# which is also that group's ID. fd 8 writes to the journal and fd 9 holds the job lock, so neither is inherited.
 sandboxed() {
     local limit="$1"
     shift
@@ -92,7 +110,7 @@ sandboxed() {
                 HOME="$job_dir/tmp" \
                 TMPDIR="$job_dir/tmp" \
                 LOG_LEVEL="$log_level" \
-                "$@" 9>&-
+                "$@" 8>&- 9>&-
 }
 
 print_status() {
@@ -110,7 +128,7 @@ print_status() {
 run_benchmark() {
     local year="$1" day="$2" threads="$3" multiversion="$4" checksum="$5"
     local upload size check_checksum check_multiversion check_multithreading
-    local settings affinity disable_aslr power_limit_watts started stop_pid paused_here rc
+    local settings affinity disable_aslr power_limit_watts started stop_pid paused_here rc series_json summary_fd
     local -a command
 
     [[ "$year" =~ ^20[0-9]{2}$ ]] || die "invalid year '$year'"
@@ -118,6 +136,7 @@ run_benchmark() {
     [[ "$threads" =~ ^([1-9][0-9]?|n)$ ]] || die "invalid threads '$threads', expected 1-99 or n"
     [[ "$multiversion" =~ ^[A-Za-z0-9_]{1,32}$ ]] || die "invalid multiversion '$multiversion'"
     [[ "$checksum" =~ ^[0-9a-f]{16}$ ]] || die "invalid checksum '$checksum', expected 16 hex digits"
+    log "request: $year-$day threads=$threads multiversion=$multiversion checksum=$checksum"
 
     [[ -x "$AOC_BENCH_BIN" ]] || die "$AOC_BENCH_BIN not found, the main service has not copied a build here yet"
     [[ -f "$HOST_CONFIG" ]] || die "$HOST_CONFIG not found, the main service has not copied a build here yet"
@@ -148,7 +167,7 @@ run_benchmark() {
             touch -- "$PAUSED_FILE"
             paused_here=1
             log "stopping $MAIN_SERVICE, waiting for its current benchmark group to finish..."
-            systemctl stop "$MAIN_SERVICE" 9>&- &
+            systemctl stop "$MAIN_SERVICE" 8>&- 9>&- &
             ;;
     esac
     stop_pid=$!
@@ -173,6 +192,8 @@ run_benchmark() {
     [[ -f "$job_dir/input.txt" && ! -L "$job_dir/input.txt" ]] || die "upload must contain a regular file named input.txt"
     chmod 0555 -- "$job_dir/bench"
     chmod 0444 -- "$job_dir/input.txt"
+    log "received: executable_sha256=$(sha256sum < "$job_dir/bench" | cut -d' ' -f1)" \
+        "stdin_sha256=$(sha256sum < "$job_dir/input.txt" | cut -d' ' -f1)"
 
     set +e
     wait "$stop_pid"
@@ -224,7 +245,14 @@ run_benchmark() {
     affinity="$(jq -r 'select(.cpu_affinity != null) | .cpu_affinity' <<< "$settings")"
     disable_aslr="$(jq -r 'select(.disable_aslr != null) | .disable_aslr' <<< "$settings")"
     command=("$AOC_BENCH_BIN" debug --input "$job_dir/input.txt" --checksum "$checksum")
-    if (( ! raw )); then
+    # With --raw, the JSON is written to a file and sent once the run succeeds. The summary text then only goes to
+    # the journal, so it always lists each run.
+    series_json="$job_dir/tmp/series.json"
+    summary_fd=1
+    if (( raw )); then
+        command+=(--json "$series_json" --summary --runs)
+        summary_fd=8
+    else
         command+=(--summary)
         if (( verbose )); then
             command+=(--runs)
@@ -243,7 +271,7 @@ run_benchmark() {
     command+=(-- "$job_dir/bench" bench "$threads" "$multiversion")
 
     log "running $year-$day threads=$threads multiversion=$multiversion"
-    sandboxed "$BENCH_TIMEOUT" "${command[@]}" < /dev/null &
+    sandboxed "$BENCH_TIMEOUT" "${command[@]}" < /dev/null >&"$summary_fd" &
     child_pid=$!
     set +e
     wait "$child_pid"
@@ -252,6 +280,9 @@ run_benchmark() {
     child_pid=""
     if (( rc != 0 )); then
         die "benchmark run failed with exit code $rc"
+    fi
+    if (( raw )); then
+        cat -- "$series_json"
     fi
 }
 
@@ -275,6 +306,7 @@ main() {
                 esac
             done
             (( ${#words[@]} >= 6 )) || die "usage: run <year> <day> <threads> <multiversion> <checksum> [-v] [--raw]"
+            start_journal
             run_benchmark "${words[@]:1:5}"
             ;;
         status)
