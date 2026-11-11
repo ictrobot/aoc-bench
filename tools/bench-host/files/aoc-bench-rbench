@@ -186,7 +186,7 @@ run_benchmark() {
     (( size > 0 )) || die "no upload received on stdin"
     (( size <= MAX_UPLOAD_BYTES )) || die "upload exceeds $MAX_UPLOAD_BYTES bytes"
     zstd -dq --stdout -- "$upload" \
-        | tar -x -C "$job_dir" --no-same-owner --no-same-permissions -- bench input.txt
+        | tar -x -C "$job_dir" --touch --no-same-owner --no-same-permissions -- bench input.txt
     rm -f -- "$upload"
     [[ -f "$job_dir/bench" && ! -L "$job_dir/bench" ]] || die "upload must contain a regular file named bench"
     [[ -f "$job_dir/input.txt" && ! -L "$job_dir/input.txt" ]] || die "upload must contain a regular file named input.txt"
