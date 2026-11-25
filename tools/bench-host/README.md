@@ -9,6 +9,14 @@ ex44 is the main benchmark host: a [Hetzner EX44](https://www.hetzner.com/dedica
 an [Intel i5-13500](https://www.intel.com/content/www/us/en/products/sku/230580/intel-core-i513500-processor-24m-cache-up-to-4-80-ghz/specifications.html).
 Benchmarks are isolated to the 6 P-cores, leaving the E-cores for the runner process and background tasks.
 
+| Component   | Details                                                        |
+|-------------|----------------------------------------------------------------|
+| CPU         | Intel Core i5-13500 (6P + 8E cores, 20 threads)                |
+| Motherboard | ASUS PRIME B760M-A D4, AMI BIOS 9052 (2025-06-09)              |
+| Memory      | 2 × 32 GB Crucial CT32G4DFD832A DDR4 UDIMM, dual rank, non-ECC |
+| Memory mode | Dual channel, one DIMM per channel, Gear 1                     |
+| DRAM timing | DDR4-3200 22-22-22-52 (JEDEC, no XMP profile)                  |
+
 `ex44-installimage.txt` contains the configuration used for
 Hetzner's [installimage](https://docs.hetzner.com/robot/dedicated-server/operating-systems/installimage/) system.
 
@@ -76,6 +84,17 @@ For single-core benchmarks, it is roughly equivalent to the Socket 939 Venice re
 [Athlon 64 3200+](https://en.wikipedia.org/wiki/Athlon_64), released in April 2005. That makes the single-threaded
 numbers comparable to a much more mainstream 2005 CPU, while still giving a high-end dual-core reference for
 multithreaded solutions.
+
+| Component   | Details                                                                                                |
+|-------------|--------------------------------------------------------------------------------------------------------|
+| CPU         | AMD Athlon 64 X2 3800+ EE (ADO3800IAA5CU, Windsor BH-F2, 65 W, 2.0 GHz, 2 × 512 KB L2), microcode 0x62 |
+| Motherboard | Gigabyte GA-MA78GM-UD2H (AMD 780G / SB700), Award BIOS F8 (2009-10-08)                                 |
+| Memory      | 4 × 2 GB Corsair CM2X2048-6400C5 DDR2 UDIMM, dual rank, non-ECC                                        |
+| Memory mode | 128-bit dual channel, two DIMMs per channel, 2T command rate                                           |
+| DRAM timing | DDR2-800 5-5-5-18 (SPD defaults)                                                                       |
+
+DDR2-800 CL5 provides the same 12.5 ns CAS latency as DDR-400 CL2.5 memory typical of a 2005 Socket 939 system, with
+broadly comparable primary DRAM timings but twice the theoretical memory bandwidth (12.8 vs 6.4 GB/s).
 
 ## rbench
 
